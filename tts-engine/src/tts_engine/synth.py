@@ -7,6 +7,7 @@ from typing import Protocol
 
 from .config import EngineConfig
 from .constants import DEFAULT_VOICE_ID
+from .model_store import resolve_model_source
 
 
 _QWEN_LANGUAGE_MAP = {
@@ -108,12 +109,16 @@ class QwenCustomVoiceSynthesizer:
         self._np = np
         self._torch = torch
         self._model_name = config.qwen_model_name
+        self._model_source = resolve_model_source(config.data_dir, config.qwen_model_name)
         self._default_speaker = config.qwen_default_speaker
 
         dtype = self._resolve_torch_dtype(config.qwen_dtype)
         device_map = config.qwen_device_map
         attn_impl = config.qwen_attn_implementation
-        detail_note = f"model={self._model_name}, device_map={device_map}, dtype={config.qwen_dtype}, attn={attn_impl}"
+        detail_note = (
+            f"model={self._model_name}, source={self._model_source}, "
+            f"device_map={device_map}, dtype={config.qwen_dtype}, attn={attn_impl}"
+        )
 
         if self._is_cuda_device_map(device_map) and not torch.cuda.is_available():
             raise RuntimeError(
@@ -124,7 +129,7 @@ class QwenCustomVoiceSynthesizer:
 
         try:
             self._model = Qwen3TTSModel.from_pretrained(
-                self._model_name,
+                self._model_source,
                 device_map=device_map,
                 dtype=dtype,
                 attn_implementation=attn_impl,
@@ -134,7 +139,7 @@ class QwenCustomVoiceSynthesizer:
             if attn_impl == "flash_attention_2":
                 fallback_attn = "sdpa"
                 self._model = Qwen3TTSModel.from_pretrained(
-                    self._model_name,
+                    self._model_source,
                     device_map=device_map,
                     dtype=dtype,
                     attn_implementation=fallback_attn,

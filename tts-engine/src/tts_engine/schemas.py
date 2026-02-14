@@ -98,7 +98,7 @@ class ChunkingSettings(BaseModel):
 
 
 class SpeakSettings(BaseModel):
-    rate: float = Field(default=1.0, ge=0.5, le=2.0)
+    rate: float = Field(default=1.0, ge=0.25, le=4.0)
     pitch: float = Field(default=1.0, ge=0.5, le=2.0)
     volume: float = Field(default=1.0, ge=0.0, le=2.0)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)

@@ -49,6 +49,28 @@ $env:VOICEREADER_WARMUP_TEXT = "Engine warmup sentence."
 $env:VOICEREADER_WARMUP_LANGUAGE = "auto"
 ```
 
+## Own local model/cache directory (`./.data`)
+
+By default, model/cache ownership now stays inside engine data dir:
+- Hugging Face cache defaults to `./.data/hf-cache`
+- Local model mirrors are under `./.data/models/<org>/<repo>`
+
+Prefetch both Qwen repos (recommended once before app integration):
+
+```powershell
+cd tts-engine
+python ./scripts/prefetch_models.py --data-dir ./.data
+```
+
+What gets downloaded:
+- `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`
+- `Qwen/Qwen3-TTS-12Hz-0.6B-Base`
+
+Runtime behavior:
+- Keep `VOICEREADER_QWEN_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` for current default-voice speak path.
+- Engine will prefer local mirror path under `./.data/models/...` when present.
+- Current speak backend still uses CustomVoice path only; Base is prefetched for upcoming clone integration.
+
 If `-SynthBackend qwen` fails with `Torch not compiled with CUDA enabled`, your env has a CPU-only torch build.
 
 CPU-only test path:
@@ -112,31 +134,31 @@ Run the smoke test in another terminal:
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke_test.ps1 -Token "dev-token"
+python ./scripts/smoke_test.py --token dev-token
 ```
 
 To test WS fallback auth via `Sec-WebSocket-Protocol`:
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke_test.ps1 -Token "dev-token" -UseSubprotocolAuth
+python ./scripts/smoke_test.py --token dev-token --use-subprotocol-auth
 ```
 
 One-command flow (auto start + auto stop engine):
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_smoke_with_engine.ps1 -Token "dev-token"
+python ./scripts/run_smoke_with_engine.py --token dev-token
 ```
 
 Force real backend for smoke test:
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_smoke_with_engine.ps1 -Token "dev-token" -SynthBackend qwen
+python ./scripts/run_smoke_with_engine.py --token dev-token --synth-backend qwen
 ```
 
-`run_smoke_with_engine.ps1` starts engine on a free localhost port, waits for health, runs smoke checks, calls `/v1/quit`, and force-stops the process if needed.
+`run_smoke_with_engine.py` starts engine on a free localhost port, waits for health, runs smoke checks, calls `/v1/quit`, and force-stops the process if needed.
 
 ## Stream + hear audio (no cloning)
 
@@ -144,33 +166,26 @@ With engine already running:
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\stream_play_test.ps1 -Token "dev-token" -VoiceId "0"
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 160 --prefetch-queue-size 5 --start-playback-after 2
 ```
 
 This script:
 - calls `/v1/speak` with a multi-sentence string
 - streams WS `AUDIO_CHUNK` events
-- plays each chunk immediately through the default audio output
+- plays each chunk immediately on Windows (no-op playback on non-Windows)
 - prints terminal job event
-
-Queue-based playback client (recommended):
-
-```powershell
-cd tts-engine
-python .\scripts\stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 160 --prefetch-queue-size 5 --start-playback-after 2
-```
 
 Optional flags:
 
 ```powershell
 # force smaller chunks to stress chunking behavior
-powershell -ExecutionPolicy Bypass -File .\scripts\stream_play_test.ps1 -Token "dev-token" -VoiceId "0" -ChunkMaxChars 120
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 120 --prefetch-queue-size 5 --start-playback-after 2
 
 # save the combined streamed audio
-powershell -ExecutionPolicy Bypass -File .\scripts\stream_play_test.ps1 -Token "dev-token" -VoiceId "0" -SaveWavPath ".\\out_stream.wav"
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --save-wav-path ./out_stream.wav --prefetch-queue-size 5 --start-playback-after 2
 
 # quit engine when done
-powershell -ExecutionPolicy Bypass -File .\scripts\stream_play_test.ps1 -Token "dev-token" -VoiceId "0" -QuitOnDone
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --quit-on-done --prefetch-queue-size 5 --start-playback-after 2
 ```
 
 When backend is `auto`:
@@ -181,7 +196,7 @@ One-command variant (auto start engine, stream+play, auto shutdown):
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0"
+python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0
 ```
 
 Defaults in this one-command flow:
@@ -191,7 +206,7 @@ Defaults in this one-command flow:
 - warmup is triggered with `wait=true` before speak
 
 Playback controls (engine-side):
-- `Rate` (`0.5` to `2.0`) time-scales chunk audio
+- `Rate` (`0.25` to `4.0`) time-scales chunk audio
 - `Volume` (`0.0` to `2.0`) applies gain to PCM
 - `Pitch` is currently reserved (accepted but no-op)
 
@@ -199,21 +214,21 @@ Example:
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -Rate 1.25 -Volume 1.1
+python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0 --rate 1.25 --volume 1.1
 ```
 
 Force real backend (no mock fallback):
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -SynthBackend qwen
+python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0 --synth-backend qwen
 ```
 
 Force CPU Qwen test (useful when CUDA torch is not installed yet):
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -SynthBackend qwen -QwenDeviceMap cpu -QwenDtype float32
+python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0 --synth-backend qwen --qwen-device-map cpu --qwen-dtype float32
 ```
 
 ## Performance notes (chunk pauses)
@@ -221,7 +236,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.p
 Long pauses between heard chunks can come from:
 - CPU inference (`QwenDeviceMap=cpu`) which is much slower than CUDA on this model size.
 - Sequential per-chunk generation: the engine generates chunk N+1 only after chunk N has completed.
-- Synchronous playback in the test client (`PlaySync`) to preserve chunk order.
+- Synchronous playback in the Windows test client path to preserve chunk order.
 
 How to diagnose quickly:
 - In `stream_play_queue_test.py`, check printed timing lines:

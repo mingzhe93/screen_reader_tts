@@ -201,8 +201,8 @@ async def _run(args: argparse.Namespace) -> int:
         raise RuntimeError("start-playback-after must be >= 1")
     if args.start_playback_after > args.prefetch_queue_size:
         raise RuntimeError("start-playback-after cannot exceed prefetch-queue-size")
-    if args.rate < 0.5 or args.rate > 2.0:
-        raise RuntimeError("rate must be in [0.5, 2.0]")
+    if args.rate < 0.25 or args.rate > 4.0:
+        raise RuntimeError("rate must be in [0.25, 4.0]")
     if args.pitch < 0.5 or args.pitch > 2.0:
         raise RuntimeError("pitch must be in [0.5, 2.0]")
     if args.volume < 0.0 or args.volume > 2.0:

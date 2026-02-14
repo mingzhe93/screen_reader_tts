@@ -17,6 +17,7 @@ from .config import (
     load_token,
     resolve_data_dir,
 )
+from .model_store import configure_hf_cache
 
 
 def main() -> int:
@@ -57,6 +58,7 @@ def main() -> int:
 
     port = int(bootstrap.get("port", args.port))
     data_dir = resolve_data_dir(str(bootstrap.get("data_dir")) if bootstrap.get("data_dir") else args.data_dir)
+    configure_hf_cache(data_dir)
     _ensure_websocket_runtime()
 
     config = EngineConfig(
