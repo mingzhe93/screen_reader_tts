@@ -13,6 +13,9 @@ DEFAULT_QWEN_DEVICE_MAP = "cuda:0"
 DEFAULT_QWEN_DTYPE = "bfloat16"
 DEFAULT_QWEN_ATTN = "flash_attention_2"
 DEFAULT_QWEN_SPEAKER = "Ryan"
+DEFAULT_WARMUP_ON_STARTUP = True
+DEFAULT_WARMUP_TEXT = "Engine warmup sentence."
+DEFAULT_WARMUP_LANGUAGE = "auto"
 
 
 @dataclass(slots=True, frozen=True)
@@ -29,10 +32,22 @@ class EngineConfig:
     qwen_dtype: str = DEFAULT_QWEN_DTYPE
     qwen_attn_implementation: str = DEFAULT_QWEN_ATTN
     qwen_default_speaker: str = DEFAULT_QWEN_SPEAKER
+    warmup_on_startup: bool = DEFAULT_WARMUP_ON_STARTUP
+    warmup_text: str = DEFAULT_WARMUP_TEXT
+    warmup_language: str = DEFAULT_WARMUP_LANGUAGE
 
     @property
     def device(self) -> str:
-        return "cuda"
+        normalized = self.qwen_device_map.strip().lower()
+        if normalized.startswith("cuda"):
+            return "cuda"
+        if normalized.startswith("cpu"):
+            return "cpu"
+        if normalized.startswith("mps"):
+            return "mps"
+        if ":" in normalized:
+            return normalized.split(":", maxsplit=1)[0]
+        return normalized or "unknown"
 
 
 def resolve_data_dir(raw_path: str | None) -> Path:
@@ -54,3 +69,15 @@ def load_token(explicit_token: str | None, token_env: str = DEFAULT_TOKEN_ENV) -
 def load_env_config_value(env_name: str, default: str) -> str:
     value = os.getenv(env_name, "").strip()
     return value or default
+
+
+def load_env_bool(env_name: str, default: bool) -> bool:
+    raw = os.getenv(env_name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default

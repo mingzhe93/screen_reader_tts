@@ -42,6 +42,11 @@ $env:VOICEREADER_QWEN_SPEAKER = "Ryan"
 $env:VOICEREADER_QWEN_DEVICE_MAP = "cuda:0"
 $env:VOICEREADER_QWEN_DTYPE = "bfloat16"
 $env:VOICEREADER_QWEN_ATTN_IMPLEMENTATION = "flash_attention_2"
+
+# Warmup behavior
+$env:VOICEREADER_WARMUP_ON_STARTUP = "true"
+$env:VOICEREADER_WARMUP_TEXT = "Engine warmup sentence."
+$env:VOICEREADER_WARMUP_LANGUAGE = "auto"
 ```
 
 If `-SynthBackend qwen` fails with `Torch not compiled with CUDA enabled`, your env has a CPU-only torch build.
@@ -87,6 +92,7 @@ Invoke-RestMethod `
 ```
 
 Check `health.runtime` to confirm whether real Qwen backend is active or mock fallback is being used.
+Use `POST /v1/warmup` for explicit warmup, or `POST /v1/models/activate` to switch/reload model settings and warm up in one call.
 
 Current real-inference limitation:
 - `backend=qwen_custom_voice` supports `voice_id: "0"` only (default speaker path).
@@ -147,11 +153,18 @@ This script:
 - plays each chunk immediately through the default audio output
 - prints terminal job event
 
+Queue-based playback client (recommended):
+
+```powershell
+cd tts-engine
+python .\scripts\stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 160 --prefetch-queue-size 5 --start-playback-after 2
+```
+
 Optional flags:
 
 ```powershell
 # force smaller chunks to stress chunking behavior
-powershell -ExecutionPolicy Bypass -File .\scripts\stream_play_test.ps1 -Token "dev-token" -VoiceId "0" -ChunkMaxChars 100
+powershell -ExecutionPolicy Bypass -File .\scripts\stream_play_test.ps1 -Token "dev-token" -VoiceId "0" -ChunkMaxChars 120
 
 # save the combined streamed audio
 powershell -ExecutionPolicy Bypass -File .\scripts\stream_play_test.ps1 -Token "dev-token" -VoiceId "0" -SaveWavPath ".\\out_stream.wav"
@@ -168,21 +181,39 @@ One-command variant (auto start engine, stream+play, auto shutdown):
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -ChunkMaxChars 100
+powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0"
+```
+
+Defaults in this one-command flow:
+- `ChunkMaxChars=160`
+- `PrefetchQueueSize=5`
+- `StartPlaybackAfter=2`
+- warmup is triggered with `wait=true` before speak
+
+Playback controls (engine-side):
+- `Rate` (`0.5` to `2.0`) time-scales chunk audio
+- `Volume` (`0.0` to `2.0`) applies gain to PCM
+- `Pitch` is currently reserved (accepted but no-op)
+
+Example:
+
+```powershell
+cd tts-engine
+powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -Rate 1.25 -Volume 1.1
 ```
 
 Force real backend (no mock fallback):
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -SynthBackend qwen -ChunkMaxChars 100
+powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -SynthBackend qwen
 ```
 
 Force CPU Qwen test (useful when CUDA torch is not installed yet):
 
 ```powershell
 cd tts-engine
-powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -SynthBackend qwen -QwenDeviceMap cpu -QwenDtype float32 -ChunkMaxChars 100
+powershell -ExecutionPolicy Bypass -File .\scripts\run_stream_play_with_engine.ps1 -Token "dev-token" -VoiceId "0" -SynthBackend qwen -QwenDeviceMap cpu -QwenDtype float32
 ```
 
 ## Performance notes (chunk pauses)
@@ -193,14 +224,34 @@ Long pauses between heard chunks can come from:
 - Synchronous playback in the test client (`PlaySync`) to preserve chunk order.
 
 How to diagnose quickly:
-- In `stream_play_test.ps1`, check printed timing lines:
+- In `stream_play_queue_test.py`, check printed timing lines:
   - `gap_since_prev` approximates model/generation delay between chunk arrivals.
+  - `playback_wait` shows queue buffer wait before playback.
   - `playback_dur` is output audio duration for each chunk.
 - Verify `/v1/health` reports `runtime.backend=qwen_custom_voice` and `fallback_active=false`.
+- Verify `runtime.warmup.status=ready` before latency-sensitive speaks.
 
 How to reduce pauses:
 - Use CUDA-enabled torch (`QwenDeviceMap=cuda:0`, `QwenDtype=bfloat16`).
-- Keep chunk size moderate (`ChunkMaxChars=100` to `160`) for earlier first chunk.
+- Use queue buffering (`PrefetchQueueSize=5`, `StartPlaybackAfter=2`).
+- Trigger warmup (`POST /v1/warmup` with `wait=true`) on startup and after model changes.
+- Keep chunk size moderate (`ChunkMaxChars=140` to `180`) for earlier first chunk with fewer boundaries.
+
+Cancel behavior details:
+- `POST /v1/cancel` is honored at chunk boundaries.
+- If cancel arrives while a chunk is generating, that in-flight chunk is dropped and not streamed.
+- WS terminal event is `JOB_CANCELED`.
+
+Example model switch + warmup call:
+
+```powershell
+Invoke-RestMethod `
+  -Method POST `
+  -Uri "http://127.0.0.1:8765/v1/models/activate" `
+  -Headers @{ Authorization = "Bearer dev-token" } `
+  -ContentType "application/json" `
+  -Body '{"synth_backend":"qwen","qwen_device_map":"cuda:0","qwen_dtype":"bfloat16","warmup_wait":true,"warmup_force":true,"reason":"app_model_switch"}'
+```
 
 ## Stopping the engine
 

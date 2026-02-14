@@ -3,7 +3,7 @@ param(
   [string]$Token = "dev-token",
   [string]$VoiceId = "0",
   [int]$WsTimeoutSec = 120,
-  [int]$ChunkMaxChars = 120,
+  [int]$ChunkMaxChars = 160,
   [switch]$UseSubprotocolAuth,
   [switch]$QuitOnDone,
   [string]$SaveWavPath = "",

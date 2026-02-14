@@ -28,6 +28,8 @@ $port = Get-FreePort
 $baseUrl = "http://127.0.0.1:$port"
 $stdoutLog = Join-Path $env:TEMP ("tts_engine_stdout_{0}.log" -f [guid]::NewGuid())
 $stderrLog = Join-Path $env:TEMP ("tts_engine_stderr_{0}.log" -f [guid]::NewGuid())
+$venvPython = Join-Path $engineRoot ".venv\\Scripts\\python.exe"
+$pythonExe = if (Test-Path $venvPython) { $venvPython } else { "python" }
 
 $env:SPEAK_SELECTION_ENGINE_TOKEN = $Token
 $env:PYTHONPATH = (Join-Path $engineRoot "src")
@@ -47,7 +49,7 @@ if ($QwenSpeaker) {
 
 Write-Host "Starting engine on $baseUrl ..."
 $proc = Start-Process `
-  -FilePath "python" `
+  -FilePath $pythonExe `
   -ArgumentList @("-m", "tts_engine", "--server", "--port", "$port") `
   -WorkingDirectory $engineRoot `
   -RedirectStandardOutput $stdoutLog `

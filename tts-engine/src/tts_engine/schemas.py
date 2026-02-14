@@ -26,6 +26,16 @@ class HealthCapabilities(BaseModel):
     languages: list[str]
 
 
+class WarmupStatus(BaseModel):
+    status: str
+    runs: int
+    last_reason: str | None = None
+    last_started_at: datetime | None = None
+    last_completed_at: datetime | None = None
+    last_duration_ms: int | None = None
+    last_error: str | None = None
+
+
 class RuntimeStatus(BaseModel):
     backend: str
     model_loaded: bool
@@ -33,6 +43,7 @@ class RuntimeStatus(BaseModel):
     detail: str | None = None
     supports_default_voice: bool = True
     supports_cloned_voices: bool = False
+    warmup: WarmupStatus
 
 
 class HealthResponse(BaseModel):
@@ -134,3 +145,46 @@ class CancelRequest(BaseModel):
 
 class CancelResponse(BaseModel):
     canceled: bool
+
+
+class WarmupRequest(BaseModel):
+    wait: bool = False
+    force: bool = False
+    reason: str | None = None
+
+
+class WarmupResponse(BaseModel):
+    accepted: bool
+    warmup: WarmupStatus
+
+
+class ActivateModelRequest(BaseModel):
+    synth_backend: str | None = None
+    active_model_id: str | None = None
+    qwen_model_name: str | None = None
+    qwen_device_map: str | None = None
+    qwen_dtype: str | None = None
+    qwen_attn_implementation: str | None = None
+    qwen_default_speaker: str | None = None
+    warmup_wait: bool = True
+    warmup_force: bool = True
+    reason: str | None = None
+
+    @field_validator("synth_backend")
+    @classmethod
+    def validate_synth_backend(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized not in {"auto", "qwen", "mock"}:
+            raise ValueError("synth_backend must be one of: auto, qwen, mock")
+        return normalized
+
+
+class ActivateModelResponse(BaseModel):
+    reloaded: bool
+    warmup_accepted: bool
+    active_model_id: str
+    runtime: RuntimeStatus

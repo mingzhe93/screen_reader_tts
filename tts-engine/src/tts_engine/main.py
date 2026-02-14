@@ -12,6 +12,7 @@ from .app import create_app
 from .config import (
     DEFAULT_TOKEN_ENV,
     EngineConfig,
+    load_env_bool,
     load_env_config_value,
     load_token,
     resolve_data_dir,
@@ -75,6 +76,9 @@ def main() -> int:
             "flash_attention_2",
         ),
         qwen_default_speaker=load_env_config_value("VOICEREADER_QWEN_SPEAKER", "Ryan"),
+        warmup_on_startup=load_env_bool("VOICEREADER_WARMUP_ON_STARTUP", True),
+        warmup_text=load_env_config_value("VOICEREADER_WARMUP_TEXT", "Engine warmup sentence."),
+        warmup_language=load_env_config_value("VOICEREADER_WARMUP_LANGUAGE", "auto"),
     )
 
     app = create_app(config)

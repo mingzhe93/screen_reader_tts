@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
+import time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Request, WebSocket
@@ -14,6 +18,8 @@ from .constants import DEFAULT_VOICE_ID
 from .errors import EngineError, install_exception_handlers
 from .jobs import JobManager, TERMINAL_EVENT_TYPES
 from .schemas import (
+    ActivateModelRequest,
+    ActivateModelResponse,
     CancelRequest,
     CancelResponse,
     CloneVoiceRequest,
@@ -24,50 +30,132 @@ from .schemas import (
     RuntimeStatus,
     SpeakRequest,
     SpeakResponse,
+    WarmupRequest,
+    WarmupResponse,
+    WarmupStatus,
 )
 from .synth import create_synthesizer
 from .voices import VoiceStore
 
 
 def create_app(config: EngineConfig) -> FastAPI:
-    app = FastAPI(title="VoiceReader Engine", version=config.engine_version)
+    engine_config = config
+    app = FastAPI(title="VoiceReader Engine", version=engine_config.engine_version)
     install_exception_handlers(app)
 
-    synthesizer = create_synthesizer(config)
-    runtime_model_id = _resolve_runtime_model_id(config, synthesizer.status.backend)
-    voice_store = VoiceStore(config.data_dir, runtime_model_id)
+    synthesizer = create_synthesizer(engine_config)
+    runtime_model_id = _resolve_runtime_model_id(engine_config, synthesizer.status.backend)
+    voice_store = VoiceStore(engine_config.data_dir, runtime_model_id)
     jobs = JobManager(synthesizer)
 
-    app.state.config = config
+    app.state.config = engine_config
     app.state.synthesizer = synthesizer
     app.state.voice_store = voice_store
     app.state.jobs = jobs
+    app.state.runtime_model_id = runtime_model_id
+    app.state.warmup_state = _new_warmup_state()
+    app.state.warmup_task = None
+    runtime_lock = asyncio.Lock()
+
+    def _warmup_snapshot() -> WarmupStatus:
+        state = app.state.warmup_state
+        return WarmupStatus(
+            status=state["status"],
+            runs=state["runs"],
+            last_reason=state["last_reason"],
+            last_started_at=state["last_started_at"],
+            last_completed_at=state["last_completed_at"],
+            last_duration_ms=state["last_duration_ms"],
+            last_error=state["last_error"],
+        )
+
+    def _runtime_snapshot() -> RuntimeStatus:
+        return RuntimeStatus(
+            backend=synthesizer.status.backend,
+            model_loaded=synthesizer.status.model_loaded,
+            fallback_active=synthesizer.status.fallback_active,
+            detail=synthesizer.status.detail,
+            supports_default_voice=synthesizer.status.supports_default_voice,
+            supports_cloned_voices=synthesizer.status.supports_cloned_voices,
+            warmup=_warmup_snapshot(),
+        )
+
+    def _sync_runtime_state() -> None:
+        app.state.config = engine_config
+        app.state.synthesizer = synthesizer
+        app.state.voice_store = voice_store
+        app.state.jobs = jobs
+        app.state.runtime_model_id = runtime_model_id
+
+    async def _run_warmup(reason: str) -> None:
+        state = app.state.warmup_state
+        state["status"] = "running"
+        state["last_reason"] = reason
+        state["last_started_at"] = datetime.now(timezone.utc)
+        state["last_error"] = None
+
+        started = time.perf_counter()
+        try:
+            await asyncio.to_thread(synthesizer.warmup, engine_config.warmup_text, engine_config.warmup_language)
+            duration_ms = int((time.perf_counter() - started) * 1000.0)
+            state["status"] = "ready"
+            state["runs"] += 1
+            state["last_duration_ms"] = duration_ms
+            state["last_completed_at"] = datetime.now(timezone.utc)
+            state["last_error"] = None
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000.0)
+            state["status"] = "error"
+            state["runs"] += 1
+            state["last_duration_ms"] = duration_ms
+            state["last_completed_at"] = datetime.now(timezone.utc)
+            state["last_error"] = str(exc)
+        finally:
+            app.state.warmup_task = None
+
+    async def trigger_warmup(wait: bool, force: bool, reason: str) -> bool:
+        current_task = app.state.warmup_task
+        if current_task is not None and not current_task.done():
+            if wait:
+                await current_task
+            return False
+
+        current_status = app.state.warmup_state["status"]
+        should_start = force or current_status in {"not_started", "error"}
+        if not should_start:
+            return False
+
+        task = asyncio.create_task(_run_warmup(reason=reason))
+        app.state.warmup_task = task
+        if wait:
+            await task
+        return True
+
+    app.state.trigger_warmup = trigger_warmup
+
+    @app.on_event("startup")
+    async def _startup_warmup() -> None:
+        if engine_config.warmup_on_startup:
+            await trigger_warmup(wait=False, force=False, reason="startup")
 
     def _require_http_auth(request: Request) -> None:
-        verify_http_request(request, config.token)
+        verify_http_request(request, engine_config.token)
 
     router = APIRouter(prefix="/v1", dependencies=[Depends(_require_http_auth)])
 
     @router.get("/health", response_model=HealthResponse)
     async def get_health() -> HealthResponse:
         return HealthResponse(
-            engine_version=config.engine_version,
+            engine_version=engine_config.engine_version,
             active_model_id=runtime_model_id,
-            device=config.device,
+            device=engine_config.device,
             capabilities=HealthCapabilities(
                 supports_voice_clone=synthesizer.status.supports_voice_clone,
                 supports_audio_chunk_stream=True,
                 supports_true_streaming_inference=False,
                 languages=["zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "auto"],
             ),
-            runtime=RuntimeStatus(
-                backend=synthesizer.status.backend,
-                model_loaded=synthesizer.status.model_loaded,
-                fallback_active=synthesizer.status.fallback_active,
-                detail=synthesizer.status.detail,
-                supports_default_voice=synthesizer.status.supports_default_voice,
-                supports_cloned_voices=synthesizer.status.supports_cloned_voices,
-            ),
+            runtime=_runtime_snapshot(),
         )
 
     @router.get("/voices", response_model=ListVoicesResponse)
@@ -120,47 +208,126 @@ def create_app(config: EngineConfig) -> FastAPI:
 
     @router.post("/speak", response_model=SpeakResponse)
     async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
-        text = payload.text.strip()
-        if not text:
-            raise EngineError(code="EMPTY_TEXT", message="Text must not be empty", status_code=400)
+        async with runtime_lock:
+            text = payload.text.strip()
+            if not text:
+                raise EngineError(code="EMPTY_TEXT", message="Text must not be empty", status_code=400)
 
-        if not voice_store.voice_exists(payload.voice_id):
-            raise EngineError(
-                code="VOICE_NOT_FOUND",
-                message=f"Voice {payload.voice_id} was not found",
-                status_code=404,
+            if not voice_store.voice_exists(payload.voice_id):
+                raise EngineError(
+                    code="VOICE_NOT_FOUND",
+                    message=f"Voice {payload.voice_id} was not found",
+                    status_code=404,
+                )
+            if not synthesizer.supports_voice_id(payload.voice_id):
+                raise EngineError(
+                    code="MODEL_NOT_READY",
+                    message=(
+                        f'Configured synthesis backend "{synthesizer.status.backend}" '
+                        f'does not support voice_id "{payload.voice_id}" yet'
+                    ),
+                    status_code=409,
+                )
+
+            job = await jobs.start_job(
+                voice_id=payload.voice_id,
+                text=text,
+                max_chars=payload.settings.chunking.max_chars,
+                language=payload.language,
+                rate=payload.settings.rate,
+                pitch=payload.settings.pitch,
+                volume=payload.settings.volume,
             )
-        if not synthesizer.supports_voice_id(payload.voice_id):
-            raise EngineError(
-                code="MODEL_NOT_READY",
-                message=(
-                    f'Configured synthesis backend "{synthesizer.status.backend}" '
-                    f'does not support voice_id "{payload.voice_id}" yet'
-                ),
-                status_code=409,
-            )
 
-        job = await jobs.start_job(
-            voice_id=payload.voice_id,
-            text=text,
-            max_chars=payload.settings.chunking.max_chars,
-            language=payload.language,
-        )
-
-        ws_scheme = "wss" if request.url.scheme == "https" else "ws"
-        port = request.url.port or config.port
-        ws_url = f"{ws_scheme}://127.0.0.1:{port}/v1/stream/{job.job_id}"
-        return SpeakResponse(job_id=job.job_id, ws_url=ws_url)
+            ws_scheme = "wss" if request.url.scheme == "https" else "ws"
+            port = request.url.port or engine_config.port
+            ws_url = f"{ws_scheme}://127.0.0.1:{port}/v1/stream/{job.job_id}"
+            return SpeakResponse(job_id=job.job_id, ws_url=ws_url)
 
     @router.post("/cancel", response_model=CancelResponse)
     async def cancel(payload: CancelRequest) -> CancelResponse:
-        if not await jobs.cancel_job(payload.job_id):
-            raise EngineError(
-                code="JOB_NOT_FOUND",
-                message=f"Job {payload.job_id} was not found",
-                status_code=404,
+        async with runtime_lock:
+            if not await jobs.cancel_job(payload.job_id):
+                raise EngineError(
+                    code="JOB_NOT_FOUND",
+                    message=f"Job {payload.job_id} was not found",
+                    status_code=404,
+                )
+            return CancelResponse(canceled=True)
+
+    @router.post("/models/activate", response_model=ActivateModelResponse)
+    async def activate_model(payload: ActivateModelRequest | None = None) -> ActivateModelResponse:
+        nonlocal engine_config, synthesizer, runtime_model_id, voice_store, jobs
+        request_payload = payload or ActivateModelRequest()
+        async with runtime_lock:
+            if await jobs.has_active_job():
+                raise EngineError(
+                    code="JOB_IN_PROGRESS",
+                    message="Cannot activate a model while a speak job is running",
+                    status_code=409,
+                )
+
+            current_warmup_task = app.state.warmup_task
+            if current_warmup_task is not None and not current_warmup_task.done():
+                await current_warmup_task
+
+            next_config = replace(
+                engine_config,
+                synth_backend=request_payload.synth_backend or engine_config.synth_backend,
+                active_model_id=_coalesce_str(request_payload.active_model_id, engine_config.active_model_id),
+                qwen_model_name=_coalesce_str(request_payload.qwen_model_name, engine_config.qwen_model_name),
+                qwen_device_map=_coalesce_str(request_payload.qwen_device_map, engine_config.qwen_device_map),
+                qwen_dtype=_coalesce_str(request_payload.qwen_dtype, engine_config.qwen_dtype),
+                qwen_attn_implementation=_coalesce_str(
+                    request_payload.qwen_attn_implementation,
+                    engine_config.qwen_attn_implementation,
+                ),
+                qwen_default_speaker=_coalesce_str(
+                    request_payload.qwen_default_speaker,
+                    engine_config.qwen_default_speaker,
+                ),
             )
-        return CancelResponse(canceled=True)
+
+            try:
+                next_synthesizer = await asyncio.to_thread(create_synthesizer, next_config)
+            except Exception as exc:
+                raise EngineError(
+                    code="MODEL_NOT_READY",
+                    message=f"Failed to activate model/backend: {exc}",
+                    status_code=409,
+                ) from exc
+
+            engine_config = next_config
+            synthesizer = next_synthesizer
+            runtime_model_id = _resolve_runtime_model_id(engine_config, synthesizer.status.backend)
+            voice_store = VoiceStore(engine_config.data_dir, runtime_model_id)
+            jobs = JobManager(synthesizer)
+            _sync_runtime_state()
+
+            app.state.warmup_state = _new_warmup_state()
+            app.state.warmup_task = None
+            warmup_accepted = await trigger_warmup(
+                wait=request_payload.warmup_wait,
+                force=request_payload.warmup_force,
+                reason=(request_payload.reason or "model_activate"),
+            )
+
+            return ActivateModelResponse(
+                reloaded=True,
+                warmup_accepted=warmup_accepted,
+                active_model_id=runtime_model_id,
+                runtime=_runtime_snapshot(),
+            )
+
+    @router.post("/warmup", response_model=WarmupResponse)
+    async def warmup(payload: WarmupRequest | None = None) -> WarmupResponse:
+        request_payload = payload or WarmupRequest()
+        accepted = await trigger_warmup(
+            wait=request_payload.wait,
+            force=request_payload.force,
+            reason=(request_payload.reason or "api"),
+        )
+        return WarmupResponse(accepted=accepted, warmup=_warmup_snapshot())
 
     @router.post("/quit")
     async def quit_engine() -> dict[str, bool]:
@@ -173,7 +340,7 @@ def create_app(config: EngineConfig) -> FastAPI:
 
     @app.websocket("/v1/stream/{job_id}")
     async def stream_job(websocket: WebSocket, job_id: UUID) -> None:
-        authorized, subprotocol = await verify_websocket(websocket, config.token)
+        authorized, subprotocol = await verify_websocket(websocket, engine_config.token)
         if not authorized:
             await websocket.close(code=4401)
             return
@@ -209,6 +376,25 @@ def create_app(config: EngineConfig) -> FastAPI:
                 await websocket.close()
 
     return app
+
+
+def _new_warmup_state() -> dict[str, object]:
+    return {
+        "status": "not_started",
+        "runs": 0,
+        "last_reason": None,
+        "last_started_at": None,
+        "last_completed_at": None,
+        "last_duration_ms": None,
+        "last_error": None,
+    }
+
+
+def _coalesce_str(candidate: str | None, fallback: str) -> str:
+    if candidate is None:
+        return fallback
+    normalized = candidate.strip()
+    return normalized or fallback
 
 
 def _validate_reference_audio(path: str | None, wav_base64: str | None) -> None:

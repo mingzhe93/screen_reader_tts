@@ -51,6 +51,9 @@ class BaseSynthesizer(Protocol):
     def synthesize_chunk(self, chunk_text: str, voice_id: str, language: str | None = None) -> SynthesizedAudio:
         raise NotImplementedError
 
+    def warmup(self, text: str, language: str | None = None) -> None:
+        raise NotImplementedError
+
 
 class MockSynthesizer:
     """Fallback backend that produces deterministic PCM tones per text chunk."""
@@ -85,6 +88,10 @@ class MockSynthesizer:
             waveform.append(sample)
 
         return SynthesizedAudio(pcm_s16le=waveform.tobytes(), sample_rate=self._sample_rate, channels=1)
+
+    def warmup(self, text: str, language: str | None = None) -> None:
+        # Lightweight no-op warmup for mock backend.
+        _ = self.synthesize_chunk(text, voice_id=DEFAULT_VOICE_ID, language=language)
 
 
 class QwenCustomVoiceSynthesizer:
@@ -181,6 +188,10 @@ class QwenCustomVoiceSynthesizer:
             sample_rate=int(sample_rate),
             channels=1,
         )
+
+    def warmup(self, text: str, language: str | None = None) -> None:
+        # Run a tiny generation to trigger lazy graph/runtime allocations.
+        self.synthesize_chunk(text, voice_id=DEFAULT_VOICE_ID, language=language)
 
     def _resolve_torch_dtype(self, dtype: str):
         normalized = dtype.strip().lower()

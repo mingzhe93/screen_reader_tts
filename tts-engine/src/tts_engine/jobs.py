@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
+import numpy as np
+
 from .chunking import split_text_into_chunks
-from .synth import BaseSynthesizer
+from .synth import BaseSynthesizer, SynthesizedAudio
 
 
 TERMINAL_EVENT_TYPES = {"JOB_DONE", "JOB_CANCELED", "JOB_ERROR"}
@@ -21,6 +23,9 @@ class JobState:
     text: str
     language: str | None
     max_chars: int
+    rate: float
+    pitch: float
+    volume: float
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -36,7 +41,16 @@ class JobManager:
         self._active_job_id: UUID | None = None
         self._lock = asyncio.Lock()
 
-    async def start_job(self, voice_id: str, text: str, max_chars: int, language: str | None) -> JobState:
+    async def start_job(
+        self,
+        voice_id: str,
+        text: str,
+        max_chars: int,
+        language: str | None,
+        rate: float,
+        pitch: float,
+        volume: float,
+    ) -> JobState:
         async with self._lock:
             if self._active_job_id is not None:
                 active_job = self._jobs.get(self._active_job_id)
@@ -49,6 +63,9 @@ class JobManager:
                 text=text,
                 language=language,
                 max_chars=max_chars,
+                rate=rate,
+                pitch=pitch,
+                volume=volume,
             )
             self._jobs[job.job_id] = job
             self._active_job_id = job.job_id
@@ -82,6 +99,15 @@ class JobManager:
                 return
             job.subscribers.discard(queue)
 
+    async def has_active_job(self) -> bool:
+        async with self._lock:
+            if self._active_job_id is None:
+                return False
+            active_job = self._jobs.get(self._active_job_id)
+            if active_job is None:
+                return False
+            return not active_job.done_event.is_set()
+
     async def _run_job(self, job: JobState) -> None:
         try:
             await self._publish(
@@ -112,6 +138,34 @@ class JobManager:
                     job.voice_id,
                     job.language,
                 )
+                if job.cancel_event.is_set():
+                    await self._publish(
+                        job,
+                        {
+                            "type": "JOB_CANCELED",
+                            "job_id": str(job.job_id),
+                        },
+                        terminal=True,
+                    )
+                    return
+
+                synthesized = _apply_playback_controls(
+                    synthesized,
+                    rate=job.rate,
+                    pitch=job.pitch,
+                    volume=job.volume,
+                )
+                if job.cancel_event.is_set():
+                    await self._publish(
+                        job,
+                        {
+                            "type": "JOB_CANCELED",
+                            "job_id": str(job.job_id),
+                        },
+                        terminal=True,
+                    )
+                    return
+
                 event = {
                     "type": "AUDIO_CHUNK",
                     "job_id": str(job.job_id),
@@ -217,3 +271,49 @@ class JobManager:
         if not job.history:
             return False
         return job.history[-1].get("type") in TERMINAL_EVENT_TYPES
+
+
+def _apply_playback_controls(
+    audio: SynthesizedAudio,
+    rate: float,
+    pitch: float,
+    volume: float,
+) -> SynthesizedAudio:
+    # Keep a fast path for default settings.
+    if rate == 1.0 and pitch == 1.0 and volume == 1.0:
+        return audio
+
+    samples = np.frombuffer(audio.pcm_s16le, dtype=np.int16).astype(np.float32)
+    if samples.size == 0:
+        return audio
+
+    # Playback-speed control (rate): resample to shorter/longer PCM at same sample rate.
+    if rate != 1.0:
+        target_len = max(1, int(round(samples.shape[0] / rate)))
+        samples = _resample_linear(samples, target_len)
+
+    # Reserved for future model-aware pitch handling.
+    _ = pitch
+
+    if volume != 1.0:
+        samples *= volume
+
+    np.clip(samples, -32768.0, 32767.0, out=samples)
+    return SynthesizedAudio(
+        pcm_s16le=samples.astype(np.int16).tobytes(),
+        sample_rate=audio.sample_rate,
+        channels=audio.channels,
+    )
+
+
+def _resample_linear(samples: np.ndarray, target_len: int) -> np.ndarray:
+    if target_len <= 1:
+        return np.asarray([samples[0]], dtype=np.float32)
+    if samples.shape[0] <= 1:
+        return np.full((target_len,), float(samples[0]), dtype=np.float32)
+    if target_len == samples.shape[0]:
+        return samples
+
+    src_x = np.linspace(0.0, float(samples.shape[0] - 1), num=samples.shape[0], dtype=np.float32)
+    dst_x = np.linspace(0.0, float(samples.shape[0] - 1), num=target_len, dtype=np.float32)
+    return np.interp(dst_x, src_x, samples).astype(np.float32)
