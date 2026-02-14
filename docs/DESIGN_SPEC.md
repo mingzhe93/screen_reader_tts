@@ -1,4 +1,4 @@
-﻿# DESIGN_SPEC.md - Speak Selection (Phase 1)
+﻿# DESIGN_SPEC.md - VoiceReader (Phase 1)
 
 ## 1. Scope
 ### Phase 1 Goals
@@ -8,11 +8,13 @@
   1) Accessibility APIs (primary)
   2) Clipboard copy-and-restore (fallback)
 - Local TTS inference with **Qwen3-TTS-12Hz-0.6B-Base** bundled by default
+- No-clone first-run inference currently uses **Qwen3-TTS-12Hz-0.6B-CustomVoice** speaker presets (`voice_id: "0"` path)
 - Phase 1 runtime profile: CUDA + BF16 (`torch.bfloat16`)
 - Preferred attention backend: FlashAttention 2
 - Windows fallback backend (if FlashAttention 2 is unavailable): PyTorch SDPA
 - Phase 1 engine validation target is NVIDIA CUDA; cross-device parity is deferred
-- "Clone once -> save -> reuse" voice cloning using reusable voice prompt artifacts
+- First-run usable speech path with built-in default voice (`voice_id: "0"`) before any cloning
+- "Clone once -> save -> reuse" voice cloning using reusable voice prompt artifacts (inference hookup deferred)
 - Chunked synthesis + immediate playback (streaming UX without true streaming inference)
 - Model-swappable engine architecture (future models as plugins/backends)
 
@@ -33,6 +35,7 @@ As a user, I can highlight text in any app and press a hotkey to hear it read al
 Acceptance criteria:
 - Hotkey triggers within 200ms perceived response (UI shows "reading...")
 - First audio chunk plays within a reasonable time on supported CUDA hardware (target depends on model/device; focus on responsiveness via chunking)
+- App works on first run with default built-in voice (`voice_id: "0"`) without cloning
 - Stop/Pause/Resume work reliably
 
 ### 2.2 Clone and save a voice
@@ -42,6 +45,14 @@ Acceptance criteria:
 - Voice creation works offline
 - Voice is persisted to disk
 - Reusing a saved voice does not require re-processing the reference audio
+
+### 2.3 Validate engine independently
+As a developer, I can validate the Python engine without the Tauri app so troubleshooting boundaries are clear.
+
+Acceptance criteria:
+- `/health`, `/voices`, `/speak`, `/cancel`, and WS stream can be tested with simple scripts/CLI
+- Default voice `"0"` can produce audio before cloning is configured
+- Auth behavior is testable without app bootstrapping code
 
 ---
 
@@ -59,6 +70,9 @@ Acceptance criteria:
 - Phase 1: Python process
 - Loads TTS model once and stays warm
 - Provides IPC API (HTTP + WebSocket)
+- Exposes a graceful shutdown endpoint (`POST /v1/quit`) for app/test teardown
+- Supports explicit warmup endpoint (`POST /v1/warmup`) and optional startup warmup
+- Handles built-in default voice (`"0"`) and cloned voice profiles
 - Handles voice cloning + persistence
 - Handles synthesis jobs + chunking + cancellation
 
@@ -118,8 +132,19 @@ Requirements:
 - One active "Speak" job at a time in Phase 1
 - New speak request cancels previous by default (configurable later)
 - Cancel stops queued chunks and interrupts inference ASAP
+- If cancel arrives while a chunk is generating, that in-flight chunk is dropped and not streamed
 
-### 5.3 Device selection
+### 5.3 Voice selection behavior
+- Default built-in voice path:
+  - `voice_id: "0"` is always available
+  - no cloning required
+  - current inference backend uses Qwen CustomVoice speaker preset
+- Cloned voice path:
+  - `voice_id: <uuid>` stored in local `voices/`
+  - if unknown UUID is requested, return `VOICE_NOT_FOUND`
+  - real cloned-voice inference is a later milestone
+
+### 5.4 Device selection
 - Phase 1 supported runtime:
   - CUDA device path
   - `torch_dtype=bfloat16`
@@ -127,12 +152,17 @@ Requirements:
   - `attn_implementation="sdpa"` fallback on Windows when FlashAttention 2 is unavailable
 - Non-CUDA paths (CPU/MPS/ONNX/INT8) are deferred to Phase 2.
 
+### 5.5 Warmup behavior
+- Engine performs optional startup warmup inference (`VOICEREADER_WARMUP_ON_STARTUP=true` by default).
+- API clients can trigger warmup with `POST /v1/warmup` (optionally blocking with `wait=true`).
+- Model activation/switch flows must trigger warmup immediately after model load (or use `POST /v1/models/activate`, which performs reload + warmup).
+
 ---
 
 ## 6. Voice Cloning & Persistence
 
 ### 6.1 Voice profile concept
-A "voice" is stored as a reusable prompt artifact derived from reference audio (+ transcript).
+A cloned voice is stored as a reusable prompt artifact derived from reference audio (+ transcript).
 
 Data model:
 - voice_id (UUID)
@@ -145,8 +175,11 @@ Data model:
   - ref_audio_hash
   - ref_text
 
+Reserved ID:
+- `voice_id: "0"` is the built-in model voice and is not persisted as a cloned profile
+
 ### 6.2 Persisted format
-Directory per voice:
+Directory per cloned voice:
 - `voices/<voice_id>/meta.json`
 - `voices/<voice_id>/prompt.safetensors` (preferred) or `.npz`
 
@@ -159,7 +192,7 @@ Constraints:
 - User provides sample audio (recorded/imported)
 - User provides transcript OR optional ASR module supplies it
 - Engine creates reusable clone prompt once
-- Engine saves voice profile and returns voice_id
+- Engine saves voice profile and returns UUID `voice_id`
 
 ---
 
@@ -189,17 +222,17 @@ First-run behavior:
 ## 8. Storage Layout
 
 Per-user app data directory:
-- Windows: `%LOCALAPPDATA%/SpeakSelection/`
-- macOS: `~/Library/Application Support/SpeakSelection/`
+- Windows: `%LOCALAPPDATA%/VoiceReader/`
+- macOS: `~/Library/Application Support/VoiceReader/`
 
 ```
-models/  
-qwen3-tts-12hz-0.6b-base/
-qwen3-asr-0.6b/ (optional)
+models/
+  qwen3-tts-12hz-0.6b-base/
+  qwen3-asr-0.6b/ (optional)
 voices/
-<voice_id>/
-meta.json
-prompt.safetensors
+  <voice_id>/
+    meta.json
+    prompt.safetensors
 settings.json
 cache/
 logs/
@@ -219,8 +252,11 @@ logs/
 - Load bundled model
 - Validate CUDA + BF16 runtime path with FlashAttention 2 preferred and SDPA fallback
 - `/health`
+- `/voices` includes built-in default voice `"0"`
+- `/speak` works with default voice `"0"` before cloning
 - `/speak` + audio chunks via WS
 - `/cancel`
+- `/quit` for graceful shutdown
 
 ### M2 - App MVP
 - Tray app + hotkeys
