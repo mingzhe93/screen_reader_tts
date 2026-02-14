@@ -1,0 +1,21 @@
+[project]
+name = "tts-engine"
+version = "0.1.0"
+description = "Local engine daemon for Speak Selection"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi==0.116.1",
+  "uvicorn==0.35.0",
+  "pydantic==2.11.7",
+  "python-multipart==0.0.20",
+  "websockets==15.0.1",
+  "qwen-tts",
+  "numpy",
+]
+
+[project.scripts]
+tts-engine = "tts_engine.main:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

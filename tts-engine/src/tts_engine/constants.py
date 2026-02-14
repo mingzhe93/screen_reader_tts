@@ -1,0 +1,2 @@
+DEFAULT_VOICE_ID = "0"
+WS_AUTH_SUBPROTOCOL = "auth.bearer.v1"
