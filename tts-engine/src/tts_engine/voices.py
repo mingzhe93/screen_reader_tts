@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-import secrets
 import shutil
 from uuid import UUID, uuid4
 
@@ -51,7 +50,8 @@ class VoiceStore:
         self,
         display_name: str,
         language_hint: str | None,
-        ref_text: str,
+        ref_text: str | None,
+        description: str | None = None,
     ) -> VoiceSummary:
         voice_id = uuid4()
         created_at = datetime.now(timezone.utc)
@@ -65,14 +65,48 @@ class VoiceStore:
             "created_at": created_at.isoformat(),
             "tts_model_id": self._active_model_id,
             "language_hint": language_hint,
+            "description": description,
             "ref_text": ref_text,
         }
         (voice_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
-        # Placeholder artifact until real clone prompt generation is wired in.
-        (voice_dir / "prompt.safetensors").write_bytes(secrets.token_bytes(256))
-
         return VoiceSummary.model_validate(meta)
+
+    def update_voice(
+        self,
+        voice_id: UUID,
+        *,
+        display_name: str | None = None,
+        language_hint: str | None = None,
+        description: str | None = None,
+        fields_to_update: set[str],
+    ) -> VoiceSummary | None:
+        voice_dir = self._voice_dir(voice_id)
+        meta_path = voice_dir / "meta.json"
+        if not meta_path.exists():
+            return None
+
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, ValueError):
+            return None
+
+        if "display_name" in fields_to_update and display_name is not None:
+            payload["display_name"] = display_name
+        if "language" in fields_to_update:
+            payload["language_hint"] = language_hint
+        if "description" in fields_to_update:
+            payload["description"] = description
+
+        voice = VoiceSummary.model_validate(payload)
+        payload["voice_id"] = voice.voice_id
+        payload["display_name"] = voice.display_name
+        payload["created_at"] = voice.created_at.isoformat()
+        payload["tts_model_id"] = voice.tts_model_id
+        payload["language_hint"] = voice.language_hint
+        payload["description"] = voice.description
+        meta_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return voice
 
     def delete_voice(self, voice_id: UUID) -> bool:
         voice_dir = self._voice_dir(voice_id)
@@ -83,6 +117,13 @@ class VoiceStore:
 
     def _voice_dir(self, voice_id: UUID) -> Path:
         return self._voices_dir / str(voice_id)
+
+    def voice_prompt_path(self, voice_id: str) -> Path:
+        return self._voice_dir(UUID(voice_id)) / "prompt.safetensors"
+
+    def reference_audio_path(self, voice_id: str, suffix: str = ".wav") -> Path:
+        normalized_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+        return self._voice_dir(UUID(voice_id)) / f"reference_audio{normalized_suffix}"
 
     def _default_voice_summary(self) -> VoiceSummary:
         return VoiceSummary(

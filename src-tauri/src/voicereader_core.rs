@@ -49,6 +49,9 @@ struct EngineState {
     token: String,
     port: u16,
     base_url: String,
+    data_dir: String,
+    models_dir: String,
+    hf_cache_dir: String,
     selected_voice_id: String,
     selected_model: String,
     selected_qwen_speaker: String,
@@ -67,13 +70,16 @@ impl Default for EngineState {
             token: String::new(),
             port: 0,
             base_url: String::new(),
+            data_dir: String::new(),
+            models_dir: String::new(),
+            hf_cache_dir: String::new(),
             selected_voice_id: "0".to_string(),
             selected_model: MODEL_KYUTAI.to_string(),
             selected_qwen_speaker: "Ryan".to_string(),
             selected_kyutai_voice: "alba".to_string(),
             hotkey: default_hotkey(),
             speak_settings: SpeakSettingsState {
-                rate: 1.0,
+                rate: 1.5,
                 pitch: 1.0,
                 volume: 1.0,
                 chunk_max_chars: 160,
@@ -135,6 +141,13 @@ struct GenericResult {
 }
 
 #[derive(Serialize)]
+struct CloneVoiceResult {
+    ok: bool,
+    message: String,
+    voice_id: String,
+}
+
+#[derive(Serialize)]
 struct HotkeyResult {
     ok: bool,
     message: String,
@@ -177,6 +190,44 @@ struct ErrorPayload {
 struct SpeakHttpResponse {
     job_id: String,
     ws_url: String,
+}
+
+#[derive(Deserialize)]
+struct CloneVoiceHttpResponse {
+    voice_id: String,
+}
+
+#[derive(Deserialize)]
+struct VoiceSummaryHttpResponse {
+    voice_id: String,
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+struct PrefetchModelsHttpResponse {
+    mode: String,
+    downloaded: Vec<String>,
+    data_dir: String,
+    models_dir: String,
+    hf_cache_dir: String,
+}
+
+#[derive(Serialize)]
+struct EngineStoragePathsPayload {
+    data_dir: String,
+    models_dir: String,
+    hf_cache_dir: String,
+}
+
+#[derive(Serialize)]
+struct PrefetchModelsResult {
+    ok: bool,
+    message: String,
+    mode: String,
+    downloaded: Vec<String>,
+    data_dir: String,
+    models_dir: String,
+    hf_cache_dir: String,
 }
 
 struct SpeakerPresetRow {
@@ -236,7 +287,7 @@ const QWEN_SPEAKER_PRESETS: [SpeakerPresetRow; 9] = [
 const KYUTAI_VOICE_PRESETS: [SpeakerPresetRow; 8] = [
     SpeakerPresetRow {
         id: "alba",
-        description: "Balanced English female voice (Pocket TTS preset).",
+        description: "Balanced English male voice (Pocket TTS preset).",
         native_language: "English",
     },
     SpeakerPresetRow {
@@ -319,9 +370,14 @@ pub fn run_app() {
             engine_health,
             engine_list_voices,
             engine_runtime_status,
+            engine_storage_paths,
+            prefetch_models,
             restart_engine,
             select_model,
             set_selected_voice,
+            clone_voice_from_audio,
+            update_saved_voice,
+            delete_saved_voice,
             set_preset_speaker,
             set_speak_settings,
             set_hotkey,
@@ -425,6 +481,70 @@ fn engine_runtime_status(state: State<'_, SharedState>) -> Result<EngineRuntimeP
         selected_voice_id: guard.selected_voice_id.clone(),
         selected_model: guard.selected_model.clone(),
         selected_speaker: active_speaker,
+    })
+}
+
+#[tauri::command]
+async fn engine_storage_paths(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<EngineStoragePathsPayload, String> {
+    ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+
+    let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+    Ok(EngineStoragePathsPayload {
+        data_dir: guard.data_dir.clone(),
+        models_dir: guard.models_dir.clone(),
+        hf_cache_dir: guard.hf_cache_dir.clone(),
+    })
+}
+
+#[tauri::command]
+async fn prefetch_models(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    mode: String,
+) -> Result<PrefetchModelsResult, String> {
+    ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+    let normalized_mode = mode.trim().to_lowercase();
+    if !matches!(
+        normalized_mode.as_str(),
+        "qwen_custom" | "qwen_base" | "qwen_all" | "all"
+    ) {
+        return Err("mode must be one of: qwen_custom, qwen_base, qwen_all, all".to_string());
+    }
+
+    let (base_url, token) = {
+        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        (guard.base_url.clone(), guard.token.clone())
+    };
+
+    let response_payload = request_json(
+        Method::POST,
+        &format!("{base_url}/v1/models/prefetch"),
+        &token,
+        Some(json!({ "mode": normalized_mode })),
+    )
+    .await
+    .map_err(to_cmd_error)?;
+    let response: PrefetchModelsHttpResponse =
+        serde_json::from_value(response_payload).map_err(|err| to_cmd_error(err.into()))?;
+
+    {
+        let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        guard.data_dir = response.data_dir.clone();
+        guard.models_dir = response.models_dir.clone();
+        guard.hf_cache_dir = response.hf_cache_dir.clone();
+    }
+
+    Ok(PrefetchModelsResult {
+        ok: true,
+        message: format!("Prefetch complete ({})", response.mode),
+        mode: response.mode,
+        downloaded: response.downloaded,
+        data_dir: response.data_dir,
+        models_dir: response.models_dir,
+        hf_cache_dir: response.hf_cache_dir,
     })
 }
 
@@ -539,6 +659,197 @@ fn set_selected_voice(state: State<'_, SharedState>, voice_id: String) -> Result
     Ok(GenericResult {
         ok: true,
         message: format!("Selected voice set to {normalized}"),
+    })
+}
+
+#[tauri::command]
+async fn clone_voice_from_audio(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    display_name: String,
+    wav_base64: String,
+    language: Option<String>,
+    ref_text: Option<String>,
+) -> Result<CloneVoiceResult, String> {
+    ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+
+    let normalized_name = display_name.trim().to_string();
+    if normalized_name.is_empty() {
+        return Err("display_name cannot be empty".to_string());
+    }
+    if wav_base64.trim().is_empty() {
+        return Err("wav_base64 cannot be empty".to_string());
+    }
+
+    let selected_model = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        guard.selected_model.clone()
+    };
+    if selected_model != MODEL_KYUTAI {
+        return Err(
+            "Voice cloning is currently enabled for Kyutai mode only. Switch model to Kyutai Pocket TTS first."
+                .to_string(),
+        );
+    }
+
+    let (base_url, token) = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        (guard.base_url.clone(), guard.token.clone())
+    };
+
+    let mut clone_payload = serde_json::Map::new();
+    clone_payload.insert("display_name".to_string(), Value::String(normalized_name.clone()));
+    clone_payload.insert(
+        "ref_audio".to_string(),
+        json!({
+            "wav_base64": wav_base64,
+        }),
+    );
+    if let Some(normalized_language) = normalize_optional_text(language) {
+        clone_payload.insert("language".to_string(), Value::String(normalized_language));
+    }
+    if let Some(normalized_ref_text) = normalize_optional_text(ref_text) {
+        clone_payload.insert("ref_text".to_string(), Value::String(normalized_ref_text));
+    }
+
+    let response_payload = request_json(
+        Method::POST,
+        &format!("{base_url}/v1/voices/clone"),
+        &token,
+        Some(Value::Object(clone_payload)),
+    )
+    .await
+    .map_err(to_cmd_error)?;
+    let clone_response: CloneVoiceHttpResponse =
+        serde_json::from_value(response_payload).map_err(|err| to_cmd_error(err.into()))?;
+
+    {
+        let mut guard = state
+            .inner
+            .lock()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        guard.selected_voice_id = clone_response.voice_id.clone();
+    }
+
+    Ok(CloneVoiceResult {
+        ok: true,
+        message: format!(
+            "Cloned voice saved: {} ({})",
+            normalized_name, clone_response.voice_id
+        ),
+        voice_id: clone_response.voice_id,
+    })
+}
+
+#[tauri::command]
+async fn update_saved_voice(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    voice_id: String,
+    display_name: String,
+    language: Option<String>,
+    description: Option<String>,
+) -> Result<GenericResult, String> {
+    ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+
+    let normalized_voice_id = voice_id.trim().to_string();
+    if normalized_voice_id.is_empty() {
+        return Err("voice_id cannot be empty".to_string());
+    }
+    if normalized_voice_id == "0" {
+        return Err("Built-in default voice cannot be edited".to_string());
+    }
+
+    let normalized_name = display_name.trim().to_string();
+    if normalized_name.is_empty() {
+        return Err("display_name cannot be empty".to_string());
+    }
+
+    let (base_url, token) = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        (guard.base_url.clone(), guard.token.clone())
+    };
+
+    let normalized_language = normalize_optional_text(language);
+    let normalized_description = normalize_optional_text(description);
+    let update_payload = json!({
+        "display_name": normalized_name,
+        "language": normalized_language,
+        "description": normalized_description,
+    });
+
+    let response_payload = request_json(
+        Method::PATCH,
+        &format!("{base_url}/v1/voices/{normalized_voice_id}"),
+        &token,
+        Some(update_payload),
+    )
+    .await
+    .map_err(to_cmd_error)?;
+    let response: VoiceSummaryHttpResponse =
+        serde_json::from_value(response_payload).map_err(|err| to_cmd_error(err.into()))?;
+
+    Ok(GenericResult {
+        ok: true,
+        message: format!("Saved voice updated: {} ({})", response.display_name, response.voice_id),
+    })
+}
+
+#[tauri::command]
+async fn delete_saved_voice(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    voice_id: String,
+) -> Result<GenericResult, String> {
+    ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+
+    let normalized_voice_id = voice_id.trim().to_string();
+    if normalized_voice_id.is_empty() {
+        return Err("voice_id cannot be empty".to_string());
+    }
+    if normalized_voice_id == "0" {
+        return Err("Built-in default voice cannot be deleted".to_string());
+    }
+
+    let (base_url, token) = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        (guard.base_url.clone(), guard.token.clone())
+    };
+
+    let _ = request_json(
+        Method::DELETE,
+        &format!("{base_url}/v1/voices/{normalized_voice_id}"),
+        &token,
+        None,
+    )
+    .await
+    .map_err(to_cmd_error)?;
+
+    {
+        let mut guard = state
+            .inner
+            .lock()
+            .map_err(|_| "State lock poisoned".to_string())?;
+        if guard.selected_voice_id == normalized_voice_id {
+            guard.selected_voice_id = "0".to_string();
+        }
+    }
+
+    Ok(GenericResult {
+        ok: true,
+        message: format!("Deleted saved voice {normalized_voice_id}"),
     })
 }
 
@@ -1197,8 +1508,10 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
     let token = generate_token();
     let port = portpicker::pick_unused_port().ok_or_else(|| anyhow!("Failed to find a free localhost port"))?;
     let base_url = format!("http://127.0.0.1:{port}");
-    let data_dir = engine_root.join(".data");
+    let data_dir = resolve_engine_data_dir(app, &engine_root)?;
     std::fs::create_dir_all(&data_dir).context("Failed to create engine data dir")?;
+    let models_dir = data_dir.join("models");
+    let hf_cache_dir = data_dir.join("hf-cache");
 
     let mut command = Command::new(&python_executable);
     command
@@ -1243,6 +1556,9 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
         guard.token = token;
         guard.port = port;
         guard.base_url = base_url;
+        guard.data_dir = data_dir.to_string_lossy().to_string();
+        guard.models_dir = models_dir.to_string_lossy().to_string();
+        guard.hf_cache_dir = hf_cache_dir.to_string_lossy().to_string();
         guard.last_job_id = None;
         guard.suppressed_job_ids.clear();
     }
@@ -1483,6 +1799,17 @@ fn default_hotkey() -> String {
     }
 }
 
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let normalized = raw.trim().to_string();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    })
+}
+
 fn normalize_hotkey(value: &str) -> Result<String> {
     let normalized = value.trim().replace(' ', "");
     if normalized.is_empty() {
@@ -1571,6 +1898,30 @@ fn find_engine_root() -> Result<PathBuf> {
     Err(anyhow!(
         "Unable to locate tts-engine directory. Expected one of ./tts-engine, ../tts-engine, ../../tts-engine"
     ))
+}
+
+fn resolve_engine_data_dir(_app: &AppHandle, engine_root: &Path) -> Result<PathBuf> {
+    if let Ok(raw_override) = std::env::var("VOICEREADER_DATA_DIR") {
+        let trimmed = raw_override.trim();
+        if !trimmed.is_empty() {
+            let path = PathBuf::from(trimmed);
+            return Ok(normalize_windows_extended_path(path));
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        return Ok(normalize_windows_extended_path(engine_root.join(".data")));
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        let app_data_dir = _app
+            .path_resolver()
+            .app_local_data_dir()
+            .ok_or_else(|| anyhow!("Failed to resolve app_local_data_dir for engine storage"))?;
+        return Ok(normalize_windows_extended_path(app_data_dir.join("data")));
+    }
 }
 
 fn resolve_python_executable(engine_root: &Path) -> String {

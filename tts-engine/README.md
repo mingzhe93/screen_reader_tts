@@ -144,9 +144,10 @@ If `POST /v1/models/activate` returns `409`, inspect the JSON body:
 - `code=MODEL_NOT_READY`: backend load failed; check `runtime.detail` in `/v1/health` and confirm dependencies/files.
 
 Current real-inference limitation:
-- `backend=kyutai_pocket_tts` supports `voice_id: "0"` only (default prompt path).
+- `backend=kyutai_pocket_tts` supports `voice_id: "0"` and cloned voice UUIDs created via `POST /v1/voices/clone`.
 - `backend=qwen_custom_voice` supports `voice_id: "0"` only (default speaker path).
-- Cloned-voice inference hookup is pending; cloned voices may return `MODEL_NOT_READY` under this backend.
+- `POST /v1/voices/clone` is backend-gated; if unsupported by the active backend, the API returns `MODEL_NOT_READY`.
+- Kyutai cloned voices persist prompt artifacts at `<data_dir>/voices/<voice_uuid>/prompt.safetensors`.
 
 ## Standalone smoke test (recommended)
 

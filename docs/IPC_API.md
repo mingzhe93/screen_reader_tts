@@ -59,7 +59,7 @@ Local storage defaults (standalone):
 - local model mirrors (if prefetched): `<data_dir>/models/<org>/<repo>`
 
 ### 2.5 Error/status mapping
-- `INVALID_AUDIO`, `EMPTY_TEXT`, `TRANSCRIPT_REQUIRED`: HTTP `400`
+- `INVALID_AUDIO`, `EMPTY_TEXT`, `VOICE_CLONE_FAILED`: HTTP `400`
 - `VOICE_NOT_FOUND`, `JOB_NOT_FOUND`: HTTP `404`
 - `MODEL_NOT_READY`: HTTP `409`
 - `JOB_IN_PROGRESS`: HTTP `409`
@@ -92,7 +92,7 @@ Returns engine status and capabilities.
   "active_model_id": "Verylicious/pocket-tts-ungated",
   "device": "cpu",
   "capabilities": {
-    "supports_voice_clone": false,
+    "supports_voice_clone": true,
     "supports_audio_chunk_stream": true,
     "supports_true_streaming_inference": false,
     "languages": ["en"]
@@ -103,7 +103,7 @@ Returns engine status and capabilities.
     "fallback_active": false,
     "detail": "model=Verylicious/pocket-tts-ungated, default_voice_prompt=alba",
     "supports_default_voice": true,
-    "supports_cloned_voices": false,
+    "supports_cloned_voices": true,
     "warmup": {
       "status": "ready",
       "runs": 1,
@@ -120,7 +120,7 @@ Returns engine status and capabilities.
 Notes:
 - In `VOICEREADER_SYNTH_BACKEND=auto`, engine may fall back to `backend=mock` if Kyutai/Qwen runtime cannot be loaded.
 - Use `runtime` fields to confirm if real model inference is active.
-- `capabilities.supports_voice_clone` is backend-dependent (e.g., false on `kyutai_pocket_tts` and `qwen_custom_voice`, true on current `mock` fallback).
+- `capabilities.supports_voice_clone` is backend-dependent (currently true on `kyutai_pocket_tts` and `mock`, false on `qwen_custom_voice`).
 - `capabilities.languages` is backend-dependent (current app integration: `["en"]` on `kyutai_pocket_tts`; broader set on `qwen_custom_voice`/`mock`).
 
 ---
@@ -145,7 +145,7 @@ List available voices.
       "voice_id": "uuid",
       "display_name": "My Voice",
       "created_at": "ISO8601",
-      "tts_model_id": "qwen3-tts-12hz-0.6b-base",
+      "tts_model_id": "Verylicious/pocket-tts-ungated",
       "language_hint": "en"
     }
   ]
@@ -157,6 +157,7 @@ List available voices.
 ### 3.3 POST /voices/clone
 
 Create a new reusable voice profile from a reference sample.
+For Kyutai backend, the engine materializes and stores a reusable `prompt.safetensors` under the voice directory.
 
 **Request**
 
@@ -166,7 +167,7 @@ Create a new reusable voice profile from a reference sample.
   "ref_audio": {
     "path": "/path/to/sample.wav"
   },
-  "ref_text": "Optional transcript (recommended)",
+  "ref_text": "Optional transcript",
   "language": "en",
   "options": {
     "normalize_audio": true
@@ -182,7 +183,7 @@ Alternative audio input (base64):
   "ref_audio": {
     "wav_base64": "..."
   },
-  "ref_text": "..."
+  "ref_text": "Optional transcript"
 }
 ```
 
@@ -200,8 +201,8 @@ Alternative audio input (base64):
 **Errors**
 
 - `INVALID_AUDIO`
-- `TRANSCRIPT_REQUIRED` (if ASR not enabled and `ref_text` missing)
 - `MODEL_NOT_READY`
+- `VOICE_CLONE_FAILED`
 
 ---
 
@@ -261,7 +262,7 @@ Start speaking text using a specified voice.
 
 - `VOICE_NOT_FOUND` (for non-default unknown voice IDs)
 - `EMPTY_TEXT`
-- `MODEL_NOT_READY` (for known-but-unsupported voice modes on current backend, e.g., cloned voice on `kyutai_pocket_tts` or `qwen_custom_voice`)
+- `MODEL_NOT_READY` (for known-but-unsupported voice modes on current backend, e.g., cloned voice on `qwen_custom_voice`)
 
 Notes:
 - `settings.rate` is applied engine-side by time-scaling each returned chunk.

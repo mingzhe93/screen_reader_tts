@@ -17,6 +17,13 @@ from .config import EngineConfig
 from .constants import DEFAULT_VOICE_ID
 from .errors import EngineError, install_exception_handlers
 from .jobs import JobManager, TERMINAL_EVENT_TYPES
+from .model_store import (
+    KYUTAI_POCKET_MODEL_REPO,
+    QWEN_BASE_MODEL_REPO,
+    QWEN_CUSTOM_MODEL_REPO,
+    configure_hf_cache,
+    download_repo_to_local_dir,
+)
 from .schemas import (
     ActivateModelRequest,
     ActivateModelResponse,
@@ -30,6 +37,10 @@ from .schemas import (
     RuntimeStatus,
     SpeakRequest,
     SpeakResponse,
+    PrefetchModelsRequest,
+    PrefetchModelsResponse,
+    VoiceSummary,
+    UpdateVoiceRequest,
     WarmupRequest,
     WarmupResponse,
     WarmupStatus,
@@ -164,20 +175,44 @@ def create_app(config: EngineConfig) -> FastAPI:
 
     @router.post("/voices/clone", response_model=CloneVoiceResponse)
     async def clone_voice(payload: CloneVoiceRequest) -> CloneVoiceResponse:
-        if not payload.ref_text or not payload.ref_text.strip():
+        if not synthesizer.status.supports_voice_clone:
             raise EngineError(
-                code="TRANSCRIPT_REQUIRED",
-                message="ref_text is required until ASR is enabled",
-                status_code=400,
+                code="MODEL_NOT_READY",
+                message=(
+                    f'Configured synthesis backend "{synthesizer.status.backend}" '
+                    "does not support voice cloning"
+                ),
+                status_code=409,
             )
-
-        _validate_reference_audio(payload.ref_audio.path, payload.ref_audio.wav_base64)
 
         voice = voice_store.create_voice(
             display_name=payload.display_name.strip(),
             language_hint=payload.language,
-            ref_text=payload.ref_text.strip(),
+            ref_text=(payload.ref_text.strip() if payload.ref_text and payload.ref_text.strip() else None),
+            description=payload.description,
         )
+        try:
+            reference_source = _prepare_reference_audio_source(
+                path=payload.ref_audio.path,
+                wav_base64=payload.ref_audio.wav_base64,
+                voice_store=voice_store,
+                voice_id=voice.voice_id,
+            )
+            await asyncio.to_thread(
+                synthesizer.prepare_cloned_voice,
+                voice.voice_id,
+                reference_source,
+            )
+        except EngineError:
+            voice_store.delete_voice(UUID(voice.voice_id))
+            raise
+        except Exception as exc:
+            voice_store.delete_voice(UUID(voice.voice_id))
+            raise EngineError(
+                code="VOICE_CLONE_FAILED",
+                message=f"Failed to create cloned voice: {exc}",
+                status_code=400,
+            ) from exc
         return CloneVoiceResponse.model_validate(voice.model_dump())
 
     @router.delete("/voices/{voice_id}")
@@ -204,7 +239,42 @@ def create_app(config: EngineConfig) -> FastAPI:
                 message=f"Voice {normalized_voice_id} was not found",
                 status_code=404,
             )
+        synthesizer.forget_voice(str(cloned_voice_id))
         return {"deleted": True}
+
+    @router.patch("/voices/{voice_id}", response_model=VoiceSummary)
+    async def update_voice(voice_id: str, payload: UpdateVoiceRequest) -> VoiceSummary:
+        normalized_voice_id = voice_id.strip()
+        if normalized_voice_id == DEFAULT_VOICE_ID:
+            raise EngineError(
+                code="FORBIDDEN",
+                message='Built-in default voice "0" cannot be edited',
+                status_code=403,
+            )
+        try:
+            cloned_voice_id = UUID(normalized_voice_id)
+        except ValueError as exc:
+            raise EngineError(
+                code="VOICE_NOT_FOUND",
+                message=f"Voice {normalized_voice_id} was not found",
+                status_code=404,
+            ) from exc
+
+        updated = voice_store.update_voice(
+            cloned_voice_id,
+            display_name=payload.display_name,
+            language_hint=payload.language,
+            description=payload.description,
+            fields_to_update=set(payload.model_fields_set),
+        )
+        if updated is None:
+            raise EngineError(
+                code="VOICE_NOT_FOUND",
+                message=f"Voice {normalized_voice_id} was not found",
+                status_code=404,
+            )
+
+        return updated
 
     @router.post("/speak", response_model=SpeakResponse)
     async def speak(payload: SpeakRequest, request: Request) -> SpeakResponse:
@@ -332,6 +402,26 @@ def create_app(config: EngineConfig) -> FastAPI:
                 runtime=_runtime_snapshot(),
             )
 
+    @router.post("/models/prefetch", response_model=PrefetchModelsResponse)
+    async def prefetch_models(payload: PrefetchModelsRequest | None = None) -> PrefetchModelsResponse:
+        request_payload = payload or PrefetchModelsRequest()
+        repos = _resolve_prefetch_repos(request_payload.mode)
+        cache_paths = configure_hf_cache(engine_config.data_dir)
+
+        saved_to: dict[str, str] = {}
+        for repo_id in repos:
+            local_dir = await asyncio.to_thread(download_repo_to_local_dir, repo_id, engine_config.data_dir)
+            saved_to[repo_id] = str(local_dir)
+
+        return PrefetchModelsResponse(
+            mode=request_payload.mode,
+            downloaded=repos,
+            saved_to=saved_to,
+            data_dir=str(engine_config.data_dir),
+            models_dir=str((engine_config.data_dir / "models").resolve()),
+            hf_cache_dir=str(cache_paths.cache_root),
+        )
+
     @router.post("/warmup", response_model=WarmupResponse)
     async def warmup(payload: WarmupRequest | None = None) -> WarmupResponse:
         request_payload = payload or WarmupRequest()
@@ -410,14 +500,19 @@ def _coalesce_str(candidate: str | None, fallback: str) -> str:
     return normalized or fallback
 
 
-def _validate_reference_audio(path: str | None, wav_base64: str | None) -> None:
+def _prepare_reference_audio_source(
+    path: str | None,
+    wav_base64: str | None,
+    voice_store: VoiceStore,
+    voice_id: str,
+) -> str:
     if path:
         audio_path = Path(path).expanduser()
         if not audio_path.exists() or not audio_path.is_file():
             raise EngineError(code="INVALID_AUDIO", message="Reference audio path is invalid", status_code=400)
         if audio_path.stat().st_size == 0:
             raise EngineError(code="INVALID_AUDIO", message="Reference audio file is empty", status_code=400)
-        return
+        return str(audio_path.resolve())
 
     if wav_base64:
         try:
@@ -426,7 +521,12 @@ def _validate_reference_audio(path: str | None, wav_base64: str | None) -> None:
             raise EngineError(code="INVALID_AUDIO", message="Invalid base64 audio payload", status_code=400) from exc
         if not raw:
             raise EngineError(code="INVALID_AUDIO", message="Audio payload is empty", status_code=400)
-        return
+        destination = voice_store.reference_audio_path(voice_id, suffix=".wav")
+        try:
+            destination.write_bytes(raw)
+        except OSError as exc:
+            raise EngineError(code="INVALID_AUDIO", message="Failed to persist base64 audio payload", status_code=400) from exc
+        return str(destination.resolve())
 
     raise EngineError(code="INVALID_AUDIO", message="No reference audio provided", status_code=400)
 
@@ -455,3 +555,14 @@ def _resolve_runtime_languages(backend: str) -> list[str]:
         return ["zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "auto"]
     # Mock fallback stays permissive for API smoke testing.
     return ["zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "auto"]
+
+
+def _resolve_prefetch_repos(mode: str) -> list[str]:
+    if mode == "qwen_custom":
+        return [QWEN_CUSTOM_MODEL_REPO]
+    if mode == "qwen_base":
+        return [QWEN_BASE_MODEL_REPO]
+    if mode == "all":
+        return [QWEN_CUSTOM_MODEL_REPO, QWEN_BASE_MODEL_REPO, KYUTAI_POCKET_MODEL_REPO]
+    # default qwen_all
+    return [QWEN_CUSTOM_MODEL_REPO, QWEN_BASE_MODEL_REPO]

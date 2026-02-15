@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import UUID
 
 from .config import EngineConfig
 from .constants import DEFAULT_VOICE_ID
@@ -63,6 +64,12 @@ class BaseSynthesizer(Protocol):
     def supports_voice_id(self, voice_id: str) -> bool:
         raise NotImplementedError
 
+    def prepare_cloned_voice(self, voice_id: str, reference_audio_source: str) -> None:
+        raise NotImplementedError
+
+    def forget_voice(self, voice_id: str) -> None:
+        raise NotImplementedError
+
     def synthesize_chunk(self, chunk_text: str, voice_id: str, language: str | None = None) -> SynthesizedAudio:
         raise NotImplementedError
 
@@ -87,6 +94,13 @@ class MockSynthesizer:
 
     def supports_voice_id(self, voice_id: str) -> bool:
         return True
+
+    def prepare_cloned_voice(self, voice_id: str, reference_audio_source: str) -> None:
+        # Mock backend accepts any voice id without precomputation.
+        _ = (voice_id, reference_audio_source)
+
+    def forget_voice(self, voice_id: str) -> None:
+        _ = voice_id
 
     def synthesize_chunk(self, chunk_text: str, voice_id: str, language: str | None = None) -> SynthesizedAudio:
         duration_seconds = max(0.18, min(1.2, len(chunk_text) / 90.0))
@@ -178,6 +192,15 @@ class QwenCustomVoiceSynthesizer:
     def supports_voice_id(self, voice_id: str) -> bool:
         return voice_id == DEFAULT_VOICE_ID
 
+    def prepare_cloned_voice(self, voice_id: str, reference_audio_source: str) -> None:
+        raise RuntimeError(
+            "Qwen custom-voice backend does not support cloning in this engine. "
+            "Switch to the Kyutai backend for /v1/voices/clone."
+        )
+
+    def forget_voice(self, voice_id: str) -> None:
+        _ = voice_id
+
     def synthesize_chunk(self, chunk_text: str, voice_id: str, language: str | None = None) -> SynthesizedAudio:
         if voice_id != DEFAULT_VOICE_ID:
             raise RuntimeError('Qwen custom-voice backend currently supports only voice_id "0"')
@@ -229,7 +252,7 @@ class QwenCustomVoiceSynthesizer:
 
 
 class PocketTtsSynthesizer:
-    """Kyutai Pocket TTS backend using a single built-in/default voice prompt."""
+    """Kyutai Pocket TTS backend with built-in and cloned voice prompt support."""
 
     def __init__(self, config: EngineConfig) -> None:
         try:
@@ -249,6 +272,8 @@ class PocketTtsSynthesizer:
         self._model_source = resolve_model_source(config.data_dir, config.kyutai_model_name)
         self._default_voice_prompt = config.kyutai_voice_prompt.strip() or "alba"
         self._default_sample_rate = int(config.kyutai_sample_rate)
+        self._voices_dir = config.data_dir / "voices"
+        self._voice_state_cache: dict[str, Any] = {}
         self._model_source_dir = self._as_existing_dir(self._model_source)
         model_config_arg = self._resolve_model_config_arg()
         detail_note = (
@@ -277,24 +302,68 @@ class PocketTtsSynthesizer:
                 f"(source={voice_prompt_source}): {exc}"
             ) from exc
 
+        supports_voice_clone = bool(getattr(self._model, "has_voice_cloning", False))
         self.status = SynthBackendStatus(
             backend="kyutai_pocket_tts",
             model_loaded=True,
             fallback_active=False,
             detail=detail_note,
-            supports_voice_clone=False,
+            supports_voice_clone=supports_voice_clone,
             supports_default_voice=True,
-            supports_cloned_voices=False,
+            supports_cloned_voices=supports_voice_clone,
         )
 
     def supports_voice_id(self, voice_id: str) -> bool:
-        return voice_id == DEFAULT_VOICE_ID
+        if voice_id == DEFAULT_VOICE_ID:
+            return True
+        if not _is_uuid_like(voice_id):
+            return False
+        return self._prompt_path_for_voice_id(voice_id).exists()
+
+    def prepare_cloned_voice(self, voice_id: str, reference_audio_source: str) -> None:
+        if not self.status.supports_voice_clone:
+            raise RuntimeError("Pocket TTS voice cloning is not available in the loaded model configuration")
+        if not _is_uuid_like(voice_id):
+            raise RuntimeError('Cloned voice_id must be a UUID string (default voice uses "0")')
+
+        normalized_source = reference_audio_source.strip()
+        if not normalized_source:
+            raise RuntimeError("Reference audio source is empty")
+
+        prompt_path = self._prompt_path_for_voice_id(voice_id)
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+
+        save_audio_prompt = getattr(self._model, "save_audio_prompt", None)
+        if not callable(save_audio_prompt):
+            raise RuntimeError("Pocket TTS model does not expose save_audio_prompt")
+        try:
+            save_audio_prompt(normalized_source, str(prompt_path))
+        except TypeError:
+            save_audio_prompt(normalized_source, str(prompt_path), False)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to build voice prompt state: {exc}") from exc
+
+        if not prompt_path.exists():
+            generated_candidates = sorted(prompt_path.parent.glob("*.safetensors"))
+            if generated_candidates:
+                prompt_path = generated_candidates[0]
+            else:
+                raise RuntimeError("Voice cloning completed but no prompt.safetensors artifact was written")
+
+        # Preload into memory so first speak request for this voice avoids prompt parsing overhead.
+        try:
+            self._voice_state_cache[voice_id] = self._model.get_state_for_audio_prompt(str(prompt_path))
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load cloned voice prompt state from {prompt_path}: {exc}") from exc
+
+    def forget_voice(self, voice_id: str) -> None:
+        if voice_id == DEFAULT_VOICE_ID:
+            return
+        self._voice_state_cache.pop(voice_id, None)
 
     def synthesize_chunk(self, chunk_text: str, voice_id: str, language: str | None = None) -> SynthesizedAudio:
-        if voice_id != DEFAULT_VOICE_ID:
-            raise RuntimeError('Pocket TTS backend currently supports only voice_id "0"')
-
-        generated = self._generate_audio(chunk_text=chunk_text, language=language)
+        voice_state = self._resolve_voice_state(voice_id)
+        generated = self._generate_audio(voice_state=voice_state, chunk_text=chunk_text, language=language)
         pcm_s16le, sample_rate = _coerce_pcm16_from_generated_audio(
             generated=generated,
             np_module=self._np,
@@ -309,18 +378,41 @@ class PocketTtsSynthesizer:
     def warmup(self, text: str, language: str | None = None) -> None:
         self.synthesize_chunk(text, voice_id=DEFAULT_VOICE_ID, language=language)
 
-    def _generate_audio(self, chunk_text: str, language: str | None) -> Any:
+    def _resolve_voice_state(self, voice_id: str) -> Any:
+        if voice_id == DEFAULT_VOICE_ID:
+            return self._voice_state
+        if not _is_uuid_like(voice_id):
+            raise RuntimeError(f'Unsupported voice_id "{voice_id}" for Pocket TTS backend')
+
+        cached = self._voice_state_cache.get(voice_id)
+        if cached is not None:
+            return cached
+
+        prompt_path = self._prompt_path_for_voice_id(voice_id)
+        if not prompt_path.exists():
+            raise RuntimeError(
+                f'Cloned voice "{voice_id}" has no prompt state on disk. '
+                "Call /v1/voices/clone before speaking with it."
+            )
+        try:
+            state = self._model.get_state_for_audio_prompt(str(prompt_path))
+        except Exception as exc:
+            raise RuntimeError(f'Failed to load cloned voice "{voice_id}": {exc}') from exc
+        self._voice_state_cache[voice_id] = state
+        return state
+
+    def _generate_audio(self, voice_state: Any, chunk_text: str, language: str | None) -> Any:
         normalized_language = _resolve_kyutai_language(language)
 
         # Try known call signatures in order and only fall through on signature mismatch.
         if normalized_language:
             try:
-                return self._model.generate_audio(self._voice_state, chunk_text, lang=normalized_language)
+                return self._model.generate_audio(voice_state, chunk_text, lang=normalized_language)
             except TypeError:
                 pass
 
         try:
-            return self._model.generate_audio(self._voice_state, chunk_text)
+            return self._model.generate_audio(voice_state, chunk_text)
         except TypeError:
             pass
 
@@ -336,6 +428,9 @@ class PocketTtsSynthesizer:
             raise RuntimeError(
                 "Pocket TTS API signature mismatch while calling generate_audio"
             ) from exc
+
+    def _prompt_path_for_voice_id(self, voice_id: str) -> Path:
+        return self._voices_dir / voice_id / "prompt.safetensors"
 
     def _resolve_model_config_arg(self) -> str:
         # Pocket TTS expects either a known variant id (e.g. b6369a24) or a YAML config file path.
@@ -462,6 +557,14 @@ def _resolve_kyutai_language(language: str | None) -> str | None:
     if normalized in _KYUTAI_LANGUAGE_ALLOWLIST:
         return normalized
     return normalized
+
+
+def _is_uuid_like(candidate: str) -> bool:
+    try:
+        UUID(candidate)
+        return True
+    except ValueError:
+        return False
 
 
 def _coerce_pcm16_from_generated_audio(

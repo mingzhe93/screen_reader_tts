@@ -97,6 +97,113 @@ def test_clone_speak_and_stream_job(tmp_path: Path) -> None:
     assert event_types.intersection({"JOB_DONE", "JOB_CANCELED", "JOB_ERROR"})
 
 
+def test_clone_with_base64_audio_persists_reference_payload(tmp_path: Path) -> None:
+    client = _make_client(tmp_path)
+    raw_audio = b"RIFF....WAVEfmt data"
+    clone_resp = client.post(
+        "/v1/voices/clone",
+        headers=_auth_headers(),
+        json={
+            "display_name": "Base64 Voice",
+            "ref_audio": {"wav_base64": base64.b64encode(raw_audio).decode("ascii")},
+            "language": "en",
+        },
+    )
+    assert clone_resp.status_code == 200
+    voice_id = clone_resp.json()["voice_id"]
+    saved_audio = tmp_path / "data" / "voices" / voice_id / "reference_audio.wav"
+    assert saved_audio.exists()
+    assert saved_audio.read_bytes() == raw_audio
+
+
+def test_update_and_delete_saved_voice(tmp_path: Path) -> None:
+    client = _make_client(tmp_path)
+    sample_wav = tmp_path / "sample.wav"
+    sample_wav.write_bytes(b"RIFF....WAVEfmt ")
+
+    clone_resp = client.post(
+        "/v1/voices/clone",
+        headers=_auth_headers(),
+        json={
+            "display_name": "Original Name",
+            "ref_audio": {"path": str(sample_wav)},
+            "language": "en",
+        },
+    )
+    assert clone_resp.status_code == 200
+    voice_id = clone_resp.json()["voice_id"]
+
+    patch_resp = client.patch(
+        f"/v1/voices/{voice_id}",
+        headers=_auth_headers(),
+        json={
+            "display_name": "Updated Name",
+            "language": "en-US",
+            "description": "My custom voice profile",
+        },
+    )
+    assert patch_resp.status_code == 200
+    updated = patch_resp.json()
+    assert updated["voice_id"] == voice_id
+    assert updated["display_name"] == "Updated Name"
+    assert updated["language_hint"] == "en-US"
+    assert updated["description"] == "My custom voice profile"
+
+    list_resp = client.get("/v1/voices", headers=_auth_headers())
+    assert list_resp.status_code == 200
+    updated_voice = next(voice for voice in list_resp.json()["voices"] if voice["voice_id"] == voice_id)
+    assert updated_voice["display_name"] == "Updated Name"
+    assert updated_voice["description"] == "My custom voice profile"
+
+    delete_resp = client.delete(f"/v1/voices/{voice_id}", headers=_auth_headers())
+    assert delete_resp.status_code == 200
+    assert delete_resp.json()["deleted"] is True
+
+    missing_resp = client.delete(f"/v1/voices/{voice_id}", headers=_auth_headers())
+    assert missing_resp.status_code == 404
+
+
+def test_edit_or_delete_default_voice_is_forbidden(tmp_path: Path) -> None:
+    client = _make_client(tmp_path)
+
+    patch_resp = client.patch(
+        "/v1/voices/0",
+        headers=_auth_headers(),
+        json={"description": "should fail"},
+    )
+    assert patch_resp.status_code == 403
+    assert patch_resp.json()["error"]["code"] == "FORBIDDEN"
+
+    delete_resp = client.delete("/v1/voices/0", headers=_auth_headers())
+    assert delete_resp.status_code == 403
+    assert delete_resp.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_prefetch_models_endpoint_reports_storage_paths(tmp_path: Path) -> None:
+    client = _make_client(tmp_path)
+
+    def _fake_download(repo_id: str, data_dir: Path) -> Path:
+        target = data_dir / "models" / Path(*repo_id.split("/"))
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    with patch("tts_engine.app.download_repo_to_local_dir", side_effect=_fake_download):
+        response = client.post(
+            "/v1/models/prefetch",
+            headers=_auth_headers(),
+            json={"mode": "qwen_all"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["mode"] == "qwen_all"
+    assert payload["data_dir"].endswith("data")
+    assert payload["models_dir"].endswith("data\\models") or payload["models_dir"].endswith("data/models")
+    assert "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" in payload["downloaded"]
+    assert "Qwen/Qwen3-TTS-12Hz-0.6B-Base" in payload["downloaded"]
+
+
 def test_default_voice_available_and_speak_without_clone(tmp_path: Path) -> None:
     client = _make_client(tmp_path)
 

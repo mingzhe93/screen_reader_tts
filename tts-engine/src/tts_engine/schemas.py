@@ -60,6 +60,7 @@ class VoiceSummary(BaseModel):
     created_at: datetime
     tts_model_id: str
     language_hint: str | None = None
+    description: str | None = None
 
 
 class ListVoicesResponse(BaseModel):
@@ -86,11 +87,62 @@ class CloneVoiceRequest(BaseModel):
     ref_audio: RefAudioInput
     ref_text: str | None = None
     language: str | None = None
+    description: str | None = Field(default=None, max_length=240)
     options: CloneOptions = Field(default_factory=CloneOptions)
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: object) -> object:
+        if value is None:
+            return value
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("language", "description", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
 
 
 class CloneVoiceResponse(VoiceSummary):
     pass
+
+
+class UpdateVoiceRequest(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=80)
+    language: str | None = None
+    description: str | None = Field(default=None, max_length=240)
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("language", "description", mode="before")
+    @classmethod
+    def normalize_optional_text(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        return value
+
+    @model_validator(mode="after")
+    def validate_any_field(self) -> "UpdateVoiceRequest":
+        if not self.model_fields_set:
+            raise ValueError("At least one editable field is required")
+        return self
 
 
 class ChunkingSettings(BaseModel):
@@ -191,3 +243,25 @@ class ActivateModelResponse(BaseModel):
     warmup_accepted: bool
     active_model_id: str
     runtime: RuntimeStatus
+
+
+class PrefetchModelsRequest(BaseModel):
+    mode: str = Field(default="qwen_all")
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"qwen_custom", "qwen_base", "qwen_all", "all"}:
+            raise ValueError("mode must be one of: qwen_custom, qwen_base, qwen_all, all")
+        return normalized
+
+
+class PrefetchModelsResponse(BaseModel):
+    ok: bool = True
+    mode: str
+    downloaded: list[str]
+    saved_to: dict[str, str]
+    data_dir: str
+    models_dir: str
+    hf_cache_dir: str
