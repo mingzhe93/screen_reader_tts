@@ -11,7 +11,7 @@
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "desktop:build:standalone": "tauri build",
-    "desktop:build:portable": "npm run sidecar:build && npm run build && cargo build --manifest-path src-tauri/Cargo.toml --release && python ./scripts/package_portable.py"
+    "desktop:build:portable": "npm run sidecar:build && npm run build && tauri build --bundles none && python ./scripts/package_portable.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.6.0"

@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_STORED, ZipFile
 
 
 def _repo_root() -> Path:
@@ -22,7 +22,12 @@ def _read_app_meta(src_tauri_dir: Path) -> tuple[str, str]:
 
 def _copytree(src: Path, dst: Path) -> None:
     if dst.exists():
-        shutil.rmtree(dst)
+        try:
+            shutil.rmtree(dst)
+        except PermissionError as exc:
+            raise RuntimeError(
+                f"Failed to remove {dst}. Close any running VoiceReader portable app in that folder and retry."
+            ) from exc
     shutil.copytree(src, dst)
 
 
@@ -31,11 +36,14 @@ def _zip_dir(source_dir: Path, zip_path: Path) -> None:
     if zip_path.exists():
         zip_path.unlink()
 
-    with ZipFile(zip_path, mode="w", compression=ZIP_DEFLATED) as zf:
-        for path in source_dir.rglob("*"):
-            if path.is_file():
-                arcname = path.relative_to(source_dir.parent)
-                zf.write(path, arcname=arcname)
+    files = [path for path in source_dir.rglob("*") if path.is_file()]
+    print(f"Zipping {len(files)} files into {zip_path.name} (store mode, no compression)...", flush=True)
+    with ZipFile(zip_path, mode="w", compression=ZIP_STORED) as zf:
+        for index, path in enumerate(files, start=1):
+            arcname = path.relative_to(source_dir.parent)
+            zf.write(path, arcname=arcname)
+            if index % 500 == 0:
+                print(f"  zipped {index}/{len(files)} files...", flush=True)
 
 
 def main() -> int:
@@ -63,10 +71,17 @@ def main() -> int:
 
     portable_dir = portable_root / f"{product_name}-portable-win-x64"
     if portable_dir.exists():
-        shutil.rmtree(portable_dir)
+        try:
+            shutil.rmtree(portable_dir)
+        except PermissionError as exc:
+            raise RuntimeError(
+                f"Failed to remove {portable_dir}. Close any running VoiceReader portable app and retry."
+            ) from exc
     portable_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"Preparing portable folder: {portable_dir}", flush=True)
     shutil.copy2(exe_path, portable_dir / exe_name)
+    print("Copying sidecar runtime and bundled models...", flush=True)
     _copytree(binaries_dir, portable_dir / "binaries")
 
     readme_path = portable_dir / "README-PORTABLE.txt"

@@ -319,6 +319,7 @@ const activeAudioSources = new Set<AudioBufferSourceNode>();
 const suppressedJobIds = new Set<string>();
 const playbackChunkCounts = new Map<string, number>();
 let hasOutputPrimed = false;
+let hasStartupSilenceInjected = false;
 let currentPresetSpeakers: SpeakerPreset[] = [];
 let currentSelectedSpeaker = "";
 let currentSelectedModel = "";
@@ -676,8 +677,8 @@ function ensureAudioContext(): AudioContext {
 
 function nextChunkLeadSeconds(jobId: string): number {
   const DEFAULT_LEAD_SECONDS = 0.02;
-  const FIRST_CHUNK_LEAD_SECONDS = 0.08;
-  const FIRST_OUTPUT_PREROLL_SECONDS = 0.16;
+  const FIRST_CHUNK_LEAD_SECONDS = 0.16;
+  const FIRST_OUTPUT_PREROLL_SECONDS = 0.26;
 
   let lead = DEFAULT_LEAD_SECONDS;
   if (jobId) {
@@ -693,6 +694,16 @@ function nextChunkLeadSeconds(jobId: string): number {
     hasOutputPrimed = true;
   }
   return lead;
+}
+
+function prependSilence(samples: Float32Array, sampleRate: number, ms: number): Float32Array {
+  const silenceFrames = Math.max(0, Math.round((sampleRate * ms) / 1000));
+  if (silenceFrames === 0) {
+    return samples;
+  }
+  const withSilence = new Float32Array(silenceFrames + samples.length);
+  withSilence.set(samples, silenceFrames);
+  return withSilence;
 }
 
 function decodePcm16Base64ToFloat32(base64Data: string): Float32Array {
@@ -745,7 +756,12 @@ async function enqueueAudioChunk(eventPayload: Record<string, unknown>): Promise
     await context.resume();
   }
 
-  const samples = decodePcm16Base64ToFloat32(dataBase64);
+  let samples = decodePcm16Base64ToFloat32(dataBase64);
+  if (!hasStartupSilenceInjected) {
+    // The first device wake-up can clip a short prefix; prepend silence once.
+    samples = prependSilence(samples, sampleRate, 160);
+    hasStartupSilenceInjected = true;
+  }
   const buffer = context.createBuffer(1, samples.length, sampleRate);
   buffer.copyToChannel(samples, 0, 0);
 

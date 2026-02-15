@@ -28,8 +28,10 @@
     "windows": [
       {
         "title": "VoiceReader",
-        "width": 1080,
-        "height": 760,
+        "width": 1240,
+        "height": 980,
+        "minWidth": 980,
+        "minHeight": 840,
         "resizable": true
       }
     ],

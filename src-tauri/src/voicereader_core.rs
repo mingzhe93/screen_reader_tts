@@ -2009,16 +2009,26 @@ fn resolve_bundled_kyutai_model_dir(app: &AppHandle) -> Option<PathBuf> {
     }
 
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(resource_dir) = app.path_resolver().resource_dir() {
-        dirs.push(resource_dir.clone());
-        dirs.push(resource_dir.join("binaries"));
-    }
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            dirs.push(exe_dir.to_path_buf());
-            dirs.push(exe_dir.join("binaries"));
-            dirs.push(exe_dir.join("resources"));
-            dirs.push(exe_dir.join("resources").join("binaries"));
+            for candidate in [
+                exe_dir.to_path_buf(),
+                exe_dir.join("binaries"),
+                exe_dir.join("resources"),
+                exe_dir.join("resources").join("binaries"),
+            ] {
+                if seen.insert(candidate.clone()) {
+                    dirs.push(candidate);
+                }
+            }
+        }
+    }
+    if let Some(resource_dir) = app.path_resolver().resource_dir() {
+        for candidate in [resource_dir.clone(), resource_dir.join("binaries")] {
+            if seen.insert(candidate.clone()) {
+                dirs.push(candidate);
+            }
         }
     }
 
@@ -2055,16 +2065,26 @@ fn resolve_bundled_engine_executable(app: &AppHandle) -> Option<PathBuf> {
     }
 
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(resource_dir) = app.path_resolver().resource_dir() {
-        dirs.push(resource_dir.clone());
-        dirs.push(resource_dir.join("binaries"));
-    }
+    let mut seen: HashSet<PathBuf> = HashSet::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            dirs.push(exe_dir.to_path_buf());
-            dirs.push(exe_dir.join("binaries"));
-            dirs.push(exe_dir.join("resources"));
-            dirs.push(exe_dir.join("resources").join("binaries"));
+            for candidate in [
+                exe_dir.to_path_buf(),
+                exe_dir.join("binaries"),
+                exe_dir.join("resources"),
+                exe_dir.join("resources").join("binaries"),
+            ] {
+                if seen.insert(candidate.clone()) {
+                    dirs.push(candidate);
+                }
+            }
+        }
+    }
+    if let Some(resource_dir) = app.path_resolver().resource_dir() {
+        for candidate in [resource_dir.clone(), resource_dir.join("binaries")] {
+            if seen.insert(candidate.clone()) {
+                dirs.push(candidate);
+            }
         }
     }
 
@@ -2099,12 +2119,29 @@ fn find_sidecar_in_dir(dir: &Path) -> Option<PathBuf> {
     for entry in entries {
         let entry = entry.ok()?;
         let path = entry.path();
-        if !path.is_file() {
+        if path.is_file() {
+            let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+            if is_sidecar_filename(&name) {
+                return Some(path);
+            }
             continue;
         }
-        let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
-        if is_sidecar_filename(&name) {
-            return Some(path);
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let nested_entries = std::fs::read_dir(&path).ok()?;
+        for nested in nested_entries {
+            let nested = nested.ok()?;
+            let nested_path = nested.path();
+            if !nested_path.is_file() {
+                continue;
+            }
+            let name = nested_path.file_name()?.to_string_lossy().to_ascii_lowercase();
+            if is_sidecar_filename(&name) {
+                return Some(nested_path);
+            }
         }
     }
     None

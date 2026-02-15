@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -69,13 +70,44 @@ def _is_kyutai_model_ready(repo_dir: Path) -> bool:
 
 def _copy_kyutai_model_repo(source_repo: Path, target_repo: Path) -> None:
     if target_repo.exists():
-        shutil.rmtree(target_repo)
+        _remove_path_with_retry(target_repo)
     target_repo.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_repo, target_repo, ignore=shutil.ignore_patterns(".cache"))
 
     cache_dir = target_repo / ".cache"
     if cache_dir.exists():
-        shutil.rmtree(cache_dir)
+        _remove_path_with_retry(cache_dir)
+
+
+def _remove_path_with_retry(path: Path, attempts: int = 24, delay_seconds: float = 0.35) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            if not path.exists():
+                return
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError as exc:
+            last_error = exc
+        except OSError as exc:
+            # Windows file lock / access denied while process still holds an open handle.
+            if getattr(exc, "winerror", None) in (5, 32):
+                last_error = exc
+            else:
+                raise
+
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+
+    raise RuntimeError(
+        "Failed to replace bundled sidecar because files are in use. "
+        "Close VoiceReader and stop any running tts-engine.exe process, then retry."
+    ) from last_error
 
 
 def ensure_bundled_kyutai_model(root: Path, engine_dir: Path, python: Path) -> Path:
@@ -121,11 +153,14 @@ def main() -> int:
     src_tauri_binaries = root / "src-tauri" / "binaries"
     src_tauri_binaries.mkdir(parents=True, exist_ok=True)
 
-    entrypoint = engine_dir / "src" / "tts_engine" / "__main__.py"
+    entrypoint = engine_dir / "sidecar_entry.py"
     if not entrypoint.exists():
         raise RuntimeError(f"Engine entrypoint not found: {entrypoint}")
 
     python = resolve_python(engine_dir)
+    if not python.exists():
+        raise RuntimeError(f"Python executable not found: {python}")
+
     ensure_pyinstaller(python, engine_dir)
     cmd = [
         str(python),
@@ -134,6 +169,8 @@ def main() -> int:
         "--noconfirm",
         "--clean",
         "--onedir",
+        "--paths",
+        str(engine_dir / "src"),
         "--name",
         "tts-engine",
         str(entrypoint),
@@ -146,9 +183,19 @@ def main() -> int:
     built_exe = built_dir / sidecar_bin_name
     bundled_dir = src_tauri_binaries / f"tts-engine-{target_triple}"
     bundled_exe = bundled_dir / sidecar_bin_name
+    profile_marker = bundled_dir / ".build-profile"
     legacy_onefile_path = src_tauri_binaries / f"tts-engine-{target_triple}{exe_suffix}"
 
-    if not (bundled_exe.exists() and bundled_exe.stat().st_mtime >= entrypoint.stat().st_mtime):
+    marker_value = ""
+    if profile_marker.exists():
+        marker_value = profile_marker.read_text(encoding="utf-8").strip()
+    expected_marker = f"profile=full|python={python}"
+
+    if not (
+        bundled_exe.exists()
+        and bundled_exe.stat().st_mtime >= entrypoint.stat().st_mtime
+        and marker_value == expected_marker
+    ):
         print("Building sidecar executable with PyInstaller...")
         print(f"Using Python: {python}")
         subprocess.run(cmd, cwd=engine_dir, check=True)
@@ -157,14 +204,15 @@ def main() -> int:
             raise RuntimeError(f"PyInstaller output not found: {built_exe}")
 
         if bundled_dir.exists():
-            shutil.rmtree(bundled_dir)
+            _remove_path_with_retry(bundled_dir)
         shutil.copytree(built_dir, bundled_dir)
+        profile_marker.write_text(expected_marker, encoding="utf-8")
         print(f"Copied sidecar runtime directory to: {bundled_dir}")
     else:
-        print(f"Sidecar runtime already up to date: {bundled_dir}")
+        print(f"Sidecar runtime already up to date: {bundled_dir} ({expected_marker})")
 
     if legacy_onefile_path.exists():
-        legacy_onefile_path.unlink()
+        _remove_path_with_retry(legacy_onefile_path)
         print(f"Removed legacy onefile sidecar: {legacy_onefile_path}")
 
     ensure_bundled_kyutai_model(root=root, engine_dir=engine_dir, python=python)

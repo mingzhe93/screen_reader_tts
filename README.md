@@ -68,7 +68,7 @@ This is what is wired right now:
 ---
 
 ## Default model sources
-- Hugging Face model: [Verylicious/pocket-tts-ungated](https://huggingface.co/Verylicious/pocket-tts-ungated)
+- Hugging Face model: [Verylicious/pocket-tts-ungated Meant for developers with no huggingface account](https://huggingface.co/Verylicious/pocket-tts-ungated)
 - Hugging Face model: [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base)
 - No-clone default voice runtime path: [Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice)
 - GitHub repo: [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
