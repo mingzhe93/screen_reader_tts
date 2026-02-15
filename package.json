@@ -7,8 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "sidecar:build": "python ./tts-engine/scripts/build_sidecar.py",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build"
+    "desktop:build": "tauri build",
+    "desktop:build:standalone": "tauri build",
+    "desktop:build:portable": "npm run sidecar:build && npm run build && cargo build --manifest-path src-tauri/Cargo.toml --release && python ./scripts/package_portable.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.6.0"

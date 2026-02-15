@@ -7,8 +7,8 @@ The Engine runs as a localhost-only service that the desktop app communicates wi
   - HTTP for request/response control
   - WebSocket for audio chunk and job event streaming
 - Security:
-  - App generates a high-entropy session token before launching Engine
-  - Token is passed via stdin bootstrap payload (preferred) or inherited env var
+- App generates a high-entropy session token before launching Engine
+- Token is passed via inherited env var (`SPEAK_SELECTION_ENGINE_TOKEN`) in current app/runtime flow
   - Engine binds loopback only (`127.0.0.1`) on an app-chosen port
   - Query-string auth tokens are disabled
 
@@ -47,7 +47,11 @@ All errors return:
 ```
 
 ### 2.4 Session bootstrap (current status)
-Bootstrap schema is intentionally deferred for now. Interim behavior for standalone engine testing:
+Bootstrap stdin schema is intentionally deferred for now. Current behavior:
+1) app/launcher sets token via `SPEAK_SELECTION_ENGINE_TOKEN`
+2) app/launcher starts engine process with `--server --port <port>` (+ optional `--data-dir`)
+
+Standalone engine testing behavior:
 1) set token via `SPEAK_SELECTION_ENGINE_TOKEN`
 2) launch engine with `python -m tts_engine --server --port <port>`
 
@@ -194,7 +198,7 @@ Alternative audio input (base64):
   "voice_id": "uuid",
   "display_name": "My Voice",
   "created_at": "ISO8601",
-  "tts_model_id": "qwen3-tts-12hz-0.6b-base"
+  "tts_model_id": "Verylicious/pocket-tts-ungated"
 }
 ```
 
@@ -398,7 +402,7 @@ Fields are optional. Omitted fields keep their current runtime value.
     "fallback_active": false,
     "detail": "model=..., default_voice_prompt=alba",
     "supports_default_voice": true,
-    "supports_cloned_voices": false,
+    "supports_cloned_voices": true,
     "warmup": {
       "status": "ready",
       "runs": 1,

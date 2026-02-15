@@ -7,14 +7,16 @@
 - Capture selected text from the active application:
   1) Accessibility APIs (primary)
   2) Clipboard copy-and-restore (fallback)
-- Local TTS inference with **Qwen3-TTS-12Hz-0.6B-Base** bundled by default
-- No-clone first-run inference currently uses **Qwen3-TTS-12Hz-0.6B-CustomVoice** speaker presets (`voice_id: "0"` path)
-- Phase 1 runtime profile: CUDA + BF16 (`torch.bfloat16`)
-- Preferred attention backend: FlashAttention 2
-- Windows fallback backend (if FlashAttention 2 is unavailable): PyTorch SDPA
-- Phase 1 engine validation target is NVIDIA CUDA; cross-device parity is deferred
+- Local TTS inference with **Kyutai Pocket TTS** bundled by default
+- Qwen models are available as on-demand downloads
+- First-run default voice path uses built-in voice `voice_id: "0"` (Kyutai preset prompt)
+- Runtime profile supports:
+  - Kyutai on CPU (default bundled path)
+  - Qwen on CUDA + BF16 when activated
+- Preferred Qwen attention backend: FlashAttention 2
+- Windows Qwen fallback backend (if FlashAttention 2 is unavailable): PyTorch SDPA
 - First-run usable speech path with built-in default voice (`voice_id: "0"`) before any cloning
-- "Clone once -> save -> reuse" voice cloning using reusable voice prompt artifacts (inference hookup deferred)
+- "Clone once -> save -> reuse" voice cloning using reusable voice prompt artifacts (implemented for Kyutai backend)
 - Chunked synthesis + immediate playback (streaming UX without true streaming inference)
 - Model-swappable engine architecture (future models as plugins/backends)
 
@@ -23,7 +25,7 @@
 - True streaming token-by-token synthesis
 - Mobile implementation (Android/iOS)
 - Cloud services / accounts / sync
-- Production CPU/MPS fallback paths
+- Qwen CPU/MPS production optimization paths
 
 ---
 
@@ -138,19 +140,20 @@ Requirements:
 - Default built-in voice path:
   - `voice_id: "0"` is always available
   - no cloning required
-  - current inference backend uses Qwen CustomVoice speaker preset
+  - current default app runtime uses Kyutai preset voice prompt (default `alba`)
 - Cloned voice path:
   - `voice_id: <uuid>` stored in local `voices/`
   - if unknown UUID is requested, return `VOICE_NOT_FOUND`
-  - real cloned-voice inference is a later milestone
+  - Kyutai backend supports real cloned-voice inference from saved `prompt.safetensors`
 
 ### 5.4 Device selection
 - Phase 1 supported runtime:
-  - CUDA device path
-  - `torch_dtype=bfloat16`
-  - `attn_implementation="flash_attention_2"` preferred
-  - `attn_implementation="sdpa"` fallback on Windows when FlashAttention 2 is unavailable
-- Non-CUDA paths (CPU/MPS/ONNX/INT8) are deferred to Phase 2.
+  - Kyutai default path on CPU
+  - Qwen optional CUDA device path
+  - Qwen `torch_dtype=bfloat16`
+  - Qwen `attn_implementation="flash_attention_2"` preferred
+  - Qwen `attn_implementation="sdpa"` fallback on Windows when FlashAttention 2 is unavailable
+- Qwen non-CUDA optimization paths (CPU/MPS/ONNX/INT8) are deferred to Phase 2.
 
 ### 5.5 Warmup behavior
 - Engine performs optional startup warmup inference (`VOICEREADER_WARMUP_ON_STARTUP=true` by default).
@@ -193,18 +196,19 @@ Constraints:
 - User provides transcript OR optional ASR module supplies it
 - Engine creates reusable clone prompt once
 - Engine saves voice profile and returns UUID `voice_id`
+- Engine can immediately synthesize with that saved cloned voice (`voice_id=<uuid>`) on Kyutai backend
 
 ---
 
 ## 7. Packaging & Models
 
 ### 7.1 Default bundled model
-- Bundle Qwen3-TTS-12Hz-0.6B-Base as a compressed model pack in app resources.
+- Bundle Kyutai Pocket TTS model repo (`Verylicious/pocket-tts-ungated`) in app resources.
+- Bundle sidecar runtime (`tts-engine`) in app resources.
 
 First-run behavior:
-- Extract to per-user `models/qwen3-tts-12hz-0.6b-base/`
-- Verify checksum
-- Mark as installed
+- Engine resolves bundled Kyutai model path directly from app resources.
+- If bundled model is missing, engine falls back to repo-id based download flow into app data.
 
 ### 7.2 On-demand model downloads
 - Maintain `model_registry.json` shipped with app:
@@ -215,25 +219,27 @@ First-run behavior:
   - sha256
   - license metadata
 - Download to temp directory, verify sha256, move into place
-- Note: Phase 1 keeps only the bundled default model active. Additional model variants become active scope in Phase 2.
+- Phase 1 app exposes on-demand downloads for Qwen CustomVoice + Qwen Base from the Engine tab.
 
 ---
 
 ## 8. Storage Layout
 
 Per-user app data directory:
-- Windows: `%LOCALAPPDATA%/VoiceReader/`
-- macOS: `~/Library/Application Support/VoiceReader/`
+- Windows: `%LOCALAPPDATA%/com.voicereader.desktop/data/`
+- macOS: `~/Library/Application Support/com.voicereader.desktop/data/`
 
 ```
 models/
-  qwen3-tts-12hz-0.6b-base/
-  qwen3-asr-0.6b/ (optional)
+  Verylicious/pocket-tts-ungated/ (bundled or mirrored)
+  Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice/ (on-demand)
+  Qwen/Qwen3-TTS-12Hz-0.6B-Base/ (on-demand)
 voices/
   <voice_id>/
     meta.json
     prompt.safetensors
 settings.json
+hf-cache/
 cache/
 logs/
 ```
@@ -249,8 +255,8 @@ logs/
 ## 10. Milestones / Deliverables
 
 ### M1 - Engine MVP
-- Load bundled model
-- Validate CUDA + BF16 runtime path with FlashAttention 2 preferred and SDPA fallback
+- Load bundled Kyutai model
+- Validate Kyutai default runtime path and Qwen optional CUDA + BF16 path (FlashAttention 2 preferred, SDPA fallback on Windows)
 - `/health`
 - `/voices` includes built-in default voice `"0"`
 - `/speak` works with default voice `"0"` before cloning

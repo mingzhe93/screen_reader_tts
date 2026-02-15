@@ -317,6 +317,8 @@ let playbackCursor = 0;
 let runtimeWasDown = false;
 const activeAudioSources = new Set<AudioBufferSourceNode>();
 const suppressedJobIds = new Set<string>();
+const playbackChunkCounts = new Map<string, number>();
+let hasOutputPrimed = false;
 let currentPresetSpeakers: SpeakerPreset[] = [];
 let currentSelectedSpeaker = "";
 let currentSelectedModel = "";
@@ -672,6 +674,27 @@ function ensureAudioContext(): AudioContext {
   return audioContext;
 }
 
+function nextChunkLeadSeconds(jobId: string): number {
+  const DEFAULT_LEAD_SECONDS = 0.02;
+  const FIRST_CHUNK_LEAD_SECONDS = 0.08;
+  const FIRST_OUTPUT_PREROLL_SECONDS = 0.16;
+
+  let lead = DEFAULT_LEAD_SECONDS;
+  if (jobId) {
+    const currentCount = playbackChunkCounts.get(jobId) ?? 0;
+    if (currentCount === 0) {
+      lead = FIRST_CHUNK_LEAD_SECONDS;
+    }
+    playbackChunkCounts.set(jobId, currentCount + 1);
+  }
+
+  if (!hasOutputPrimed) {
+    lead += FIRST_OUTPUT_PREROLL_SECONDS;
+    hasOutputPrimed = true;
+  }
+  return lead;
+}
+
 function decodePcm16Base64ToFloat32(base64Data: string): Float32Array {
   const binary = atob(base64Data);
   const bytes = new Uint8Array(binary.length);
@@ -735,7 +758,9 @@ async function enqueueAudioChunk(eventPayload: Record<string, unknown>): Promise
   };
 
   const now = context.currentTime;
-  const startAt = Math.max(playbackCursor, now + 0.02);
+  const jobId = String(eventPayload.job_id ?? "");
+  const leadSeconds = nextChunkLeadSeconds(jobId);
+  const startAt = Math.max(playbackCursor, now + leadSeconds);
   source.start(startAt);
   playbackCursor = startAt + buffer.duration;
 }
@@ -1219,6 +1244,7 @@ async function bindEvents(): Promise<void> {
     if (eventType === "JOB_CANCELED") {
       if (jobId) {
         suppressedJobIds.delete(jobId);
+        playbackChunkCounts.delete(jobId);
       }
       stopAllPlayback();
       return;
@@ -1227,6 +1253,7 @@ async function bindEvents(): Promise<void> {
     if (eventType === "JOB_DONE" || eventType === "JOB_ERROR") {
       if (jobId) {
         suppressedJobIds.delete(jobId);
+        playbackChunkCounts.delete(jobId);
       }
       resetPlaybackCursor();
     }
@@ -1236,6 +1263,7 @@ async function bindEvents(): Promise<void> {
     const jobId = String(payload.job_id ?? "unknown");
     if (jobId !== "unknown") {
       suppressedJobIds.delete(jobId);
+      playbackChunkCounts.set(jobId, 0);
     }
     log(`job_started id=${jobId}`);
   });
@@ -1252,6 +1280,7 @@ async function bindEvents(): Promise<void> {
     const jobId = String(payload.job_id ?? "");
     if (jobId) {
       suppressedJobIds.add(jobId);
+      playbackChunkCounts.delete(jobId);
     }
     stopAllPlayback();
     log(`playback_stop job_id=${jobId || "unknown"}`);

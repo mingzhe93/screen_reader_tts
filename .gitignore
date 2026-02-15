@@ -13,3 +13,8 @@ __pycache__/
 .data/
 .DS_Store
 Thumbs.db
+src-tauri/binaries/tts-engine-*
+src-tauri/binaries/models/
+tts-engine/build/
+tts-engine/dist/
+tts-engine/*.spec

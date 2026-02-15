@@ -1502,35 +1502,24 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
         return Ok(());
     }
 
-    let engine_root = find_engine_root()?;
-    let python_executable = resolve_python_executable(&engine_root);
+    let engine_root = find_engine_root().ok();
 
     let token = generate_token();
     let port = portpicker::pick_unused_port().ok_or_else(|| anyhow!("Failed to find a free localhost port"))?;
     let base_url = format!("http://127.0.0.1:{port}");
-    let data_dir = resolve_engine_data_dir(app, &engine_root)?;
+    let data_dir = resolve_engine_data_dir(app, engine_root.as_deref())?;
     std::fs::create_dir_all(&data_dir).context("Failed to create engine data dir")?;
     let models_dir = data_dir.join("models");
     let hf_cache_dir = data_dir.join("hf-cache");
 
-    let mut command = Command::new(&python_executable);
+    let (mut command, launch_target) = build_engine_launch_command(app, engine_root.as_deref(), port, &data_dir)?;
+    let kyutai_model_setting = resolve_bundled_kyutai_model_dir(app)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_else(|| KYUTAI_REPO.to_string());
     command
-        .args([
-            "-m",
-            "tts_engine",
-            "--server",
-            "--port",
-            &port.to_string(),
-            "--data-dir",
-            data_dir
-                .to_str()
-                .ok_or_else(|| anyhow!("Invalid engine data dir path"))?,
-        ])
-        .current_dir(&engine_root)
         .env("SPEAK_SELECTION_ENGINE_TOKEN", &token)
-        .env("PYTHONPATH", engine_root.join("src"))
         .env("VOICEREADER_SYNTH_BACKEND", "auto")
-        .env("VOICEREADER_KYUTAI_MODEL", KYUTAI_REPO)
+        .env("VOICEREADER_KYUTAI_MODEL", kyutai_model_setting)
         .env("VOICEREADER_KYUTAI_VOICE_PROMPT", "alba")
         .env("VOICEREADER_QWEN_MODEL", QWEN_CUSTOM_REPO)
         .env("VOICEREADER_QWEN_SPEAKER", "Ryan");
@@ -1538,6 +1527,13 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
     if cfg!(target_os = "windows") {
         // FlashAttention2 is often unavailable on Windows; use SDPA directly for stable startup.
         command.env("VOICEREADER_QWEN_ATTN_IMPLEMENTATION", "sdpa");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 
     if cfg!(debug_assertions) {
@@ -1548,7 +1544,7 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
 
     let child = command
         .spawn()
-        .with_context(|| format!("Failed to launch engine sidecar via {python_executable}"))?;
+        .with_context(|| format!("Failed to launch engine sidecar via {launch_target}"))?;
 
     {
         let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
@@ -1880,27 +1876,59 @@ fn child_runtime_snapshot(state: &mut EngineState) -> (bool, Option<u32>) {
 }
 
 fn find_engine_root() -> Result<PathBuf> {
-    let cwd = std::env::current_dir().context("Failed to resolve current directory")?;
-    let candidates = [
-        cwd.join("tts-engine"),
-        cwd.join("../tts-engine"),
-        cwd.join("../../tts-engine"),
-    ];
+    fn is_engine_root(path: &Path) -> bool {
+        path.join("src").join("tts_engine").join("main.py").exists()
+    }
 
-    for candidate in candidates {
-        let marker = candidate.join("src").join("tts_engine").join("main.py");
-        if marker.exists() {
-            let canonical = candidate.canonicalize().unwrap_or(candidate);
-            return Ok(normalize_windows_extended_path(canonical));
+    if let Ok(raw_override) = std::env::var("VOICEREADER_ENGINE_ROOT") {
+        let trimmed = raw_override.trim();
+        if !trimmed.is_empty() {
+            let override_path = PathBuf::from(trimmed);
+            if is_engine_root(&override_path) {
+                let canonical = override_path.canonicalize().unwrap_or(override_path);
+                return Ok(normalize_windows_extended_path(canonical));
+            }
+        }
+    }
+
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        bases.push(cwd);
+    }
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            bases.push(exe_dir.to_path_buf());
+        }
+    }
+
+    for base in bases {
+        let mut cursor: Option<&Path> = Some(base.as_path());
+        for _ in 0..=7 {
+            let Some(dir) = cursor else {
+                break;
+            };
+
+            if is_engine_root(dir) {
+                let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+                return Ok(normalize_windows_extended_path(canonical));
+            }
+
+            let candidate = dir.join("tts-engine");
+            if is_engine_root(&candidate) {
+                let canonical = candidate.canonicalize().unwrap_or(candidate);
+                return Ok(normalize_windows_extended_path(canonical));
+            }
+
+            cursor = dir.parent();
         }
     }
 
     Err(anyhow!(
-        "Unable to locate tts-engine directory. Expected one of ./tts-engine, ../tts-engine, ../../tts-engine"
+        "Unable to locate tts-engine directory. Set VOICEREADER_ENGINE_ROOT or place tts-engine near the app."
     ))
 }
 
-fn resolve_engine_data_dir(_app: &AppHandle, engine_root: &Path) -> Result<PathBuf> {
+fn resolve_engine_data_dir(_app: &AppHandle, _engine_root: Option<&Path>) -> Result<PathBuf> {
     if let Ok(raw_override) = std::env::var("VOICEREADER_DATA_DIR") {
         let trimmed = raw_override.trim();
         if !trimmed.is_empty() {
@@ -1911,7 +1939,10 @@ fn resolve_engine_data_dir(_app: &AppHandle, engine_root: &Path) -> Result<PathB
 
     #[cfg(debug_assertions)]
     {
-        return Ok(normalize_windows_extended_path(engine_root.join(".data")));
+        let root = _engine_root.ok_or_else(|| {
+            anyhow!("Unable to locate tts-engine directory while running in debug mode")
+        })?;
+        return Ok(normalize_windows_extended_path(root.join(".data")));
     }
 
     #[cfg(not(debug_assertions))]
@@ -1922,6 +1953,214 @@ fn resolve_engine_data_dir(_app: &AppHandle, engine_root: &Path) -> Result<PathB
             .ok_or_else(|| anyhow!("Failed to resolve app_local_data_dir for engine storage"))?;
         return Ok(normalize_windows_extended_path(app_data_dir.join("data")));
     }
+}
+
+fn build_engine_launch_command(
+    app: &AppHandle,
+    engine_root: Option<&Path>,
+    port: u16,
+    data_dir: &Path,
+) -> Result<(Command, String)> {
+    #[cfg(debug_assertions)]
+    let _ = app;
+
+    #[cfg(not(debug_assertions))]
+    {
+        if let Some(sidecar_path) = resolve_bundled_engine_executable(app) {
+            let data_dir_str = data_dir
+                .to_str()
+                .ok_or_else(|| anyhow!("Invalid engine data dir path"))?;
+            let mut command = Command::new(&sidecar_path);
+            command.args(["--server", "--port", &port.to_string(), "--data-dir", data_dir_str]);
+            return Ok((command, sidecar_path.to_string_lossy().to_string()));
+        }
+    }
+
+    let root = engine_root.ok_or_else(|| anyhow!("Unable to locate tts-engine directory"))?;
+    let python_executable = resolve_python_executable(root);
+    let data_dir_str = data_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid engine data dir path"))?;
+    let mut command = Command::new(&python_executable);
+    command
+        .args([
+            "-m",
+            "tts_engine",
+            "--server",
+            "--port",
+            &port.to_string(),
+            "--data-dir",
+            data_dir_str,
+        ])
+        .current_dir(root)
+        .env("PYTHONPATH", root.join("src"));
+    Ok((command, python_executable))
+}
+
+fn resolve_bundled_kyutai_model_dir(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(raw_override) = std::env::var("VOICEREADER_BUNDLED_KYUTAI_MODEL_DIR") {
+        let trimmed = raw_override.trim();
+        if !trimmed.is_empty() {
+            let override_path = PathBuf::from(trimmed);
+            if is_kyutai_model_dir(&override_path) {
+                return Some(normalize_windows_extended_path(override_path));
+            }
+        }
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(resource_dir) = app.path_resolver().resource_dir() {
+        dirs.push(resource_dir.clone());
+        dirs.push(resource_dir.join("binaries"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            dirs.push(exe_dir.to_path_buf());
+            dirs.push(exe_dir.join("binaries"));
+            dirs.push(exe_dir.join("resources"));
+            dirs.push(exe_dir.join("resources").join("binaries"));
+        }
+    }
+
+    for dir in dirs {
+        let candidate = dir
+            .join("models")
+            .join("Verylicious")
+            .join("pocket-tts-ungated");
+        if is_kyutai_model_dir(&candidate) {
+            return Some(normalize_windows_extended_path(candidate));
+        }
+    }
+
+    None
+}
+
+fn is_kyutai_model_dir(path: &Path) -> bool {
+    path.join("voicereader-pocket-tts.yaml").exists()
+        && path.join("tts_b6369a24.safetensors").exists()
+        && path.join("tokenizer.model").exists()
+        && path.join("embeddings").join("alba.safetensors").exists()
+}
+
+#[cfg(not(debug_assertions))]
+fn resolve_bundled_engine_executable(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(raw_override) = std::env::var("VOICEREADER_ENGINE_EXECUTABLE") {
+        let trimmed = raw_override.trim();
+        if !trimmed.is_empty() {
+            let override_path = PathBuf::from(trimmed);
+            if override_path.exists() {
+                return Some(normalize_windows_extended_path(override_path));
+            }
+        }
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(resource_dir) = app.path_resolver().resource_dir() {
+        dirs.push(resource_dir.clone());
+        dirs.push(resource_dir.join("binaries"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            dirs.push(exe_dir.to_path_buf());
+            dirs.push(exe_dir.join("binaries"));
+            dirs.push(exe_dir.join("resources"));
+            dirs.push(exe_dir.join("resources").join("binaries"));
+        }
+    }
+
+    let sidecar_exe = sidecar_executable_filename();
+    let sidecar_triple_dir = format!("tts-engine-{}", current_target_triple());
+
+    for dir in &dirs {
+        // Prefer onedir runtime layout first to avoid onefile extraction failures on locked-down machines.
+        let onedir_candidates = [
+            dir.join(&sidecar_triple_dir).join(sidecar_exe),
+            dir.join("tts-engine").join(sidecar_exe),
+        ];
+        for candidate in onedir_candidates {
+            if candidate.is_file() {
+                return Some(normalize_windows_extended_path(candidate));
+            }
+        }
+    }
+
+    for dir in dirs {
+        if let Some(found) = find_sidecar_in_dir(&dir) {
+            return Some(normalize_windows_extended_path(found));
+        }
+    }
+
+    None
+}
+
+#[cfg(not(debug_assertions))]
+fn find_sidecar_in_dir(dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+        if is_sidecar_filename(&name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+#[cfg(not(debug_assertions))]
+fn is_sidecar_filename(name: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return name == "tts-engine.exe" || (name.starts_with("tts-engine-") && name.ends_with(".exe"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        name == "tts-engine" || name.starts_with("tts-engine-")
+    }
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64", not(debug_assertions)))]
+fn current_target_triple() -> &'static str {
+    "x86_64-pc-windows-msvc"
+}
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64", not(debug_assertions)))]
+fn current_target_triple() -> &'static str {
+    "aarch64-pc-windows-msvc"
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64", not(debug_assertions)))]
+fn current_target_triple() -> &'static str {
+    "x86_64-apple-darwin"
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", not(debug_assertions)))]
+fn current_target_triple() -> &'static str {
+    "aarch64-apple-darwin"
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(debug_assertions)))]
+fn current_target_triple() -> &'static str {
+    "x86_64-unknown-linux-gnu"
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64", not(debug_assertions)))]
+fn current_target_triple() -> &'static str {
+    "aarch64-unknown-linux-gnu"
+}
+
+#[cfg(all(target_os = "windows", not(debug_assertions)))]
+fn sidecar_executable_filename() -> &'static str {
+    "tts-engine.exe"
+}
+
+#[cfg(all(not(target_os = "windows"), not(debug_assertions)))]
+fn sidecar_executable_filename() -> &'static str {
+    "tts-engine"
 }
 
 fn resolve_python_executable(engine_root: &Path) -> String {

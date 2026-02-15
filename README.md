@@ -13,8 +13,8 @@ It's designed to improve readability and accessibility (especially for people wi
   - Save the cloned voice locally
   - Reuse it for all future speech generation
 - Works fully offline by default:
-  - Bundles **Qwen3-TTS-12Hz-0.6B-Base** in the installer/app
-  - Additional models can be downloaded on-demand later
+  - Bundles **Kyutai Pocket TTS** in the installer/app runtime
+  - Additional Qwen models can be downloaded on-demand later
 
 ## Why this exists
 Browser TTS extensions are often slow, inconsistent, and limited in voice quality. Meanwhile, modern TTS models can produce far more natural speech. VoiceReader brings that quality to a simple "highlight -> hotkey -> listen" workflow, locally and privately.
@@ -40,15 +40,17 @@ This is what is wired right now:
   - restart/cancel controls
   - shutdown on app exit
 - UI for:
-  - model mode selection (`qwen_custom_voice`, `qwen_base_clone`, `kyutai_pocket_tts`)
-  - preset speaker selection
-  - engine health and voice list inspection
+  - model mode selection (`kyutai_pocket_tts`, `qwen_custom_voice`, `qwen_base_clone`)
+  - unified voice selection (preset + saved cloned voices)
+  - clone/upload, voice edit/delete, and engine health/activity pages
+  - model download actions for Qwen variants
 
 ### Local engine service (Python)
 - Local daemon process (kept warm)
 - Loads Kyutai/Qwen model(s) from local engine data dir
-- Phase 1 runtime target: CUDA + `torch.bfloat16` with `attn_implementation="flash_attention_2"` when available
-- Windows fallback path: CUDA + BF16 + `attn_implementation="sdpa"` if FlashAttention 2 is unavailable
+- Default runtime path: Kyutai model on CPU (bundled for offline first run)
+- Optional Qwen runtime path: CUDA + `torch.bfloat16` with `attn_implementation="flash_attention_2"` when available
+- Windows Qwen fallback path: CUDA + BF16 + `attn_implementation="sdpa"` if FlashAttention 2 is unavailable
 - Provides an IPC API for:
   - `speak` (chunked synthesis)
   - `cancel`
@@ -60,9 +62,8 @@ This is what is wired right now:
 
 ### Known limitations in this slice
 - Selection capture is currently clipboard-based only (UIA/AX capture not wired yet)
-- Read-aloud path applies to `kyutai_pocket_tts` and `qwen_custom_voice`
-- Clone management UI is not wired yet (planned in the "Voices & Clone" tab)
-- Voice cloning inference is not wired yet (placeholder profiles still present)
+- Qwen base/custom flows are available but not bundled by default (download on demand)
+- Portable mode still depends on system WebView2 runtime on Windows
 
 ---
 
@@ -166,7 +167,11 @@ App-first path (recommended):
 npm run desktop:dev
 ```
 
-The app launches `tts-engine` as a Python sidecar automatically (from `tts-engine/.venv` when present), then performs auth + health handshake before enabling actions.
+The app launches `tts-engine` automatically and performs auth + health handshake before enabling actions:
+- dev fallback: Python sidecar from `tts-engine/.venv` when needed
+- packaged build: bundled sidecar runtime folder (no separate Python install required)
+
+On Windows, sidecar startup is created with `CREATE_NO_WINDOW` so the engine does not open a floating terminal window.
 
 Optional standalone engine debug mode:
 
@@ -177,6 +182,56 @@ python -m tts_engine --server --port 8765
 ```
 
 If you run standalone engine manually, use the Python test scripts in `tts-engine/scripts/` (see section 2.2) instead of the desktop app sidecar path.
+
+### 2.0) Build standalone desktop installer/runtime (Windows)
+
+This build path bundles the Python sidecar runtime and the Kyutai model files into the app package.
+
+```powershell
+npm run desktop:build:standalone
+```
+
+What this does:
+- builds sidecar with PyInstaller via `tts-engine/scripts/build_sidecar.py`
+- copies sidecar runtime folder to `src-tauri/binaries/tts-engine-x86_64-pc-windows-msvc/`
+- ensures Kyutai model mirror exists at `src-tauri/binaries/models/Verylicious/pocket-tts-ungated`
+- runs `tauri build` with bundled resources from `src-tauri/binaries/**/*`
+
+Quick verify before packaging:
+
+```powershell
+Get-ChildItem -Recurse src-tauri\binaries\models\Verylicious\pocket-tts-ungated | Select-Object FullName
+```
+
+Runtime behavior in packaged app:
+- if bundled Kyutai model exists, app sets `VOICEREADER_KYUTAI_MODEL` to that local bundled path
+- otherwise it falls back to repo id (`Verylicious/pocket-tts-ungated`) and downloads into app data as needed
+- sidecar uses PyInstaller `onedir` runtime layout (no onefile extraction step), which avoids temp-extraction failures on locked-down Windows machines
+
+Output artifacts are under:
+- `src-tauri/target/release/`
+- `src-tauri/target/release/bundle/`
+
+### 2.0.1) Build portable (no installer, Windows)
+
+If some users cannot install programs, build a portable package:
+
+```powershell
+npm run desktop:build:portable
+```
+
+This creates:
+- portable folder: `src-tauri/target/release/portable/VoiceReader-portable-win-x64`
+- portable zip: `src-tauri/target/release/bundle/portable/VoiceReader_<version>_x64_portable.zip`
+
+Portable contents:
+- `VoiceReader.exe`
+- `binaries/` (sidecar + bundled Kyutai model files)
+
+Notes:
+- no installer/admin rights required
+- keep `binaries/` next to `VoiceReader.exe`
+- app data/cache is still written to LocalAppData
 
 ### 2.1) Validate desktop app end-to-end flow
 
@@ -243,7 +298,7 @@ Notes:
   - `kyutai_pocket_tts` means Kyutai model inference is active
   - `qwen_custom_voice` means Qwen model inference is active
   - `mock` means fallback backend is active
-- Current real-inference limitation: `kyutai_pocket_tts` and `qwen_custom_voice` paths support default `voice_id: "0"` only.
+- Current clone support: Kyutai backend supports cloned voices (`voice_id=<uuid>`). Qwen custom path remains preset/default-voice focused.
 - Warmup endpoint exists: `POST /v1/warmup` (use `{"wait":true}` on startup). Model-switch flows can use `POST /v1/models/activate` to reload + warm up in one call.
 
 One-command variant (starts engine on a free port, runs smoke checks, then shuts it down):
@@ -346,11 +401,11 @@ rustup self uninstall -y
 ---
 
 ## Project docs
-- `model_registry.json` - draft registry format for on-demand model downloads (artifact URLs, checksums, runtime constraints)
+- `model_registry.json` - draft registry for bundled default + on-demand model metadata (source, distribution mode, runtime notes)
 - `docs/DESIGN_SPEC.md` - system design, components, storage, packaging, milestones
 - `docs/IPC_API.md` - concrete API contract (HTTP/WS), schemas, errors, streaming events
 
 ---
 
 ## License
-TBD (project). Bundled models retain their original licenses. The default bundled TTS model is Apache-2.0 licensed (Qwen3-TTS-12Hz-0.6B-Base).
+TBD (project). Bundled/on-demand models retain their original licenses. The default bundled model is Kyutai Pocket TTS (`Verylicious/pocket-tts-ungated`, Apache-2.0). Qwen models are downloaded on demand.
