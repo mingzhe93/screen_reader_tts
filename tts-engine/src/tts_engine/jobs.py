@@ -4,6 +4,10 @@ import asyncio
 import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import os
+from pathlib import Path
+import shutil
+import subprocess
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,6 +18,10 @@ from .synth import BaseSynthesizer, SynthesizedAudio
 
 
 TERMINAL_EVENT_TYPES = {"JOB_DONE", "JOB_CANCELED", "JOB_ERROR"}
+_LIBROSA_MODULE = None
+_LIBROSA_IMPORT_ATTEMPTED = False
+_SOX_PATH = None
+_SOX_LOOKUP_ATTEMPTED = False
 
 
 @dataclass(slots=True)
@@ -287,10 +295,9 @@ def _apply_playback_controls(
     if samples.size == 0:
         return audio
 
-    # Playback-speed control (rate): resample to shorter/longer PCM at same sample rate.
+    # Playback-speed control (rate): time-stretch to preserve perceived pitch.
     if rate != 1.0:
-        target_len = max(1, int(round(samples.shape[0] / rate)))
-        samples = _resample_linear(samples, target_len)
+        samples = _time_stretch_preserve_pitch(samples, rate=rate, sample_rate=audio.sample_rate)
 
     # Reserved for future model-aware pitch handling.
     _ = pitch
@@ -317,3 +324,170 @@ def _resample_linear(samples: np.ndarray, target_len: int) -> np.ndarray:
     src_x = np.linspace(0.0, float(samples.shape[0] - 1), num=samples.shape[0], dtype=np.float32)
     dst_x = np.linspace(0.0, float(samples.shape[0] - 1), num=target_len, dtype=np.float32)
     return np.interp(dst_x, src_x, samples).astype(np.float32)
+
+
+def _time_stretch_preserve_pitch(samples: np.ndarray, rate: float, sample_rate: int) -> np.ndarray:
+    if rate <= 0.0:
+        return samples
+
+    target_len = max(1, int(round(samples.shape[0] / rate)))
+    if samples.shape[0] <= 8:
+        return _resample_linear(samples, target_len)
+
+    sox_stretched = _time_stretch_with_sox(samples, rate=rate, sample_rate=sample_rate)
+    if sox_stretched is not None:
+        return sox_stretched
+
+    librosa = _load_librosa()
+    if librosa is None:
+        return _resample_linear(samples, target_len)
+
+    normalized = np.asarray(samples, dtype=np.float32) / 32768.0
+    try:
+        stretched = librosa.effects.time_stretch(normalized, rate=rate)
+    except Exception:
+        return _resample_linear(samples, target_len)
+
+    if stretched is None:
+        return _resample_linear(samples, target_len)
+
+    stretched = np.asarray(stretched, dtype=np.float32).reshape(-1)
+    if stretched.size == 0:
+        return _resample_linear(samples, target_len)
+    return stretched * 32768.0
+
+
+def _time_stretch_with_sox(
+    samples: np.ndarray,
+    rate: float,
+    sample_rate: int,
+) -> np.ndarray | None:
+    sox_path = _resolve_sox_path()
+    if sox_path is None:
+        return None
+    if sample_rate <= 0:
+        return None
+
+    pcm_int16 = np.asarray(np.clip(samples, -32768.0, 32767.0), dtype=np.int16)
+    factors = _decompose_tempo_factors(rate)
+    if not factors:
+        return pcm_int16.astype(np.float32)
+
+    command = [
+        sox_path,
+        "-q",
+        "-t",
+        "raw",
+        "-r",
+        str(sample_rate),
+        "-e",
+        "signed-integer",
+        "-b",
+        "16",
+        "-c",
+        "1",
+        "-L",
+        "-",
+        "-t",
+        "raw",
+        "-e",
+        "signed-integer",
+        "-b",
+        "16",
+        "-c",
+        "1",
+        "-L",
+        "-",
+    ]
+    for factor in factors:
+        command.extend(["tempo", f"{factor:.6f}"])
+
+    try:
+        result = subprocess.run(
+            command,
+            input=pcm_int16.tobytes(),
+            capture_output=True,
+            check=True,
+        )
+    except Exception:
+        return None
+
+    if not result.stdout:
+        return None
+    stretched_int16 = np.frombuffer(result.stdout, dtype=np.int16)
+    if stretched_int16.size == 0:
+        return None
+    return stretched_int16.astype(np.float32)
+
+
+def _decompose_tempo_factors(rate: float) -> list[float]:
+    if rate <= 0.0:
+        return []
+    remaining = float(rate)
+    factors: list[float] = []
+
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+
+    factors.append(remaining)
+    return factors
+
+
+def _load_librosa():
+    global _LIBROSA_MODULE, _LIBROSA_IMPORT_ATTEMPTED
+    if _LIBROSA_IMPORT_ATTEMPTED:
+        return _LIBROSA_MODULE
+
+    _LIBROSA_IMPORT_ATTEMPTED = True
+    try:
+        import librosa
+    except Exception:
+        _LIBROSA_MODULE = None
+    else:
+        _LIBROSA_MODULE = librosa
+    return _LIBROSA_MODULE
+
+
+def _resolve_sox_path() -> str | None:
+    global _SOX_PATH, _SOX_LOOKUP_ATTEMPTED
+    if _SOX_LOOKUP_ATTEMPTED:
+        return _SOX_PATH
+
+    _SOX_LOOKUP_ATTEMPTED = True
+    _SOX_PATH = shutil.which("sox")
+    if _SOX_PATH:
+        return _SOX_PATH
+
+    _SOX_PATH = _find_sox_in_windows_winget_location()
+    return _SOX_PATH
+
+
+def _find_sox_in_windows_winget_location() -> str | None:
+    if os.name != "nt":
+        return None
+
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        return None
+
+    root = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+    if not root.exists():
+        return None
+
+    candidates = sorted(root.glob("ChrisBagwell.SoX_*"))
+    for candidate in candidates:
+        # Common layout: ...\sox-14.4.2\sox.exe
+        nested_bins = sorted(candidate.glob("sox-*/sox.exe"))
+        for binary in nested_bins:
+            if binary.exists():
+                return str(binary.resolve())
+
+        direct_binary = candidate / "sox.exe"
+        if direct_binary.exists():
+            return str(direct_binary.resolve())
+
+    return None

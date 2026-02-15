@@ -13,6 +13,9 @@ DEFAULT_QWEN_DEVICE_MAP = "cuda:0"
 DEFAULT_QWEN_DTYPE = "bfloat16"
 DEFAULT_QWEN_ATTN = "flash_attention_2"
 DEFAULT_QWEN_SPEAKER = "Ryan"
+DEFAULT_KYUTAI_MODEL_NAME = "Verylicious/pocket-tts-ungated"
+DEFAULT_KYUTAI_VOICE_PROMPT = "alba"
+DEFAULT_KYUTAI_SAMPLE_RATE = 24_000
 DEFAULT_WARMUP_ON_STARTUP = True
 DEFAULT_WARMUP_TEXT = "Engine warmup sentence."
 DEFAULT_WARMUP_LANGUAGE = "auto"
@@ -32,6 +35,9 @@ class EngineConfig:
     qwen_dtype: str = DEFAULT_QWEN_DTYPE
     qwen_attn_implementation: str = DEFAULT_QWEN_ATTN
     qwen_default_speaker: str = DEFAULT_QWEN_SPEAKER
+    kyutai_model_name: str = DEFAULT_KYUTAI_MODEL_NAME
+    kyutai_voice_prompt: str = DEFAULT_KYUTAI_VOICE_PROMPT
+    kyutai_sample_rate: int = DEFAULT_KYUTAI_SAMPLE_RATE
     warmup_on_startup: bool = DEFAULT_WARMUP_ON_STARTUP
     warmup_text: str = DEFAULT_WARMUP_TEXT
     warmup_language: str = DEFAULT_WARMUP_LANGUAGE
@@ -52,8 +58,8 @@ class EngineConfig:
 
 def resolve_data_dir(raw_path: str | None) -> Path:
     if raw_path:
-        return Path(raw_path).expanduser().resolve()
-    return (Path.cwd() / ".data").resolve()
+        return _normalize_windows_extended_path(Path(raw_path).expanduser().resolve())
+    return _normalize_windows_extended_path((Path.cwd() / ".data").resolve())
 
 
 def load_token(explicit_token: str | None, token_env: str = DEFAULT_TOKEN_ENV) -> str | None:
@@ -81,3 +87,15 @@ def load_env_bool(env_name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "n", "off"}:
         return False
     return default
+
+
+def _normalize_windows_extended_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+
+    raw = str(path)
+    if raw.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + raw[len("\\\\?\\UNC\\"):])
+    if raw.startswith("\\\\?\\"):
+        return Path(raw[len("\\\\?\\"):])
+    return path

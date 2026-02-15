@@ -148,12 +148,12 @@ def create_app(config: EngineConfig) -> FastAPI:
         return HealthResponse(
             engine_version=engine_config.engine_version,
             active_model_id=runtime_model_id,
-            device=engine_config.device,
+            device=_resolve_runtime_device(engine_config, synthesizer.status.backend),
             capabilities=HealthCapabilities(
                 supports_voice_clone=synthesizer.status.supports_voice_clone,
                 supports_audio_chunk_stream=True,
                 supports_true_streaming_inference=False,
-                languages=["zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "auto"],
+                languages=_resolve_runtime_languages(synthesizer.status.backend),
             ),
             runtime=_runtime_snapshot(),
         )
@@ -285,6 +285,19 @@ def create_app(config: EngineConfig) -> FastAPI:
                 qwen_default_speaker=_coalesce_str(
                     request_payload.qwen_default_speaker,
                     engine_config.qwen_default_speaker,
+                ),
+                kyutai_model_name=_coalesce_str(
+                    request_payload.kyutai_model_name,
+                    engine_config.kyutai_model_name,
+                ),
+                kyutai_voice_prompt=_coalesce_str(
+                    request_payload.kyutai_voice_prompt,
+                    engine_config.kyutai_voice_prompt,
+                ),
+                kyutai_sample_rate=(
+                    int(request_payload.kyutai_sample_rate)
+                    if request_payload.kyutai_sample_rate is not None
+                    else engine_config.kyutai_sample_rate
                 ),
             )
 
@@ -421,4 +434,24 @@ def _validate_reference_audio(path: str | None, wav_base64: str | None) -> None:
 def _resolve_runtime_model_id(config: EngineConfig, backend: str) -> str:
     if backend == "qwen_custom_voice":
         return config.qwen_model_name
+    if backend == "kyutai_pocket_tts":
+        return config.kyutai_model_name
     return config.active_model_id
+
+
+def _resolve_runtime_device(config: EngineConfig, backend: str) -> str:
+    if backend == "qwen_custom_voice":
+        return config.device
+    if backend == "kyutai_pocket_tts":
+        return "cpu"
+    return "cpu"
+
+
+def _resolve_runtime_languages(backend: str) -> list[str]:
+    if backend == "kyutai_pocket_tts":
+        # Pocket TTS currently supports English generation in this app integration.
+        return ["en"]
+    if backend == "qwen_custom_voice":
+        return ["zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "auto"]
+    # Mock fallback stays permissive for API smoke testing.
+    return ["zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "auto"]

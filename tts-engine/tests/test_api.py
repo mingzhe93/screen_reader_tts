@@ -45,7 +45,7 @@ def test_health_includes_runtime_status(tmp_path: Path) -> None:
     response = client.get("/v1/health", headers=_auth_headers())
     assert response.status_code == 200
     runtime = response.json()["runtime"]
-    assert runtime["backend"] in {"qwen_custom_voice", "mock"}
+    assert runtime["backend"] in {"qwen_custom_voice", "kyutai_pocket_tts", "mock"}
     assert isinstance(runtime["model_loaded"], bool)
     assert isinstance(runtime["fallback_active"], bool)
     assert "warmup" in runtime
@@ -144,6 +144,8 @@ def test_quit_endpoint_triggers_shutdown_callback(tmp_path: Path) -> None:
         host="127.0.0.1",
         port=8765,
         data_dir=tmp_path / "data",
+        synth_backend="mock",
+        warmup_on_startup=False,
     )
     app = create_app(config)
     called = {"value": False}

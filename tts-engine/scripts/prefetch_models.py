@@ -24,6 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--custom-only", action="store_true", help="Download only custom-voice model")
     mode_group.add_argument("--base-only", action="store_true", help="Download only base model")
+    mode_group.add_argument("--kyutai-only", action="store_true", help="Download only Kyutai model")
     return parser
 
 
@@ -33,6 +34,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from tts_engine.model_store import (
+        KYUTAI_POCKET_MODEL_REPO,
         QWEN_BASE_MODEL_REPO,
         QWEN_CUSTOM_MODEL_REPO,
         configure_hf_cache,
@@ -52,8 +54,10 @@ def main() -> int:
         repos = [QWEN_CUSTOM_MODEL_REPO]
     elif args.base_only:
         repos = [QWEN_BASE_MODEL_REPO]
+    elif args.kyutai_only:
+        repos = [KYUTAI_POCKET_MODEL_REPO]
     else:
-        repos = [QWEN_CUSTOM_MODEL_REPO, QWEN_BASE_MODEL_REPO]
+        repos = [QWEN_CUSTOM_MODEL_REPO, QWEN_BASE_MODEL_REPO, KYUTAI_POCKET_MODEL_REPO]
 
     print(f"prefetch_count={len(repos)}", flush=True)
     for repo_id in repos:

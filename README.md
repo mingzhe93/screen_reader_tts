@@ -27,24 +27,26 @@ Browser TTS extensions are often slow, inconsistent, and limited in voice qualit
 
 ---
 
-## Current implementation (end of Phase 1 milestone)
-At the end of Phase 1, the project will include:
+## Current implementation (working dev slice)
+This is what is wired right now:
 
 ### Desktop app (Tauri)
-- Tray/menu bar app
-- Global hotkeys:
-  - Read selection
-  - Pause/Resume
-  - Stop
-- Selection capture:
-  - Windows UI Automation (UIA) primary
-  - macOS Accessibility (AX) primary
-  - Clipboard copy/restore fallback
-- Audio playback of generated chunks
+- Windowed app with a simple "Reader" page
+- Global hotkey: user-configurable (default: Windows `Alt+Shift+Space`, macOS `Cmd+Shift+Space`)
+- End-to-end flow: hotkey/manual speak -> `/v1/speak` -> WS stream -> local playback
+- Sidecar lifecycle from app:
+  - launch on startup
+  - health handshake
+  - restart/cancel controls
+  - shutdown on app exit
+- UI for:
+  - model mode selection (`qwen_custom_voice`, `qwen_base_clone`, `kyutai_pocket_tts`)
+  - preset speaker selection
+  - engine health and voice list inspection
 
 ### Local engine service (Python)
 - Local daemon process (kept warm)
-- Loads the bundled TTS model once
+- Loads Kyutai/Qwen model(s) from local engine data dir
 - Phase 1 runtime target: CUDA + `torch.bfloat16` with `attn_implementation="flash_attention_2"` when available
 - Windows fallback path: CUDA + BF16 + `attn_implementation="sdpa"` if FlashAttention 2 is unavailable
 - Provides an IPC API for:
@@ -54,22 +56,22 @@ At the end of Phase 1, the project will include:
 - Includes a built-in default voice for first-run playback:
   - reserved `voice_id: "0"`
   - `/speak` can use this without cloning
-- Voice cloning (Qwen Base model):
-  - Create reusable voice prompt once
-  - Persist it locally as a "Voice Profile"
-  - Reuse by `voice_id` for later synthesis
+- Warmup support and model activation endpoint are implemented
 
-### Bundling
-- App bundles **Qwen3-TTS-12Hz-0.6B-Base** by default
-- On first run, the model pack is extracted locally and verified
-- Optional models are downloaded later via a model registry + checksum verification
+### Known limitations in this slice
+- Selection capture is currently clipboard-based only (UIA/AX capture not wired yet)
+- Read-aloud path applies to `kyutai_pocket_tts` and `qwen_custom_voice`
+- Clone management UI is not wired yet (planned in the "Voices & Clone" tab)
+- Voice cloning inference is not wired yet (placeholder profiles still present)
 
 ---
 
 ## Default model sources
+- Hugging Face model: [Verylicious/pocket-tts-ungated](https://huggingface.co/Verylicious/pocket-tts-ungated)
 - Hugging Face model: [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base)
 - No-clone default voice runtime path: [Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice)
 - GitHub repo: [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
+- GitHub repo: [kyutai-labs/pocket-tts](https://github.com/kyutai-labs/pocket-tts)
 
 ## Qwen runtime baseline (from upstream `pyproject.toml`)
 - Recommended environment: isolated Python 3.12 env
@@ -84,23 +86,62 @@ At the end of Phase 1, the project will include:
 Use project-local dependencies only.
 
 - Node packages: install into `./node_modules` with `npm install`
-- Python packages: install into `./.venv` (never system Python)
+- Python packages: install into `./tts-engine/.venv` (never system Python)
+- Rust toolchain is required for Tauri (`cargo` + `rustc` on PATH)
 - Avoid global installs like `npm install -g ...` or `pip install ...` outside `.venv`
 - Phase 1 inference target is CUDA + BF16. Prefer FlashAttention 2; allow CUDA SDPA fallback on Windows if FlashAttention 2 cannot be installed.
 - Phase 1 engine validation target is NVIDIA CUDA.
 
-### 1) Install local dependencies
+### 0) Windows toolchain prerequisites (winget)
+
+Install machine-level tools once on Windows:
+
+```powershell
+winget install --id Rustlang.Rustup -e
+winget install --id ChrisBagwell.SoX -e
+```
+
+Verify:
+
+```powershell
+cargo --version
+rustc --version
+sox --version
+```
+
+If `sox --version` fails after install, restart terminal first.  
+If it still fails, locate and add SoX to current shell PATH:
+
+```powershell
+$allMatches = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter sox.exe -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+$soxExe = $allMatches | Select-Object -First 1
+if($soxExe){ $env:Path = "$(Split-Path $soxExe -Parent);$env:Path"; sox --version }
+```
+
+Note: the engine also auto-detects Winget SoX location on Windows, so global PATH is preferred but not strictly required.
+
+### 1) Install project-local dependencies
 
 ```powershell
 npm install
+cd tts-engine
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -r tts-engine/requirements.txt
-python -m pip install -e .\tts-engine
-python -m pip install qwen-tts pyinstaller
+python -m pip install -r requirements.txt
+python -m pip install -e .
+python -m pip install qwen-tts pocket-tts pyinstaller
 # Optional perf path (may fail on Windows toolchains):
 python -m pip install -U flash-attn --no-build-isolation
+cd ..
+```
+
+If `pocket-tts` is unavailable on your package index, install directly from GitHub:
+
+```powershell
+cd tts-engine
+python -m pip install "git+https://github.com/kyutai-labs/pocket-tts.git"
+cd ..
 ```
 
 If engine startup reports `No WebSocket runtime found`, run:
@@ -111,23 +152,51 @@ python -m pip install websockets
 python -m pip install wsproto
 ```
 
-### 2) Run engine + app in dev mode
-
-Terminal A (engine, optional standalone debug mode):
+If Qwen startup logs `'sox' is not recognized` on Windows, install SoX and reopen terminal:
 
 ```powershell
-.\src-tauri\binaries\tts-engine-x86_64-pc-windows-msvc.exe --server
+winget install --id ChrisBagwell.SoX -e
 ```
 
-Terminal B (desktop app):
+### 2) Run engine + app in dev mode
+
+App-first path (recommended):
 
 ```powershell
 npm run desktop:dev
 ```
 
-If the app is configured to launch the sidecar automatically, you only need Terminal B.
+The app launches `tts-engine` as a Python sidecar automatically (from `tts-engine/.venv` when present), then performs auth + health handshake before enabling actions.
 
-### 2.1) Validate the Python engine independently (recommended first)
+Optional standalone engine debug mode:
+
+```powershell
+cd tts-engine
+$env:SPEAK_SELECTION_ENGINE_TOKEN = "dev-token"
+python -m tts_engine --server --port 8765
+```
+
+If you run standalone engine manually, use the Python test scripts in `tts-engine/scripts/` (see section 2.2) instead of the desktop app sidecar path.
+
+### 2.1) Validate desktop app end-to-end flow
+
+After `npm run desktop:dev` opens the app:
+
+1. Confirm the Activity log shows sidecar startup and engine readiness.
+2. Keep model mode as `Kyutai Pocket TTS`.
+3. Pick a Kyutai preset voice (for example `alba`) and keep `voice_id=0`.
+4. Test manual path with **Speak Text**.
+5. Test hotkey path:
+   - highlight text in any app
+   - press the configured hotkey shown in the app
+6. Confirm WS events (`JOB_STARTED`, `AUDIO_CHUNK`, `JOB_DONE`) appear in Activity.
+
+If no audio plays:
+- Check OS output device and app volume.
+- Verify `Engine Health` shows backend `kyutai_pocket_tts` (not `mock`).
+- Use **Restart Engine** and retry.
+
+### 2.2) Validate the Python engine independently (recommended first)
 
 Before wiring Tauri, verify the engine API behavior directly.
 
@@ -142,7 +211,7 @@ $env:SPEAK_SELECTION_ENGINE_TOKEN = "dev-token"
 python -m tts_engine --server --port 8765
 ```
 
-Optional but recommended before this step (downloads both Qwen repos into local engine data dir):
+Optional but recommended before this step (downloads Kyutai + both Qwen repos into local engine data dir):
 
 ```powershell
 cd tts-engine
@@ -171,9 +240,10 @@ Notes:
 - For browser-like WS clients that cannot set HTTP headers, use `Sec-WebSocket-Protocol` fallback as defined in `docs/IPC_API.md`.
 - Query-string auth tokens are intentionally not used.
 - Check `/v1/health` -> `runtime.backend`:
-  - `qwen_custom_voice` means real model inference is active
+  - `kyutai_pocket_tts` means Kyutai model inference is active
+  - `qwen_custom_voice` means Qwen model inference is active
   - `mock` means fallback backend is active
-- Current real-inference limitation: `qwen_custom_voice` path supports default `voice_id: "0"` only.
+- Current real-inference limitation: `kyutai_pocket_tts` and `qwen_custom_voice` paths support default `voice_id: "0"` only.
 - Warmup endpoint exists: `POST /v1/warmup` (use `{"wait":true}` on startup). Model-switch flows can use `POST /v1/models/activate` to reload + warm up in one call.
 
 One-command variant (starts engine on a free port, runs smoke checks, then shuts it down):
@@ -187,7 +257,7 @@ Require real backend during smoke test:
 
 ```powershell
 cd tts-engine
-python ./scripts/run_smoke_with_engine.py --token dev-token --synth-backend qwen
+python ./scripts/run_smoke_with_engine.py --token dev-token --synth-backend kyutai
 ```
 
 To test chunked streaming playback audibly (default voice, no cloning):
@@ -214,11 +284,11 @@ Optional playback controls in this script:
 - `--rate` (`0.25` to `4.0`) and `--volume` (`0.0` to `2.0`) are applied engine-side per chunk.
 - `--pitch` is currently reserved (accepted but no-op in Phase 1 runtime).
 
-To require real model inference (fail if Qwen backend cannot load):
+To require real model inference (fail if Kyutai backend cannot load):
 
 ```powershell
 cd tts-engine
-python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0 --synth-backend qwen
+python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0 --synth-backend kyutai
 ```
 
 Performance note:
@@ -227,14 +297,29 @@ Performance note:
 - Queue buffering defaults in `run_stream_play_with_engine.py` are tuned for smoother playback (`PrefetchQueueSize=5`, `StartPlaybackAfter=2`).
 - Cancel behavior: `POST /v1/cancel` is chunk-boundary based; if cancel arrives during chunk generation, that in-flight chunk is dropped and the stream ends with `JOB_CANCELED`.
 
-### 3) Uninstall local dependencies
+### 3) Cleanup (local + optional machine tools)
+
+Project-local cleanup:
 
 ```powershell
 deactivate 2>$null
-Remove-Item -Recurse -Force .venv, node_modules -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force .\tts-engine\.venv, node_modules -ErrorAction SilentlyContinue
 ```
 
 This removes project-local dependencies without touching machine-wide toolchains.
+
+Optional machine-wide cleanup (if you no longer need these dev tools):
+
+```powershell
+winget uninstall --id ChrisBagwell.SoX -e
+winget uninstall --id Rustlang.Rustup -e
+```
+
+If Rustup was installed outside winget, use:
+
+```powershell
+rustup self uninstall -y
+```
 
 ---
 

@@ -16,7 +16,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run stream+play test with auto-start/stop engine")
     parser.add_argument("--token", default="dev-token")
     parser.add_argument("--voice-id", default="0")
-    parser.add_argument("--synth-backend", choices=["auto", "qwen", "mock"], default="auto")
+    parser.add_argument("--synth-backend", choices=["auto", "kyutai", "qwen", "mock"], default="auto")
+    parser.add_argument("--kyutai-model", default="")
+    parser.add_argument("--kyutai-voice-prompt", default="")
     parser.add_argument("--qwen-device-map", default="")
     parser.add_argument("--qwen-dtype", default="")
     parser.add_argument("--qwen-attn-implementation", default="")
@@ -125,6 +127,10 @@ def _run(args: argparse.Namespace) -> int:
     env["SPEAK_SELECTION_ENGINE_TOKEN"] = args.token
     env["PYTHONPATH"] = str((engine_root / "src").resolve())
     env["VOICEREADER_SYNTH_BACKEND"] = args.synth_backend
+    if args.kyutai_model:
+        env["VOICEREADER_KYUTAI_MODEL"] = args.kyutai_model
+    if args.kyutai_voice_prompt:
+        env["VOICEREADER_KYUTAI_VOICE_PROMPT"] = args.kyutai_voice_prompt
     if args.qwen_device_map:
         env["VOICEREADER_QWEN_DEVICE_MAP"] = args.qwen_device_map
     if args.qwen_dtype:

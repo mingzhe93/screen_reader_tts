@@ -7,6 +7,7 @@ from pathlib import Path
 
 QWEN_CUSTOM_MODEL_REPO = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 QWEN_BASE_MODEL_REPO = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+KYUTAI_POCKET_MODEL_REPO = "Verylicious/pocket-tts-ungated"
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,8 @@ from __future__ import annotations
 from array import array
 from dataclasses import dataclass
 import math
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol
 
 from .config import EngineConfig
 from .constants import DEFAULT_VOICE_ID
@@ -22,6 +23,19 @@ _QWEN_LANGUAGE_MAP = {
     "pt": "Portuguese",
     "ru": "Russian",
     "it": "Italian",
+}
+
+_KYUTAI_LANGUAGE_ALLOWLIST = {
+    "en",
+    "fr",
+    "es",
+    "de",
+    "it",
+    "pt",
+    "ru",
+    "zh",
+    "ja",
+    "ko",
 }
 
 
@@ -214,29 +228,218 @@ class QwenCustomVoiceSynthesizer:
         return normalized.startswith("cuda")
 
 
+class PocketTtsSynthesizer:
+    """Kyutai Pocket TTS backend using a single built-in/default voice prompt."""
+
+    def __init__(self, config: EngineConfig) -> None:
+        try:
+            import numpy as np
+            import yaml
+            from pocket_tts import TTSModel
+        except Exception as exc:  # pragma: no cover - runtime-dependent import
+            raise RuntimeError(
+                "Kyutai Pocket TTS dependencies are unavailable. Install with "
+                "`python -m pip install pocket-tts`."
+            ) from exc
+
+        self._np = np
+        self._yaml = yaml
+        self._tts_model_cls = TTSModel
+        self._model_name = config.kyutai_model_name
+        self._model_source = resolve_model_source(config.data_dir, config.kyutai_model_name)
+        self._default_voice_prompt = config.kyutai_voice_prompt.strip() or "alba"
+        self._default_sample_rate = int(config.kyutai_sample_rate)
+        self._model_source_dir = self._as_existing_dir(self._model_source)
+        model_config_arg = self._resolve_model_config_arg()
+        detail_note = (
+            f"model={self._model_name}, source={self._model_source}, "
+            f"config={model_config_arg}, default_voice_prompt={self._default_voice_prompt}"
+        )
+
+        try:
+            self._model = self._tts_model_cls.load_model(model_config_arg)
+        except Exception as exc:  # pragma: no cover - runtime-dependent import
+            raise RuntimeError(f"Failed to load Pocket TTS model: {exc}") from exc
+
+        if hasattr(self._model, "sample_rate"):
+            try:
+                self._default_sample_rate = int(getattr(self._model, "sample_rate"))
+            except Exception:
+                pass
+
+        # Resolve and cache voice prompt state once so chunk synthesis avoids repeated setup work.
+        voice_prompt_source = self._resolve_voice_prompt_source(self._default_voice_prompt)
+        try:
+            self._voice_state = self._model.get_state_for_audio_prompt(voice_prompt_source)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to resolve Pocket TTS voice prompt '{self._default_voice_prompt}' "
+                f"(source={voice_prompt_source}): {exc}"
+            ) from exc
+
+        self.status = SynthBackendStatus(
+            backend="kyutai_pocket_tts",
+            model_loaded=True,
+            fallback_active=False,
+            detail=detail_note,
+            supports_voice_clone=False,
+            supports_default_voice=True,
+            supports_cloned_voices=False,
+        )
+
+    def supports_voice_id(self, voice_id: str) -> bool:
+        return voice_id == DEFAULT_VOICE_ID
+
+    def synthesize_chunk(self, chunk_text: str, voice_id: str, language: str | None = None) -> SynthesizedAudio:
+        if voice_id != DEFAULT_VOICE_ID:
+            raise RuntimeError('Pocket TTS backend currently supports only voice_id "0"')
+
+        generated = self._generate_audio(chunk_text=chunk_text, language=language)
+        pcm_s16le, sample_rate = _coerce_pcm16_from_generated_audio(
+            generated=generated,
+            np_module=self._np,
+            default_sample_rate=self._default_sample_rate,
+        )
+        return SynthesizedAudio(
+            pcm_s16le=pcm_s16le,
+            sample_rate=sample_rate,
+            channels=1,
+        )
+
+    def warmup(self, text: str, language: str | None = None) -> None:
+        self.synthesize_chunk(text, voice_id=DEFAULT_VOICE_ID, language=language)
+
+    def _generate_audio(self, chunk_text: str, language: str | None) -> Any:
+        normalized_language = _resolve_kyutai_language(language)
+
+        # Try known call signatures in order and only fall through on signature mismatch.
+        if normalized_language:
+            try:
+                return self._model.generate_audio(self._voice_state, chunk_text, lang=normalized_language)
+            except TypeError:
+                pass
+
+        try:
+            return self._model.generate_audio(self._voice_state, chunk_text)
+        except TypeError:
+            pass
+
+        if normalized_language:
+            try:
+                return self._model.generate_audio(chunk_text, lang=normalized_language)
+            except TypeError:
+                pass
+
+        try:
+            return self._model.generate_audio(chunk_text)
+        except TypeError as exc:
+            raise RuntimeError(
+                "Pocket TTS API signature mismatch while calling generate_audio"
+            ) from exc
+
+    def _resolve_model_config_arg(self) -> str:
+        # Pocket TTS expects either a known variant id (e.g. b6369a24) or a YAML config file path.
+        if self._model_source_dir is not None:
+            yaml_candidates = sorted(self._model_source_dir.glob("*.yaml"))
+            if yaml_candidates:
+                return str(yaml_candidates[0].resolve())
+
+            generated_yaml = self._build_local_model_config(self._model_source_dir)
+            if generated_yaml is not None:
+                return str(generated_yaml.resolve())
+
+        normalized_source = self._model_source.strip()
+        if "/" in normalized_source:
+            # A raw HF repo id is not a valid Pocket config argument. Use the default known variant.
+            return "b6369a24"
+        return normalized_source or "b6369a24"
+
+    def _resolve_voice_prompt_source(self, voice_prompt: str) -> str:
+        normalized_prompt = voice_prompt.strip()
+        if not normalized_prompt:
+            normalized_prompt = "alba"
+
+        prompt_path = Path(normalized_prompt).expanduser()
+        if prompt_path.exists():
+            return str(prompt_path.resolve())
+
+        if self._model_source_dir is not None:
+            embedding = self._model_source_dir / "embeddings" / f"{normalized_prompt}.safetensors"
+            if embedding.exists():
+                return str(embedding.resolve())
+
+        return normalized_prompt
+
+    def _build_local_model_config(self, model_dir: Path) -> Path | None:
+        tokenizer_path = model_dir / "tokenizer.model"
+        weight_candidates = sorted(model_dir.glob("tts_*.safetensors"))
+        if not tokenizer_path.exists() or not weight_candidates:
+            return None
+
+        # __module__ path to file: pocket_tts/models/tts_model.py
+        module_file = Path(__import__(self._tts_model_cls.__module__, fromlist=["__file__"]).__file__).resolve()
+        default_yaml = module_file.parents[1] / "config" / "b6369a24.yaml"
+        if not default_yaml.exists():
+            raise RuntimeError(f"Pocket TTS default config was not found at {default_yaml}")
+
+        with default_yaml.open("r", encoding="utf-8") as handle:
+            config_data = self._yaml.safe_load(handle)
+
+        weights_path = str(weight_candidates[0].resolve())
+        config_data["weights_path"] = weights_path
+        config_data["weights_path_without_voice_cloning"] = weights_path
+        config_data["flow_lm"]["lookup_table"]["tokenizer_path"] = str(tokenizer_path.resolve())
+
+        generated_yaml = model_dir / "voicereader-pocket-tts.yaml"
+        with generated_yaml.open("w", encoding="utf-8") as handle:
+            self._yaml.safe_dump(config_data, handle, sort_keys=False)
+        return generated_yaml
+
+    @staticmethod
+    def _as_existing_dir(path_candidate: str) -> Path | None:
+        if not path_candidate:
+            return None
+        try:
+            candidate = Path(path_candidate).expanduser()
+        except Exception:
+            return None
+        if candidate.exists() and candidate.is_dir():
+            return candidate.resolve()
+        return None
+
+
 def create_synthesizer(config: EngineConfig) -> BaseSynthesizer:
     backend_choice = config.synth_backend.strip().lower()
-    if backend_choice not in {"auto", "qwen", "mock"}:
+    if backend_choice not in {"auto", "kyutai", "qwen", "mock"}:
         raise RuntimeError(
-            "Invalid VOICEREADER_SYNTH_BACKEND. Use one of: auto, qwen, mock."
+            "Invalid VOICEREADER_SYNTH_BACKEND. Use one of: auto, kyutai, qwen, mock."
         )
 
     if backend_choice == "mock":
         return MockSynthesizer(detail="Selected explicitly via VOICEREADER_SYNTH_BACKEND=mock")
 
-    if backend_choice in {"auto", "qwen"}:
-        try:
-            return QwenCustomVoiceSynthesizer(config)
-        except Exception as exc:
-            if backend_choice == "qwen":
-                raise
-            return MockSynthesizer(
-                detail=f"Fell back from qwen backend: {exc}",
-                fallback_active=True,
-            )
+    if backend_choice == "kyutai":
+        return PocketTtsSynthesizer(config)
 
-    # Unreachable due to validation guard above.
-    return MockSynthesizer(detail="Unreachable backend guard fallback", fallback_active=True)
+    if backend_choice == "qwen":
+        return QwenCustomVoiceSynthesizer(config)
+
+    # Auto mode: prefer Kyutai for fast first-run read-aloud, then Qwen, then mock fallback.
+    auto_errors: list[str] = []
+    try:
+        return PocketTtsSynthesizer(config)
+    except Exception as exc:
+        auto_errors.append(f"kyutai backend: {exc}")
+
+    try:
+        return QwenCustomVoiceSynthesizer(config)
+    except Exception as exc:
+        auto_errors.append(f"qwen backend: {exc}")
+
+    return MockSynthesizer(
+        detail=f"Fell back from auto backends: {' | '.join(auto_errors)}",
+        fallback_active=True,
+    )
 
 
 def _resolve_qwen_language(language: str | None) -> str:
@@ -248,3 +451,61 @@ def _resolve_qwen_language(language: str | None) -> str:
     if normalized in _QWEN_LANGUAGE_MAP:
         return _QWEN_LANGUAGE_MAP[normalized]
     return language
+
+
+def _resolve_kyutai_language(language: str | None) -> str | None:
+    if not language:
+        return None
+    normalized = language.strip().lower()
+    if not normalized or normalized == "auto":
+        return None
+    if normalized in _KYUTAI_LANGUAGE_ALLOWLIST:
+        return normalized
+    return normalized
+
+
+def _coerce_pcm16_from_generated_audio(
+    generated: Any,
+    np_module,
+    default_sample_rate: int,
+) -> tuple[bytes, int]:
+    sample_rate = int(default_sample_rate)
+    audio_payload = generated
+
+    # Common shape: (audio, sample_rate)
+    if isinstance(generated, tuple) and len(generated) >= 2 and isinstance(generated[1], (int, float)):
+        audio_payload = generated[0]
+        sample_rate = int(generated[1])
+    elif hasattr(generated, "sample_rate"):
+        try:
+            sample_rate = int(getattr(generated, "sample_rate"))
+        except Exception:
+            sample_rate = int(default_sample_rate)
+        if hasattr(generated, "audio"):
+            audio_payload = getattr(generated, "audio")
+
+    if hasattr(audio_payload, "detach"):
+        # Torch tensor path.
+        audio_payload = audio_payload.detach().cpu().numpy()
+
+    array_data = np_module.asarray(audio_payload)
+    if array_data.size == 0:
+        raise RuntimeError("Pocket TTS inference returned empty audio")
+
+    if array_data.ndim > 1:
+        if array_data.shape[0] == 1:
+            array_data = array_data[0]
+        elif array_data.shape[-1] in (1, 2):
+            array_data = array_data.mean(axis=-1)
+        else:
+            array_data = array_data.reshape(-1)
+
+    array_data = array_data.reshape(-1)
+    if array_data.dtype.kind in {"i", "u"}:
+        pcm = np_module.clip(array_data, -32768, 32767).astype(np_module.int16)
+    else:
+        float_audio = np_module.asarray(array_data, dtype=np_module.float32)
+        float_audio = np_module.clip(float_audio, -1.0, 1.0)
+        pcm = (float_audio * 32767.0).astype(np_module.int16)
+
+    return pcm.tobytes(), int(sample_rate)

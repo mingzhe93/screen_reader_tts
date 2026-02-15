@@ -166,6 +166,9 @@ class ActivateModelRequest(BaseModel):
     qwen_dtype: str | None = None
     qwen_attn_implementation: str | None = None
     qwen_default_speaker: str | None = None
+    kyutai_model_name: str | None = None
+    kyutai_voice_prompt: str | None = None
+    kyutai_sample_rate: int | None = None
     warmup_wait: bool = True
     warmup_force: bool = True
     reason: str | None = None
@@ -178,8 +181,8 @@ class ActivateModelRequest(BaseModel):
         normalized = value.strip().lower()
         if not normalized:
             return None
-        if normalized not in {"auto", "qwen", "mock"}:
-            raise ValueError("synth_backend must be one of: auto, qwen, mock")
+        if normalized not in {"auto", "qwen", "kyutai", "mock"}:
+            raise ValueError("synth_backend must be one of: auto, qwen, kyutai, mock")
         return normalized
 
 

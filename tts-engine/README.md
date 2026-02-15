@@ -9,8 +9,9 @@ Current scope:
 - Voice profile persistence (`voices/<voice_id>/meta.json` + `prompt.safetensors`)
 - Speak job lifecycle (`/speak`, `/cancel`, WS events)
 - Built-in first-run voice (`voice_id: "0"`) so `/speak` works without cloning
+- Real Kyutai Pocket TTS inference path for `voice_id: "0"` (when runtime deps are available)
 - Real Qwen 0.6B custom-voice inference path for `voice_id: "0"` (when runtime deps are available)
-- Automatic fallback to mock audio backend when Qwen runtime is unavailable (in `auto` mode)
+- Automatic fallback to mock audio backend when Kyutai/Qwen runtime is unavailable (in `auto` mode)
 
 Not implemented yet:
 - CUDA model loading and runtime validation
@@ -30,11 +31,22 @@ $env:SPEAK_SELECTION_ENGINE_TOKEN = "dev-token"
 python -m tts_engine --server --port 8765
 ```
 
+If `pocket-tts` is unavailable on your package index:
+
+```powershell
+python -m pip install "git+https://github.com/kyutai-labs/pocket-tts.git"
+```
+
 Optional runtime controls:
 
 ```powershell
-# backend selection: auto | qwen | mock
+# backend selection: auto | kyutai | qwen | mock
 $env:VOICEREADER_SYNTH_BACKEND = "auto"
+
+# Kyutai runtime settings (used when backend is auto/kyutai)
+$env:VOICEREADER_KYUTAI_MODEL = "Verylicious/pocket-tts-ungated"
+$env:VOICEREADER_KYUTAI_VOICE_PROMPT = "alba"
+$env:VOICEREADER_KYUTAI_SAMPLE_RATE = "24000"
 
 # Qwen runtime settings (used when backend is auto/qwen)
 $env:VOICEREADER_QWEN_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
@@ -63,13 +75,15 @@ python ./scripts/prefetch_models.py --data-dir ./.data
 ```
 
 What gets downloaded:
+- `Verylicious/pocket-tts-ungated`
 - `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`
 - `Qwen/Qwen3-TTS-12Hz-0.6B-Base`
 
 Runtime behavior:
-- Keep `VOICEREADER_QWEN_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` for current default-voice speak path.
+- Keep `VOICEREADER_KYUTAI_MODEL=Verylicious/pocket-tts-ungated` for fast default read-aloud.
 - Engine will prefer local mirror path under `./.data/models/...` when present.
-- Current speak backend still uses CustomVoice path only; Base is prefetched for upcoming clone integration.
+- For `Verylicious/pocket-tts-ungated`, engine materializes `voicereader-pocket-tts.yaml` inside that model folder and loads Pocket TTS from local files.
+- Current real-inference backends use default `voice_id: "0"` only; clone inference hookup is pending.
 
 If `-SynthBackend qwen` fails with `Torch not compiled with CUDA enabled`, your env has a CPU-only torch build.
 
@@ -97,6 +111,15 @@ python -m pip install websockets
 python -m pip install wsproto
 ```
 
+On Windows, for better `rate` quality (pitch-preserving tempo):
+
+```powershell
+winget install --id ChrisBagwell.SoX -e
+sox --version
+```
+
+If `sox` is still not found, restart terminal. The engine also checks Winget SoX install location automatically.
+
 ## Quick API check
 
 ```powershell
@@ -113,10 +136,15 @@ Invoke-RestMethod `
   -Body '{"voice_id":"0","text":"Hello from default voice zero."}'
 ```
 
-Check `health.runtime` to confirm whether real Qwen backend is active or mock fallback is being used.
+Check `health.runtime` to confirm whether real Kyutai/Qwen backend is active or mock fallback is being used.
 Use `POST /v1/warmup` for explicit warmup, or `POST /v1/models/activate` to switch/reload model settings and warm up in one call.
 
+If `POST /v1/models/activate` returns `409`, inspect the JSON body:
+- `code=JOB_IN_PROGRESS`: an active speak job is running; cancel/wait and retry.
+- `code=MODEL_NOT_READY`: backend load failed; check `runtime.detail` in `/v1/health` and confirm dependencies/files.
+
 Current real-inference limitation:
+- `backend=kyutai_pocket_tts` supports `voice_id: "0"` only (default prompt path).
 - `backend=qwen_custom_voice` supports `voice_id: "0"` only (default speaker path).
 - Cloned-voice inference hookup is pending; cloned voices may return `MODEL_NOT_READY` under this backend.
 
@@ -155,7 +183,7 @@ Force real backend for smoke test:
 
 ```powershell
 cd tts-engine
-python ./scripts/run_smoke_with_engine.py --token dev-token --synth-backend qwen
+python ./scripts/run_smoke_with_engine.py --token dev-token --synth-backend kyutai
 ```
 
 `run_smoke_with_engine.py` starts engine on a free localhost port, waits for health, runs smoke checks, calls `/v1/quit`, and force-stops the process if needed.
@@ -189,8 +217,8 @@ python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --to
 ```
 
 When backend is `auto`:
-- If Qwen runtime loads successfully, audio is real model inference.
-- If it does not load, engine falls back to mock audio and reports fallback details in `/v1/health`.
+- Engine tries Kyutai first, then Qwen, then mock fallback.
+- If both real backends fail, engine falls back to mock audio and reports fallback details in `/v1/health`.
 
 One-command variant (auto start engine, stream+play, auto shutdown):
 
@@ -206,7 +234,9 @@ Defaults in this one-command flow:
 - warmup is triggered with `wait=true` before speak
 
 Playback controls (engine-side):
-- `Rate` (`0.25` to `4.0`) time-scales chunk audio
+- `Rate` (`0.25` to `4.0`) uses pitch-preserving time-stretch (faster/slower without raising/lowering voice pitch)
+  - preferred path: SoX `tempo` effect when `sox` is available on PATH (better speech quality)
+  - fallback path: librosa phase-vocoder (may introduce slight phasing/echo artifacts at high rates)
 - `Volume` (`0.0` to `2.0`) applies gain to PCM
 - `Pitch` is currently reserved (accepted but no-op)
 
@@ -286,4 +316,12 @@ Invoke-RestMethod `
 cd tts-engine
 .\.venv\Scripts\Activate.ps1
 pytest -q
+```
+
+## Optional machine-level cleanup (Windows)
+
+If you installed SoX only for local dev and want to remove it later:
+
+```powershell
+winget uninstall --id ChrisBagwell.SoX -e
 ```

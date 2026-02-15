@@ -89,19 +89,19 @@ Returns engine status and capabilities.
 ```json
 {
   "engine_version": "0.1.0",
-  "active_model_id": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-  "device": "cuda",
+  "active_model_id": "Verylicious/pocket-tts-ungated",
+  "device": "cpu",
   "capabilities": {
     "supports_voice_clone": false,
     "supports_audio_chunk_stream": true,
     "supports_true_streaming_inference": false,
-    "languages": ["zh", "en", "ja", "ko", "de", "fr", "es", "pt", "ru", "it", "auto"]
+    "languages": ["en"]
   },
   "runtime": {
-    "backend": "qwen_custom_voice",
+    "backend": "kyutai_pocket_tts",
     "model_loaded": true,
     "fallback_active": false,
-    "detail": "model=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice, device_map=cuda:0, dtype=bfloat16, attn=flash_attention_2",
+    "detail": "model=Verylicious/pocket-tts-ungated, default_voice_prompt=alba",
     "supports_default_voice": true,
     "supports_cloned_voices": false,
     "warmup": {
@@ -118,9 +118,10 @@ Returns engine status and capabilities.
 ```
 
 Notes:
-- In `VOICEREADER_SYNTH_BACKEND=auto`, engine may fall back to `backend=mock` if Qwen runtime cannot be loaded.
+- In `VOICEREADER_SYNTH_BACKEND=auto`, engine may fall back to `backend=mock` if Kyutai/Qwen runtime cannot be loaded.
 - Use `runtime` fields to confirm if real model inference is active.
-- `capabilities.supports_voice_clone` is backend-dependent (e.g., false on `qwen_custom_voice`, true on current `mock` fallback).
+- `capabilities.supports_voice_clone` is backend-dependent (e.g., false on `kyutai_pocket_tts` and `qwen_custom_voice`, true on current `mock` fallback).
+- `capabilities.languages` is backend-dependent (current app integration: `["en"]` on `kyutai_pocket_tts`; broader set on `qwen_custom_voice`/`mock`).
 
 ---
 
@@ -137,7 +138,7 @@ List available voices.
       "voice_id": "0",
       "display_name": "Default Built-in Voice",
       "created_at": "1970-01-01T00:00:00Z",
-      "tts_model_id": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      "tts_model_id": "Verylicious/pocket-tts-ungated",
       "language_hint": "auto"
     },
     {
@@ -260,7 +261,7 @@ Start speaking text using a specified voice.
 
 - `VOICE_NOT_FOUND` (for non-default unknown voice IDs)
 - `EMPTY_TEXT`
-- `MODEL_NOT_READY` (for known-but-unsupported voice modes on current backend, e.g., cloned voice on `qwen_custom_voice`)
+- `MODEL_NOT_READY` (for known-but-unsupported voice modes on current backend, e.g., cloned voice on `kyutai_pocket_tts` or `qwen_custom_voice`)
 
 Notes:
 - `settings.rate` is applied engine-side by time-scaling each returned chunk.
@@ -370,13 +371,11 @@ This endpoint is intended for app-side model switch flows and engine troubleshoo
 
 ```json
 {
-  "synth_backend": "qwen",
-  "active_model_id": "qwen3-tts-12hz-0.6b-base",
-  "qwen_model_name": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-  "qwen_device_map": "cuda:0",
-  "qwen_dtype": "bfloat16",
-  "qwen_attn_implementation": "flash_attention_2",
-  "qwen_default_speaker": "Ryan",
+  "synth_backend": "kyutai",
+  "active_model_id": "kyutai-pocket-tts-ungated",
+  "kyutai_model_name": "Verylicious/pocket-tts-ungated",
+  "kyutai_voice_prompt": "alba",
+  "kyutai_sample_rate": 24000,
   "warmup_wait": true,
   "warmup_force": true,
   "reason": "app_model_switch"
@@ -391,12 +390,12 @@ Fields are optional. Omitted fields keep their current runtime value.
 {
   "reloaded": true,
   "warmup_accepted": true,
-  "active_model_id": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "active_model_id": "Verylicious/pocket-tts-ungated",
   "runtime": {
-    "backend": "qwen_custom_voice",
+    "backend": "kyutai_pocket_tts",
     "model_loaded": true,
     "fallback_active": false,
-    "detail": "model=..., device_map=cuda:0, dtype=bfloat16, attn=flash_attention_2",
+    "detail": "model=..., default_voice_prompt=alba",
     "supports_default_voice": true,
     "supports_cloned_voices": false,
     "warmup": {

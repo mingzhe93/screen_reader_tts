@@ -2,6 +2,8 @@
 node_modules/
 dist/
 build/
+target/
+src-tauri/target/
 __pycache__/
 .pytest_cache/
 *.pyc

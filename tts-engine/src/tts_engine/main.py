@@ -78,6 +78,12 @@ def main() -> int:
             "flash_attention_2",
         ),
         qwen_default_speaker=load_env_config_value("VOICEREADER_QWEN_SPEAKER", "Ryan"),
+        kyutai_model_name=load_env_config_value(
+            "VOICEREADER_KYUTAI_MODEL",
+            "Verylicious/pocket-tts-ungated",
+        ),
+        kyutai_voice_prompt=load_env_config_value("VOICEREADER_KYUTAI_VOICE_PROMPT", "alba"),
+        kyutai_sample_rate=int(load_env_config_value("VOICEREADER_KYUTAI_SAMPLE_RATE", "24000")),
         warmup_on_startup=load_env_bool("VOICEREADER_WARMUP_ON_STARTUP", True),
         warmup_text=load_env_config_value("VOICEREADER_WARMUP_TEXT", "Engine warmup sentence."),
         warmup_language=load_env_config_value("VOICEREADER_WARMUP_LANGUAGE", "auto"),
