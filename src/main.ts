@@ -343,12 +343,6 @@ let savedVoiceOrdinals = loadSavedVoiceOrdinals();
 let qwenEnabled = true;
 let pendingHotkeyCapture = "";
 let cloneStatusTimeoutId: number | null = null;
-const pressedModifiers = {
-  ctrl: false,
-  alt: false,
-  shift: false,
-  meta: false,
-};
 
 applyTheme(currentTheme, false);
 
@@ -404,10 +398,6 @@ function setHotkeyDisplay(value: string): void {
 function setHotkeyEditMode(enabled: boolean): void {
   hotkeyEditBtn.classList.toggle("is-hidden", enabled);
   hotkeyCaptureRow.classList.toggle("is-hidden", !enabled);
-  pressedModifiers.ctrl = false;
-  pressedModifiers.alt = false;
-  pressedModifiers.shift = false;
-  pressedModifiers.meta = false;
   if (enabled) {
     pendingHotkeyCapture = "";
     hotkeyInput.value = "";
@@ -416,26 +406,6 @@ function setHotkeyEditMode(enabled: boolean): void {
     return;
   }
   pendingHotkeyCapture = "";
-}
-
-function setPressedModifier(key: string, pressed: boolean): boolean {
-  if (key === "Control") {
-    pressedModifiers.ctrl = pressed;
-    return true;
-  }
-  if (key === "Alt" || key === "AltGraph") {
-    pressedModifiers.alt = pressed;
-    return true;
-  }
-  if (key === "Shift") {
-    pressedModifiers.shift = pressed;
-    return true;
-  }
-  if (key === "Meta" || key === "OS") {
-    pressedModifiers.meta = pressed;
-    return true;
-  }
-  return false;
 }
 
 function normalizeCapturedKey(event: KeyboardEvent): string | null {
@@ -448,13 +418,13 @@ function normalizeCapturedKey(event: KeyboardEvent): string | null {
     return null;
   }
 
-  const code = event.code;
-  if (code.startsWith("Key")) {
-    return code.slice(3).toUpperCase();
+  if (raw.length === 1) {
+    const normalized = raw.toUpperCase();
+    if (/^[A-Z0-9]$/.test(normalized)) {
+      return normalized;
+    }
   }
-  if (code.startsWith("Digit")) {
-    return code.slice(5);
-  }
+
   if (/^F\d{1,2}$/.test(raw)) {
     return raw.toUpperCase();
   }
@@ -475,16 +445,26 @@ function normalizeCapturedKey(event: KeyboardEvent): string | null {
 function captureHotkeyFromEvent(event: KeyboardEvent): string | null {
   const key = normalizeCapturedKey(event);
   const parts: string[] = [];
-  if (pressedModifiers.meta) {
+  const hasAltGraph = event.getModifierState?.("AltGraph") ?? false;
+  const metaDown = event.metaKey;
+  let ctrlDown = event.ctrlKey;
+  const altDown = event.altKey || hasAltGraph;
+  const shiftDown = event.shiftKey;
+  // Some keyboard layouts report AltGr as Ctrl+Alt. Treat it as Alt only.
+  if (hasAltGraph) {
+    ctrlDown = false;
+  }
+
+  if (metaDown) {
     parts.push("Cmd");
   }
-  if (pressedModifiers.ctrl) {
+  if (ctrlDown) {
     parts.push("Ctrl");
   }
-  if (pressedModifiers.alt) {
+  if (altDown) {
     parts.push("Alt");
   }
-  if (pressedModifiers.shift) {
+  if (shiftDown) {
     parts.push("Shift");
   }
 
@@ -1205,22 +1185,12 @@ async function bindActions(): Promise<void> {
       return;
     }
 
-    if (setPressedModifier(event.key, true)) {
-      return;
-    }
-
     const captured = captureHotkeyFromEvent(event);
     if (!captured) {
       return;
     }
     pendingHotkeyCapture = captured;
     hotkeyInput.value = captured;
-  });
-
-  hotkeyInput.addEventListener("keyup", (event) => {
-    if (setPressedModifier(event.key, false)) {
-      return;
-    }
   });
 
   setHotkeyBtn.addEventListener("click", async () => {

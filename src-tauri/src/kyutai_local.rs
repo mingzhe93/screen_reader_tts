@@ -334,8 +334,7 @@ impl LocalKyutaiRuntime {
             .with_context(|| format!("Failed to create voice directory {}", voice_dir.display()))?;
 
         let ref_wav_path = voice_dir.join(REF_AUDIO_FILE_NAME);
-        std::fs::write(&ref_wav_path, wav_bytes)
-            .with_context(|| format!("Failed to write {}", ref_wav_path.display()))?;
+        write_normalized_reference_wav(&ref_wav_path, wav_bytes)?;
 
         let state = self
             .model
@@ -831,6 +830,70 @@ fn decompose_tempo_factors(rate: f32) -> Vec<f32> {
     }
     let factor = rate.powf(1.0 / steps as f32);
     vec![factor.clamp(0.5, 2.0); steps]
+}
+
+fn write_normalized_reference_wav(ref_wav_path: &Path, wav_bytes: &[u8]) -> Result<()> {
+    if wav_bytes.is_empty() {
+        return Err(anyhow!("Reference audio payload is empty"));
+    }
+
+    if let Some(sox_path) = resolve_sox_path_cached() {
+        let mut command = Command::new(sox_path);
+        command
+            .arg("-q")
+            .arg("-t")
+            .arg("wav")
+            .arg("-")
+            .arg("-r")
+            .arg("24000")
+            .arg("-e")
+            .arg("signed-integer")
+            .arg("-b")
+            .arg("16")
+            .arg("-c")
+            .arg("1")
+            .arg("-L")
+            .arg(ref_wav_path);
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("Failed to start SoX for reference-audio normalization: {}", ref_wav_path.display()))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(wav_bytes)
+                .context("Failed writing clone reference audio to SoX stdin")?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .context("Failed while waiting for SoX reference-audio normalization")?;
+        if output.status.success() && ref_wav_path.exists() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "Failed to normalize clone reference audio with SoX: {}",
+            if stderr.is_empty() {
+                "unknown SoX error".to_string()
+            } else {
+                stderr
+            }
+        ));
+    }
+
+    std::fs::write(ref_wav_path, wav_bytes)
+        .with_context(|| format!("Failed to write {}", ref_wav_path.display()))?;
+    Ok(())
 }
 
 fn resolve_sox_path_cached() -> Option<PathBuf> {

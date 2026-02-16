@@ -1383,6 +1383,9 @@ fn register_hotkey_binding(app: &AppHandle, state: Arc<Mutex<EngineState>>, hotk
     app.global_shortcut_manager()
         .register(&hotkey, move || {
             let app_clone = app_handle.clone();
+            if should_ignore_hotkey_while_app_focused(&app_clone) {
+                return;
+            }
             let state_clone = state.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(err) = read_selection_and_speak_inner(&app_clone, &state_clone).await {
@@ -1393,6 +1396,13 @@ fn register_hotkey_binding(app: &AppHandle, state: Arc<Mutex<EngineState>>, hotk
         .with_context(|| format!("Failed to register global hotkey {hotkey}"))?;
 
     Ok(())
+}
+
+fn should_ignore_hotkey_while_app_focused(app: &AppHandle) -> bool {
+    let Some(window) = app.get_window("main") else {
+        return false;
+    };
+    window.is_focused().unwrap_or(false)
 }
 
 async fn read_selection_and_speak_inner(app: &AppHandle, state: &Arc<Mutex<EngineState>>) -> Result<()> {

@@ -31,13 +31,13 @@ Browser TTS extensions are often slow, inconsistent, and limited in voice qualit
 - We observed audible breakup at high playback rates when chunks were too small, especially with pitch-preserving tempo processing.
 - Root cause was real-time pressure mismatch: generation and post-processing produced bursty small packets, while playback drained continuously, causing underflow gaps.
 - Current default policy in app/runtime is:
-  - `chunk_max_chars = 500`
-  - group up to **3 sentences per chunk**
+  - `chunk_max_chars = 200`
+  - group up to **1 sentence per chunk**
   - apply playback prebuffering before first audible output
 - Why this works better:
-  - larger chunks reduce scheduling overhead and WS/UI event churn
-  - 3-sentence grouping keeps better prosody continuity
-  - GPU Qwen throughput tends to scale sub-linearly with chunk length, so larger chunks often improve smoothness without a proportional latency penalty
+  - shorter first-output path reduces perceived startup delay
+  - single-sentence chunks reduce long waits before the next audible chunk
+  - with queue + prebuffer, this keeps playback smooth while preserving responsiveness
 
 ---
 
