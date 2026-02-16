@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
 from pathlib import Path
@@ -47,6 +48,15 @@ def _zip_dir(source_dir: Path, zip_path: Path) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Package VoiceReader portable folder/zip.")
+    parser.add_argument(
+        "--variant",
+        choices=("full", "base"),
+        default="full",
+        help="Packaging variant. full copies full binaries tree; base copies bundled model files only.",
+    )
+    args = parser.parse_args()
+
     root = _repo_root()
     src_tauri = root / "src-tauri"
     target_release = src_tauri / "target" / "release"
@@ -81,8 +91,19 @@ def main() -> int:
 
     print(f"Preparing portable folder: {portable_dir}", flush=True)
     shutil.copy2(exe_path, portable_dir / exe_name)
-    print("Copying sidecar runtime and bundled models...", flush=True)
-    _copytree(binaries_dir, portable_dir / "binaries")
+    if args.variant == "full":
+        print("Copying sidecar runtime and bundled models...", flush=True)
+        _copytree(binaries_dir, portable_dir / "binaries")
+    else:
+        source_models_dir = binaries_dir / "models"
+        if not source_models_dir.exists():
+            raise RuntimeError(
+                f"Portable packaging failed: bundled models directory not found at {source_models_dir}. "
+                "Run `npm run models:bundle:kyutai` first."
+            )
+        print("Copying bundled models (base variant)...", flush=True)
+        (portable_dir / "binaries").mkdir(parents=True, exist_ok=True)
+        _copytree(source_models_dir, portable_dir / "binaries" / "models")
 
     readme_path = portable_dir / "README-PORTABLE.txt"
     readme_path.write_text(
@@ -96,6 +117,7 @@ def main() -> int:
                 "Notes:",
                 "- No installer/admin rights required.",
                 "- Keep the binaries folder next to the exe.",
+                f"- Variant: {args.variant}",
                 "- Voice data and runtime cache are written under LocalAppData.",
             ]
         )

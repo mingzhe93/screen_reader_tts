@@ -1,6 +1,16 @@
-# tts-engine (M1 skeleton)
+# tts-engine (Python sidecar for Full build)
 
 This is the Phase 1 local engine service for VoiceReader.
+
+## Build profile context
+
+VoiceReader now ships in two desktop profiles:
+
+- **Base build** (`build-base`): Rust-native Kyutai runtime only, no Python sidecar, no Qwen/GPU path, and English-only synthesis (`languages: ["en"]`).  
+  This is the lightweight path (portable package is around ~200 MB).
+- **Full build** (`build-full`): Python sidecar + Kyutai + Qwen model switching/downloads.
+
+This `tts-engine` folder is used by the **Full build** profile.
 
 Current scope:
 - HTTP + WebSocket API contract from `docs/IPC_API.md`
@@ -9,13 +19,13 @@ Current scope:
 - Voice profile persistence (`voices/<voice_id>/meta.json` + `prompt.safetensors`)
 - Speak job lifecycle (`/speak`, `/cancel`, WS events)
 - Built-in first-run voice (`voice_id: "0"`) so `/speak` works without cloning
-- Real Kyutai Pocket TTS inference path for `voice_id: "0"` (when runtime deps are available)
+- Real Kyutai Pocket TTS inference path for `voice_id: "0"` and saved cloned voices
 - Real Qwen 0.6B custom-voice inference path for `voice_id: "0"` (when runtime deps are available)
 - Automatic fallback to mock audio backend when Kyutai/Qwen runtime is unavailable (in `auto` mode)
+- Kyutai language support in current app flow is English-only
 
 Not implemented yet:
-- CUDA model loading and runtime validation
-- Real voice cloning inference path
+- Qwen cloned-voice inference path
 - Optional ASR transcription flow
 
 ## Run locally
@@ -67,7 +77,7 @@ By default, model/cache ownership now stays inside engine data dir:
 - Hugging Face cache defaults to `./.data/hf-cache`
 - Local model mirrors are under `./.data/models/<org>/<repo>`
 
-Prefetch both Qwen repos (recommended once before app integration):
+Prefetch model repos (recommended once before app integration):
 
 ```powershell
 cd tts-engine
@@ -83,7 +93,7 @@ Runtime behavior:
 - Keep `VOICEREADER_KYUTAI_MODEL=Verylicious/pocket-tts-ungated` for fast default read-aloud.
 - Engine will prefer local mirror path under `./.data/models/...` when present.
 - For `Verylicious/pocket-tts-ungated`, engine materializes `voicereader-pocket-tts.yaml` inside that model folder and loads Pocket TTS from local files.
-- Current real-inference backends use default `voice_id: "0"` only; clone inference hookup is pending.
+- Kyutai supports default `voice_id: "0"` and saved cloned voice UUIDs.
 
 If `-SynthBackend qwen` fails with `Torch not compiled with CUDA enabled`, your env has a CPU-only torch build.
 

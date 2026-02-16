@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import platform
 import shutil
 import subprocess
@@ -148,6 +149,16 @@ def ensure_bundled_kyutai_model(root: Path, engine_dir: Path, python: Path) -> P
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Build the Python sidecar runtime and/or ensure bundled Kyutai model files."
+    )
+    parser.add_argument(
+        "--models-only",
+        action="store_true",
+        help="Skip PyInstaller sidecar build and only ensure bundled Kyutai model files are present.",
+    )
+    args = parser.parse_args()
+
     root = Path(__file__).resolve().parents[2]
     engine_dir = root / "tts-engine"
     src_tauri_binaries = root / "src-tauri" / "binaries"
@@ -160,6 +171,10 @@ def main() -> int:
     python = resolve_python(engine_dir)
     if not python.exists():
         raise RuntimeError(f"Python executable not found: {python}")
+
+    if args.models_only:
+        ensure_bundled_kyutai_model(root=root, engine_dir=engine_dir, python=python)
+        return 0
 
     ensure_pyinstaller(python, engine_dir)
     cmd = [

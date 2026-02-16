@@ -1,14 +1,16 @@
-﻿VoiceReader Engine API (Phase 1)
+﻿VoiceReader Engine API (Phase 1, Full build sidecar)
 
 ## 1. Overview
-The Engine runs as a localhost-only service that the desktop app communicates with.
+This document describes the Python sidecar HTTP/WS API used by the Full build profile.
+
+In the Base build profile, VoiceReader uses an in-process Rust Kyutai runtime and does not expose this localhost API.
 
 - Transport:
   - HTTP for request/response control
   - WebSocket for audio chunk and job event streaming
 - Security:
-- App generates a high-entropy session token before launching Engine
-- Token is passed via inherited env var (`SPEAK_SELECTION_ENGINE_TOKEN`) in current app/runtime flow
+  - App generates a high-entropy session token before launching Engine
+  - Token is passed via inherited env var (`SPEAK_SELECTION_ENGINE_TOKEN`) in current app/runtime flow
   - Engine binds loopback only (`127.0.0.1`) on an app-chosen port
   - Query-string auth tokens are disabled
 
@@ -19,6 +21,17 @@ The Engine runs as a localhost-only service that the desktop app communicates wi
   - `Sec-WebSocket-Protocol: auth.bearer.v1, <token>`
   - server validates the second protocol token as the auth token
   - server responds with `Sec-WebSocket-Protocol: auth.bearer.v1`
+
+### 1.2 Build profile applicability
+- Base build (`build-base`):
+  - Runtime: Rust-native Kyutai (English-only in current app flow)
+  - No Python sidecar process
+  - No HTTP/WS localhost engine API surface
+  - No Qwen/GPU model path
+- Full build (`build-full`):
+  - Runtime: Python sidecar
+  - This API applies
+  - Qwen model/GPU path available when dependencies and hardware are present
 
 ## 2. Conventions
 
@@ -56,6 +69,9 @@ Standalone engine testing behavior:
 2) launch engine with `python -m tts_engine --server --port <port>`
 
 A strict stdin bootstrap JSON schema will be finalized during Tauri integration.
+
+Note:
+- Base build does not use this bootstrap flow because it does not launch Python sidecar.
 
 Local storage defaults (standalone):
 - engine data dir: `./.data` (or `--data-dir`)
@@ -125,7 +141,7 @@ Notes:
 - In `VOICEREADER_SYNTH_BACKEND=auto`, engine may fall back to `backend=mock` if Kyutai/Qwen runtime cannot be loaded.
 - Use `runtime` fields to confirm if real model inference is active.
 - `capabilities.supports_voice_clone` is backend-dependent (currently true on `kyutai_pocket_tts` and `mock`, false on `qwen_custom_voice`).
-- `capabilities.languages` is backend-dependent (current app integration: `["en"]` on `kyutai_pocket_tts`; broader set on `qwen_custom_voice`/`mock`).
+- `capabilities.languages` is backend-dependent (`["en"]` on current Kyutai app flow; broader set on `qwen_custom_voice`/`mock`).
 
 ---
 
@@ -507,7 +523,7 @@ Current Phase 1 behavior:
 
 ## 6. Standalone engine validation
 
-Recommended order before app integration:
+Recommended order before app integration (Full build sidecar path):
 1) run engine server with token env var
 2) call `/v1/health`
 3) call `/v1/voices` and verify default voice `"0"` is present
@@ -528,3 +544,4 @@ Recommended order before app integration:
   - run optional ASR and return transcript
 - Add binary WS frames for audio chunks
 - Support multi-job queueing
+

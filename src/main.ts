@@ -23,6 +23,8 @@ type BootstrapPayload = {
   selected_model: string;
   selected_speaker: string;
   startup_error?: string | null;
+  build_variant: string;
+  qwen_enabled: boolean;
   models: ModelOption[];
   preset_speakers: SpeakerPreset[];
   health: JsonValue;
@@ -220,6 +222,7 @@ app.innerHTML = `
               <button id="clone-voice-btn" class="accent">Clone & Save Voice</button>
               <button id="refresh-voices-btn">Refresh Voices</button>
             </div>
+            <p class="clone-feedback is-hidden span-2" id="clone-status" role="status" aria-live="polite"></p>
             <p class="hint span-2" id="clone-file-label">No file selected</p>
           </div>
 
@@ -244,7 +247,7 @@ app.innerHTML = `
 
     <section class="panel" id="engine-panel">
       <div class="grid single">
-        <article class="card">
+        <article class="card" id="model-downloads-card">
           <h2>Model Downloads</h2>
           <p class="hint">Kyutai Pocket TTS is bundled. Use these actions to download Qwen models on demand.</p>
           <p class="hint mono" id="model-storage-paths">Storage: loading...</p>
@@ -294,7 +297,9 @@ const cloneRefTextInput = document.querySelector<HTMLTextAreaElement>("#clone-re
 const cloneAudioFileInput = document.querySelector<HTMLInputElement>("#clone-audio-file")!;
 const cloneVoiceBtn = document.querySelector<HTMLButtonElement>("#clone-voice-btn")!;
 const refreshVoicesBtn = document.querySelector<HTMLButtonElement>("#refresh-voices-btn")!;
+const cloneStatus = document.querySelector<HTMLParagraphElement>("#clone-status")!;
 const cloneFileLabel = document.querySelector<HTMLParagraphElement>("#clone-file-label")!;
+const modelDownloadsCard = document.querySelector<HTMLElement>("#model-downloads-card")!;
 const modelStoragePaths = document.querySelector<HTMLParagraphElement>("#model-storage-paths")!;
 const modelDownloadStatus = document.querySelector<HTMLParagraphElement>("#model-download-status")!;
 const downloadQwenCustomBtn = document.querySelector<HTMLButtonElement>("#download-qwen-custom-btn")!;
@@ -327,7 +332,9 @@ let latestVoicesPayload: JsonValue = {};
 let voiceOptionMap = new Map<string, UnifiedVoiceOption>();
 const presetDescriptionOverrides = new Map<string, string>();
 let savedVoiceOrdinals = loadSavedVoiceOrdinals();
+let qwenEnabled = true;
 let pendingHotkeyCapture = "";
+let cloneStatusTimeoutId: number | null = null;
 const pressedModifiers = {
   ctrl: false,
   alt: false,
@@ -342,6 +349,23 @@ function log(message: string, level: "info" | "error" = "info"): void {
   line.className = `line ${level}`;
   line.textContent = `${new Date().toLocaleTimeString()} | ${message}`;
   logEl.prepend(line);
+}
+
+function showCloneStatus(message: string, level: "info" | "success" | "error", autoHideMs = 6000): void {
+  if (cloneStatusTimeoutId !== null) {
+    window.clearTimeout(cloneStatusTimeoutId);
+    cloneStatusTimeoutId = null;
+  }
+  cloneStatus.textContent = message;
+  cloneStatus.classList.remove("is-hidden", "info", "success", "error");
+  cloneStatus.classList.add(level);
+  if (autoHideMs <= 0) {
+    return;
+  }
+  cloneStatusTimeoutId = window.setTimeout(() => {
+    cloneStatus.classList.add("is-hidden");
+    cloneStatusTimeoutId = null;
+  }, autoHideMs);
 }
 
 function themeToggleAriaLabel(theme: ThemeMode): string {
@@ -832,6 +856,17 @@ async function refreshEngineStoragePaths(): Promise<void> {
   }
 }
 
+function applyBuildCapabilities(payload: BootstrapPayload): void {
+  qwenEnabled = payload.qwen_enabled;
+  modelDownloadsCard.classList.toggle("is-hidden", !qwenEnabled);
+  downloadQwenCustomBtn.disabled = !qwenEnabled;
+  downloadQwenBaseBtn.disabled = !qwenEnabled;
+  downloadQwenAllBtn.disabled = !qwenEnabled;
+  if (!qwenEnabled) {
+    modelDownloadStatus.textContent = "Qwen downloads are disabled in Base build.";
+  }
+}
+
 function setModelDownloadBusy(isBusy: boolean): void {
   downloadQwenCustomBtn.disabled = isBusy;
   downloadQwenBaseBtn.disabled = isBusy;
@@ -1010,6 +1045,7 @@ async function applySpeakSettings(): Promise<void> {
 async function bootstrap(): Promise<void> {
   const payload = await invoke<BootstrapPayload>("app_bootstrap");
 
+  applyBuildCapabilities(payload);
   setHotkeyDisplay(payload.hotkey);
   setHotkeyEditMode(false);
   renderModelOptions(payload.models, payload.selected_model);
@@ -1027,8 +1063,13 @@ async function bootstrap(): Promise<void> {
     log(`Startup warning: ${payload.startup_error}`, "error");
     log("Bootstrap completed with warnings");
   } else {
-    log("Engine sidecar started and handshake completed");
+    if (payload.build_variant === "base") {
+      log("Rust Kyutai runtime started and ready");
+    } else {
+      log("Engine sidecar started and handshake completed");
+    }
   }
+  log(`Build variant: ${payload.build_variant}${payload.qwen_enabled ? " (Qwen enabled)" : " (Kyutai only)"}`);
 
   await pollRuntimeStatus();
   await refreshEngineStoragePaths();
@@ -1154,10 +1195,12 @@ async function bindActions(): Promise<void> {
   cloneVoiceBtn.addEventListener("click", async () => {
     const selectedFile = cloneAudioFileInput.files?.[0];
     if (!selectedFile) {
+      showCloneStatus("Select an audio file before cloning.", "error");
       log("Select an audio file before cloning", "error");
       return;
     }
     if (!selectedFile.name.toLowerCase().endsWith(".wav")) {
+      showCloneStatus("Only WAV files are supported for cloning in this UI.", "error");
       log("Only WAV files are supported for cloning in this UI right now", "error");
       return;
     }
@@ -1167,6 +1210,7 @@ async function bindActions(): Promise<void> {
     const refText = cloneRefTextInput.value.trim();
 
     cloneVoiceBtn.disabled = true;
+    showCloneStatus("Cloning voice... this can take a few seconds.", "info", 0);
     try {
       const wavBase64 = await fileToBase64(selectedFile);
       const result = await invoke<CloneVoiceResult>("clone_voice_from_audio", {
@@ -1181,8 +1225,11 @@ async function bindActions(): Promise<void> {
         voiceSelect.value = clonedOptionValue;
         await invoke("set_selected_voice", { voiceId: result.voice_id });
       }
+      const successMessage = result.message || `Voice cloned successfully: ${displayName}`;
+      showCloneStatus(successMessage, "success");
       log(result.message || `Cloned voice saved: ${result.voice_id}`);
     } catch (error) {
+      showCloneStatus(`Clone failed: ${String(error)}`, "error");
       log(`Clone failed: ${String(error)}`, "error");
     } finally {
       cloneVoiceBtn.disabled = false;
@@ -1198,6 +1245,11 @@ async function bindActions(): Promise<void> {
   });
 
   const runModelPrefetch = async (mode: "qwen_custom" | "qwen_base" | "qwen_all"): Promise<void> => {
+    if (!qwenEnabled) {
+      modelDownloadStatus.textContent = "Qwen downloads are disabled in Base build.";
+      log("Qwen model downloads are disabled in Base build.", "error");
+      return;
+    }
     setModelDownloadBusy(true);
     modelDownloadStatus.textContent = `Downloading models (${mode})... this can take several minutes.`;
     try {

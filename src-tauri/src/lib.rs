@@ -3,3 +3,5 @@ pub fn run() {
 }
 
 mod voicereader_core;
+#[cfg(feature = "build-base")]
+mod kyutai_local;

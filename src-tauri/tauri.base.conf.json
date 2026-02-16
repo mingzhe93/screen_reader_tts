@@ -1,0 +1,12 @@
+{
+  "build": {
+    "beforeBuildCommand": "npm run models:bundle:kyutai && npm run build"
+  },
+  "tauri": {
+    "bundle": {
+      "resources": [
+        "binaries/models/**/*"
+      ]
+    }
+  }
+}

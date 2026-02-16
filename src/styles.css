@@ -173,6 +173,35 @@ h3 {
   font-size: 0.93rem;
 }
 
+.clone-feedback {
+  margin: 0.1rem 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  padding: 0.45rem 0.58rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.clone-feedback.info {
+  border-color: var(--accent);
+  background: rgba(10, 143, 130, 0.11);
+  color: var(--accent-ink);
+}
+
+.clone-feedback.success {
+  border-color: var(--runtime-ok-border);
+  background: var(--runtime-ok-bg);
+  color: var(--runtime-ok-ink);
+}
+
+.clone-feedback.error {
+  border-color: var(--runtime-down-border);
+  background: var(--runtime-down-bg);
+  color: var(--danger);
+}
+
 .mono {
   font-family: "IBM Plex Mono", "Cascadia Mono", monospace;
   font-size: 0.8rem;

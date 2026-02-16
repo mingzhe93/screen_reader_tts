@@ -8,10 +8,18 @@
     "build": "vite build",
     "preview": "vite preview",
     "sidecar:build": "python ./tts-engine/scripts/build_sidecar.py",
-    "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build",
-    "desktop:build:standalone": "tauri build",
-    "desktop:build:portable": "npm run sidecar:build && npm run build && tauri build --bundles none && python ./scripts/package_portable.py"
+    "models:bundle:kyutai": "python ./tts-engine/scripts/build_sidecar.py --models-only",
+    "desktop:dev": "tauri dev --features build-full",
+    "desktop:dev:full": "tauri dev --features build-full",
+    "desktop:dev:base": "tauri dev --features build-base",
+    "desktop:build": "npm run desktop:build:full",
+    "desktop:build:full": "tauri build --features build-full",
+    "desktop:build:base": "tauri build --features build-base --config src-tauri/tauri.base.conf.json --bundles none",
+    "desktop:build:base:installer": "tauri build --features build-base --config src-tauri/tauri.base.conf.json",
+    "desktop:build:standalone": "npm run desktop:build:full",
+    "desktop:build:portable": "npm run desktop:build:full:portable",
+    "desktop:build:full:portable": "npm run sidecar:build && npm run build && tauri build --features build-full --bundles none && python ./scripts/package_portable.py --variant full",
+    "desktop:build:base:portable": "npm run models:bundle:kyutai && npm run build && tauri build --features build-base --config src-tauri/tauri.base.conf.json --bundles none && python ./scripts/package_portable.py --variant base"
   },
   "dependencies": {
     "@tauri-apps/api": "^1.6.0"

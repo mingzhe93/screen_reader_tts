@@ -1,10 +1,19 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
+#[cfg(feature = "build-full")]
+use std::process::Command;
+#[cfg(feature = "build-full")]
+use std::process::Stdio;
+#[cfg(feature = "build-base")]
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+#[cfg(feature = "build-base")]
+use base64::Engine as _;
+#[cfg(feature = "build-full")]
 use futures_util::StreamExt;
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::{Client, Method};
@@ -12,10 +21,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, ClipboardManager, GlobalShortcutManager, Manager, RunEvent, State};
 use tokio::time::{sleep, Duration};
+#[cfg(feature = "build-full")]
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+#[cfg(feature = "build-full")]
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
+#[cfg(feature = "build-full")]
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+#[cfg(feature = "build-full")]
 use tokio_tungstenite::tungstenite::Message;
+#[cfg(feature = "build-base")]
+use uuid::Uuid;
+
+#[cfg(feature = "build-base")]
+use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "build-base")]
+use crate::kyutai_local::{LocalJobEndState, LocalKyutaiRuntime};
+
+#[cfg(all(feature = "build-full", feature = "build-base"))]
+compile_error!("features `build-full` and `build-base` are mutually exclusive");
+
+#[cfg(not(any(feature = "build-full", feature = "build-base")))]
+compile_error!("one of `build-full` or `build-base` must be enabled");
 
 const MODEL_CUSTOM: &str = "qwen_custom_voice";
 const MODEL_BASE: &str = "qwen_base_clone";
@@ -23,6 +50,7 @@ const MODEL_KYUTAI: &str = "kyutai_pocket_tts";
 const QWEN_CUSTOM_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 const QWEN_BASE_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
 const KYUTAI_REPO: &str = "Verylicious/pocket-tts-ungated";
+#[cfg(feature = "build-full")]
 const TERMINAL_EVENTS: [&str; 3] = ["JOB_DONE", "JOB_CANCELED", "JOB_ERROR"];
 const SELECTION_COPY_TIMEOUT_MS: u64 = 500;
 const SELECTION_COPY_POLL_MS: u64 = 25;
@@ -30,6 +58,15 @@ const HOTKEY_MODIFIER_RELEASE_TIMEOUT_MS: u64 = 350;
 const HOTKEY_MODIFIER_RELEASE_POLL_MS: u64 = 10;
 const DEFAULT_FALLBACK_HOTKEY: &str = "CmdOrCtrl+Shift+S";
 const SETTINGS_FILE_NAME: &str = "settings.json";
+
+#[cfg(feature = "build-full")]
+const BUILD_VARIANT: &str = "full";
+
+#[cfg(feature = "build-base")]
+const BUILD_VARIANT: &str = "base";
+
+#[cfg(not(any(feature = "build-full", feature = "build-base")))]
+const BUILD_VARIANT: &str = "unknown";
 
 #[derive(Clone)]
 struct SharedState {
@@ -46,6 +83,10 @@ struct SpeakSettingsState {
 
 struct EngineState {
     child: Option<Child>,
+    #[cfg(feature = "build-base")]
+    local_kyutai: Option<Arc<Mutex<LocalKyutaiRuntime>>>,
+    #[cfg(feature = "build-base")]
+    active_cancel_flag: Option<Arc<AtomicBool>>,
     token: String,
     port: u16,
     base_url: String,
@@ -67,6 +108,10 @@ impl Default for EngineState {
     fn default() -> Self {
         Self {
             child: None,
+            #[cfg(feature = "build-base")]
+            local_kyutai: None,
+            #[cfg(feature = "build-base")]
+            active_cancel_flag: None,
             token: String::new(),
             port: 0,
             base_url: String::new(),
@@ -118,6 +163,8 @@ struct BootstrapPayload {
     selected_model: String,
     selected_speaker: String,
     startup_error: Option<String>,
+    build_variant: String,
+    qwen_enabled: bool,
     models: Vec<ModelOption>,
     preset_speakers: Vec<SpeakerPreset>,
     health: Value,
@@ -187,17 +234,20 @@ struct ErrorPayload {
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "build-full")]
 struct SpeakHttpResponse {
     job_id: String,
     ws_url: String,
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "build-full")]
 struct CloneVoiceHttpResponse {
     voice_id: String,
 }
 
 #[derive(Deserialize)]
+#[cfg(feature = "build-full")]
 struct VoiceSummaryHttpResponse {
     voice_id: String,
     display_name: String,
@@ -450,6 +500,8 @@ async fn app_bootstrap(app: AppHandle, state: State<'_, SharedState>) -> Result<
         selected_model,
         selected_speaker: snapshot.3,
         startup_error: snapshot.4.or(startup_error),
+        build_variant: build_variant_name().to_string(),
+        qwen_enabled: qwen_modes_enabled(),
         models: model_options(),
         preset_speakers: speaker_presets(&snapshot.2),
         health,
@@ -472,7 +524,7 @@ async fn engine_list_voices(app: AppHandle, state: State<'_, SharedState>) -> Re
 #[tauri::command]
 fn engine_runtime_status(state: State<'_, SharedState>) -> Result<EngineRuntimePayload, String> {
     let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
-    let (running, pid) = child_runtime_snapshot(&mut guard);
+    let (running, pid) = runtime_snapshot(&mut guard);
     let active_speaker = active_speaker_for_model(&guard);
     Ok(EngineRuntimePayload {
         running,
@@ -505,6 +557,10 @@ async fn prefetch_models(
     state: State<'_, SharedState>,
     mode: String,
 ) -> Result<PrefetchModelsResult, String> {
+    if !qwen_modes_enabled() {
+        return Err("Qwen model downloads are available in Full build only.".to_string());
+    }
+
     ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
     let normalized_mode = mode.trim().to_lowercase();
     if !matches!(
@@ -566,9 +622,16 @@ async fn restart_engine(app: AppHandle, state: State<'_, SharedState>) -> Result
         let _ = apply_kyutai_model_activation(&state.inner).await;
     }
 
+    #[cfg(feature = "build-base")]
+    let message = "Kyutai runtime restarted and ready".to_string();
+    #[cfg(feature = "build-full")]
+    let message = "Engine sidecar restarted and handshake completed".to_string();
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    let message = "Runtime restarted".to_string();
+
     Ok(GenericResult {
         ok: true,
-        message: "Engine sidecar restarted and handshake completed".to_string(),
+        message,
     })
 }
 
@@ -580,6 +643,9 @@ async fn select_model(
 ) -> Result<SelectModelResult, String> {
     ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
     let normalized = model.trim().to_string();
+    if !qwen_modes_enabled() && normalized != MODEL_KYUTAI {
+        return Err("Qwen model modes are available in Full build only.".to_string());
+    }
 
     match normalized.as_str() {
         MODEL_CUSTOM => {
@@ -695,6 +761,54 @@ async fn clone_voice_from_audio(
         );
     }
 
+    #[cfg(feature = "build-base")]
+    {
+        let wav_bytes = BASE64_STANDARD
+            .decode(wav_base64.trim())
+            .map_err(|err| format!("Invalid wav_base64 payload: {err}"))?;
+        let language_hint = normalize_optional_text(language);
+        let ref_text = normalize_optional_text(ref_text);
+
+        let runtime = {
+            let guard = state
+                .inner
+                .lock()
+                .map_err(|_| "State lock poisoned".to_string())?;
+            guard
+                .local_kyutai
+                .clone()
+                .ok_or_else(|| "Kyutai Rust runtime is not initialized".to_string())?
+        };
+
+        let cloned_meta = {
+            let mut runtime_guard = runtime
+                .lock()
+                .map_err(|_| "Kyutai runtime lock poisoned".to_string())?;
+            runtime_guard
+                .clone_voice(&normalized_name, &wav_bytes, language_hint, ref_text)
+                .map_err(to_cmd_error)?
+        };
+
+        {
+            let mut guard = state
+                .inner
+                .lock()
+                .map_err(|_| "State lock poisoned".to_string())?;
+            guard.selected_voice_id = cloned_meta.voice_id.clone();
+        }
+
+        return Ok(CloneVoiceResult {
+            ok: true,
+            message: format!(
+                "Cloned voice saved: {} ({})",
+                cloned_meta.display_name, cloned_meta.voice_id
+            ),
+            voice_id: cloned_meta.voice_id,
+        });
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let (base_url, token) = {
         let guard = state
             .inner
@@ -745,6 +859,12 @@ async fn clone_voice_from_audio(
         ),
         voice_id: clone_response.voice_id,
     })
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err("Unsupported build variant for voice cloning".to_string())
+    }
 }
 
 #[tauri::command]
@@ -771,6 +891,44 @@ async fn update_saved_voice(
         return Err("display_name cannot be empty".to_string());
     }
 
+    #[cfg(feature = "build-base")]
+    {
+        let runtime = {
+            let guard = state
+                .inner
+                .lock()
+                .map_err(|_| "State lock poisoned".to_string())?;
+            guard
+                .local_kyutai
+                .clone()
+                .ok_or_else(|| "Kyutai Rust runtime is not initialized".to_string())?
+        };
+
+        let updated = {
+            let mut runtime_guard = runtime
+                .lock()
+                .map_err(|_| "Kyutai runtime lock poisoned".to_string())?;
+            runtime_guard
+                .update_voice(
+                    &normalized_voice_id,
+                    &normalized_name,
+                    normalize_optional_text(language),
+                    normalize_optional_text(description),
+                )
+                .map_err(to_cmd_error)?
+        };
+
+        return Ok(GenericResult {
+            ok: true,
+            message: format!(
+                "Saved voice updated: {} ({})",
+                updated.display_name, updated.voice_id
+            ),
+        });
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let (base_url, token) = {
         let guard = state
             .inner
@@ -802,6 +960,12 @@ async fn update_saved_voice(
         ok: true,
         message: format!("Saved voice updated: {} ({})", response.display_name, response.voice_id),
     })
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err("Unsupported build variant for saved-voice update".to_string())
+    }
 }
 
 #[tauri::command]
@@ -820,6 +984,45 @@ async fn delete_saved_voice(
         return Err("Built-in default voice cannot be deleted".to_string());
     }
 
+    #[cfg(feature = "build-base")]
+    {
+        let runtime = {
+            let guard = state
+                .inner
+                .lock()
+                .map_err(|_| "State lock poisoned".to_string())?;
+            guard
+                .local_kyutai
+                .clone()
+                .ok_or_else(|| "Kyutai Rust runtime is not initialized".to_string())?
+        };
+        {
+            let mut runtime_guard = runtime
+                .lock()
+                .map_err(|_| "Kyutai runtime lock poisoned".to_string())?;
+            runtime_guard
+                .delete_voice(&normalized_voice_id)
+                .map_err(to_cmd_error)?;
+        }
+
+        {
+            let mut guard = state
+                .inner
+                .lock()
+                .map_err(|_| "State lock poisoned".to_string())?;
+            if guard.selected_voice_id == normalized_voice_id {
+                guard.selected_voice_id = "0".to_string();
+            }
+        }
+
+        return Ok(GenericResult {
+            ok: true,
+            message: format!("Deleted saved voice {normalized_voice_id}"),
+        });
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let (base_url, token) = {
         let guard = state
             .inner
@@ -851,6 +1054,12 @@ async fn delete_saved_voice(
         ok: true,
         message: format!("Deleted saved voice {normalized_voice_id}"),
     })
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err("Unsupported build variant for saved-voice delete".to_string())
+    }
 }
 
 #[tauri::command]
@@ -868,6 +1077,9 @@ async fn set_preset_speaker(
 
     match selected_model.as_str() {
         MODEL_CUSTOM => {
+            if !qwen_modes_enabled() {
+                return Err("Qwen preset speakers are available in Full build only.".to_string());
+            }
             if !QWEN_SPEAKER_PRESETS.iter().any(|row| row.id == speaker_id) {
                 return Err("Unsupported Qwen speaker id".to_string());
             }
@@ -1057,13 +1269,9 @@ async fn trigger_read_selection(app: AppHandle, state: State<'_, SharedState>) -
 async fn cancel_active_job(app: AppHandle, state: State<'_, SharedState>) -> Result<GenericResult, String> {
     ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
 
-    let (job_id, base_url, token) = {
+    let job_id = {
         let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
-        (
-            guard.last_job_id.clone(),
-            guard.base_url.clone(),
-            guard.token.clone(),
-        )
+        guard.last_job_id.clone()
     };
 
     let Some(job_id) = job_id else {
@@ -1083,6 +1291,28 @@ async fn cancel_active_job(app: AppHandle, state: State<'_, SharedState>) -> Res
             job_id: job_id.clone(),
         },
     );
+
+    #[cfg(feature = "build-base")]
+    {
+        let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        if let Some(cancel_flag) = guard.active_cancel_flag.as_ref() {
+            cancel_flag.store(true, Ordering::SeqCst);
+        }
+        if guard.last_job_id.as_deref() == Some(job_id.as_str()) {
+            guard.last_job_id = None;
+        }
+        return Ok(GenericResult {
+            ok: true,
+            message: format!("Cancel request sent for job {job_id}"),
+        });
+    }
+
+    #[cfg(feature = "build-full")]
+    {
+    let (base_url, token) = {
+        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        (guard.base_url.clone(), guard.token.clone())
+    };
 
     let _ = request_json(
         Method::POST,
@@ -1104,6 +1334,12 @@ async fn cancel_active_job(app: AppHandle, state: State<'_, SharedState>) -> Res
         ok: true,
         message: format!("Cancel request sent for job {job_id}"),
     })
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err("Unsupported build variant for cancel operation".to_string())
+    }
 }
 
 fn register_hotkey(app: &AppHandle, state: Arc<Mutex<EngineState>>) -> Result<()> {
@@ -1344,15 +1580,9 @@ async fn speak_and_stream(
         return Err(anyhow!("Speak text cannot be empty"));
     }
 
-    let (base_url, token, voice_id, selected_model, settings) = {
+    let (voice_id, selected_model, settings) = {
         let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-        (
-            guard.base_url.clone(),
-            guard.token.clone(),
-            guard.selected_voice_id.clone(),
-            guard.selected_model.clone(),
-            guard.speak_settings.clone(),
-        )
+        (guard.selected_voice_id.clone(), guard.selected_model.clone(), guard.speak_settings.clone())
     };
 
     if selected_model != MODEL_CUSTOM && selected_model != MODEL_KYUTAI {
@@ -1361,6 +1591,153 @@ async fn speak_and_stream(
         ));
     }
 
+    #[cfg(feature = "build-base")]
+    {
+        // Pocket-TTS Rust path currently applies post-processing volume only.
+        // Keep rate/pitch in state for cross-build UI compatibility.
+        let _requested_prosody = (settings.rate, settings.pitch);
+
+        if selected_model != MODEL_KYUTAI {
+            return Err(anyhow!(
+                "Base build supports Kyutai Pocket TTS only. Switch model to kyutai_pocket_tts."
+            ));
+        }
+
+        let local_runtime = {
+            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            guard
+                .local_kyutai
+                .clone()
+                .ok_or_else(|| anyhow!("Kyutai Rust runtime is not initialized"))?
+        };
+        let selected_preset = {
+            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            guard.selected_kyutai_voice.clone()
+        };
+
+        let previous_cancel = {
+            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            guard.active_cancel_flag.clone()
+        };
+        if let Some(flag) = previous_cancel {
+            flag.store(true, Ordering::SeqCst);
+        }
+
+        let job_id = Uuid::new_v4().to_string();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            guard.last_job_id = Some(job_id.clone());
+            guard.active_cancel_flag = Some(cancel_flag.clone());
+            guard.suppressed_job_ids.remove(&job_id);
+            if guard.suppressed_job_ids.len() > 128 {
+                guard.suppressed_job_ids.clear();
+            }
+        }
+
+        let _ = app.emit_all(
+            "voicereader:job-started",
+            JobStartedPayload {
+                job_id: job_id.clone(),
+                ws_url: format!("local://stream/{job_id}"),
+                source: source.to_string(),
+            },
+        );
+
+        let app_clone = app.clone();
+        let state_clone = state.clone();
+        let job_id_clone = job_id.clone();
+        tauri::async_runtime::spawn(async move {
+            let stream_result: Result<()> = (|| {
+                let mut runtime = local_runtime
+                    .lock()
+                    .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?;
+                let _ = app_clone.emit_all(
+                    "voicereader:ws-event",
+                    json!({
+                        "type": "JOB_STARTED",
+                        "job_id": job_id_clone.clone(),
+                    }),
+                );
+
+                let mut sent_any_chunk = false;
+                let stream_end = runtime.stream_synthesize(
+                    &voice_id,
+                    &selected_preset,
+                    &trimmed,
+                    settings.chunk_max_chars,
+                    settings.volume,
+                    &cancel_flag,
+                    |chunk_index, pcm, sample_rate| {
+                        sent_any_chunk = true;
+                        let mut bytes = Vec::with_capacity(pcm.len() * 2);
+                        for sample in pcm {
+                            bytes.extend_from_slice(&sample.to_le_bytes());
+                        }
+                        let payload = json!({
+                            "type": "AUDIO_CHUNK",
+                            "job_id": job_id_clone.clone(),
+                            "chunk_index": chunk_index,
+                            "audio": {
+                                "format": "pcm_s16le",
+                                "sample_rate": sample_rate,
+                                "channels": 1,
+                                "data_base64": BASE64_STANDARD.encode(&bytes),
+                            }
+                        });
+                        let _ = app_clone.emit_all("voicereader:ws-event", payload);
+                        Ok(())
+                    },
+                )?;
+
+                let terminal = match stream_end {
+                    LocalJobEndState::Done => "JOB_DONE",
+                    LocalJobEndState::Canceled => "JOB_CANCELED",
+                };
+
+                let _ = app_clone.emit_all(
+                    "voicereader:ws-event",
+                    json!({
+                        "type": terminal,
+                        "job_id": job_id_clone.clone(),
+                        "had_audio": sent_any_chunk,
+                    }),
+                );
+                Ok(())
+            })();
+
+            if let Err(err) = stream_result {
+                let _ = app_clone.emit_all(
+                    "voicereader:ws-event",
+                    json!({
+                        "type": "JOB_ERROR",
+                        "job_id": job_id_clone.clone(),
+                        "error": err.to_string(),
+                    }),
+                );
+                emit_error(&app_clone, &format!("Local Kyutai stream failed: {err:#}"));
+            }
+
+            if let Ok(mut guard) = state_clone.lock() {
+                if guard.last_job_id.as_deref() == Some(job_id_clone.as_str()) {
+                    guard.last_job_id = None;
+                }
+                guard.active_cancel_flag = None;
+                guard.suppressed_job_ids.remove(&job_id_clone);
+            }
+        });
+
+        return Ok(job_id);
+    }
+
+    #[cfg(feature = "build-full")]
+    let (base_url, token) = {
+        let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+        (guard.base_url.clone(), guard.token.clone())
+    };
+
+    #[cfg(feature = "build-full")]
+    {
     let speak_body = json!({
         "voice_id": voice_id,
         "text": trimmed,
@@ -1415,8 +1792,15 @@ async fn speak_and_stream(
     });
 
     Ok(speak_response.job_id)
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err(anyhow!("Unsupported build variant for speak and stream"))
+    }
 }
 
+#[cfg(feature = "build-full")]
 async fn relay_ws_events(
     app: &AppHandle,
     state: &Arc<Mutex<EngineState>>,
@@ -1473,6 +1857,7 @@ async fn relay_ws_events(
     Ok(())
 }
 
+#[cfg(feature = "build-full")]
 fn is_job_suppressed(state: &Arc<Mutex<EngineState>>, job_id: &str) -> bool {
     match state.lock() {
         Ok(guard) => guard.suppressed_job_ids.contains(job_id),
@@ -1483,7 +1868,7 @@ fn is_job_suppressed(state: &Arc<Mutex<EngineState>>, job_id: &str) -> bool {
 async fn ensure_engine_ready(app: &AppHandle, state: &Arc<Mutex<EngineState>>) -> Result<()> {
     let running = {
         let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-        child_runtime_snapshot(&mut guard).0
+        runtime_snapshot(&mut guard).0
     };
 
     if running {
@@ -1496,12 +1881,64 @@ async fn ensure_engine_ready(app: &AppHandle, state: &Arc<Mutex<EngineState>>) -
 async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineState>>) -> Result<()> {
     let running = {
         let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-        child_runtime_snapshot(&mut guard).0
+        runtime_snapshot(&mut guard).0
     };
     if running {
         return Ok(());
     }
 
+    #[cfg(feature = "build-base")]
+    {
+        let engine_root = find_engine_root().ok();
+        let data_dir = resolve_engine_data_dir(app, engine_root.as_deref())?;
+        std::fs::create_dir_all(&data_dir).context("Failed to create engine data dir")?;
+        let models_dir = data_dir.join("models");
+        let hf_cache_dir = data_dir.join("hf-cache");
+        std::fs::create_dir_all(&models_dir).context("Failed to create models dir")?;
+        std::fs::create_dir_all(&hf_cache_dir).context("Failed to create hf-cache dir")?;
+
+        let model_dir = resolve_bundled_kyutai_model_dir(app)
+            .or_else(|| {
+                let candidate = models_dir.join("Verylicious").join("pocket-tts-ungated");
+                if is_kyutai_model_dir(&candidate) {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "Bundled Kyutai model directory not found. Expected resources/models/Verylicious/pocket-tts-ungated"
+                )
+            })?;
+
+        let runtime = LocalKyutaiRuntime::new(&model_dir, &data_dir, KYUTAI_REPO, "alba")?;
+        {
+            let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            guard.local_kyutai = Some(Arc::new(Mutex::new(runtime)));
+            guard.base_url = "local://kyutai".to_string();
+            guard.token.clear();
+            guard.port = 0;
+            guard.data_dir = data_dir.to_string_lossy().to_string();
+            guard.models_dir = models_dir.to_string_lossy().to_string();
+            guard.hf_cache_dir = hf_cache_dir.to_string_lossy().to_string();
+            guard.last_job_id = None;
+            guard.active_cancel_flag = None;
+            guard.suppressed_job_ids.clear();
+            guard.selected_model = MODEL_KYUTAI.to_string();
+        }
+
+        let health = engine_health_inner(state).await?;
+        let _ = app.emit_all("voicereader:engine-ready", health);
+
+        if let Ok(mut guard) = state.lock() {
+            guard.startup_error = None;
+        }
+        return Ok(());
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let engine_root = find_engine_root().ok();
 
     let token = generate_token();
@@ -1577,9 +2014,33 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
     }
 
     Ok(())
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err(anyhow!("Unsupported build variant for engine initialization"))
+    }
 }
 
 async fn shutdown_engine(state: &Arc<Mutex<EngineState>>) {
+    #[cfg(feature = "build-base")]
+    {
+        let mut guard = match state.lock() {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if let Some(cancel_flag) = guard.active_cancel_flag.as_ref() {
+            cancel_flag.store(true, Ordering::SeqCst);
+        }
+        guard.active_cancel_flag = None;
+        guard.local_kyutai = None;
+        guard.last_job_id = None;
+        guard.suppressed_job_ids.clear();
+        return;
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let (base_url, token) = {
         let guard = match state.lock() {
             Ok(v) => v,
@@ -1612,13 +2073,15 @@ async fn shutdown_engine(state: &Arc<Mutex<EngineState>>) {
     guard.child = None;
     guard.last_job_id = None;
     guard.suppressed_job_ids.clear();
+    }
 }
 
+#[cfg(feature = "build-full")]
 async fn wait_for_engine_health(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
     for _ in 0..100 {
         let (base_url, token, running) = {
             let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-            let (running, _) = child_runtime_snapshot(&mut guard);
+            let (running, _) = runtime_snapshot(&mut guard);
             (guard.base_url.clone(), guard.token.clone(), running)
         };
 
@@ -1636,6 +2099,10 @@ async fn wait_for_engine_health(state: &Arc<Mutex<EngineState>>) -> Result<Value
 }
 
 async fn apply_custom_model_activation(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
+    if !qwen_modes_enabled() {
+        return Err(anyhow!("Qwen activation is available in Full build only."));
+    }
+
     let (base_url, token, speaker) = {
         let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
         (
@@ -1665,6 +2132,20 @@ async fn apply_custom_model_activation(state: &Arc<Mutex<EngineState>>) -> Resul
 }
 
 async fn apply_kyutai_model_activation(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
+    #[cfg(feature = "build-base")]
+    {
+        let selected_voice = {
+            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            guard.selected_kyutai_voice.clone()
+        };
+        if !KYUTAI_VOICE_PRESETS.iter().any(|row| row.id == selected_voice) {
+            return Err(anyhow!("Unsupported Kyutai preset voice: {selected_voice}"));
+        }
+        return engine_health_inner(state).await;
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let (base_url, token, voice_prompt) = {
         let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
         (
@@ -1691,24 +2172,76 @@ async fn apply_kyutai_model_activation(state: &Arc<Mutex<EngineState>>) -> Resul
         Some(payload),
     )
     .await
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err(anyhow!("Unsupported build variant for Kyutai model activation"))
+    }
 }
 
 async fn engine_health_inner(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
+    #[cfg(feature = "build-base")]
+    {
+        let (runtime, selected_preset) = {
+            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            (
+                guard.local_kyutai.clone().ok_or_else(|| anyhow!("Kyutai Rust runtime is not initialized"))?,
+                guard.selected_kyutai_voice.clone(),
+            )
+        };
+        let runtime_guard = runtime
+            .lock()
+            .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?;
+        return Ok(runtime_guard.health_payload(&selected_preset));
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let (base_url, token) = {
         let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
         (guard.base_url.clone(), guard.token.clone())
     };
 
     request_json(Method::GET, &format!("{base_url}/v1/health"), &token, None).await
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err(anyhow!("Unsupported build variant for engine health"))
+    }
 }
 
 async fn engine_list_voices_inner(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
+    #[cfg(feature = "build-base")]
+    {
+        let runtime = {
+            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            guard
+                .local_kyutai
+                .clone()
+                .ok_or_else(|| anyhow!("Kyutai Rust runtime is not initialized"))?
+        };
+        let runtime_guard = runtime
+            .lock()
+            .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?;
+        return runtime_guard.list_voices_payload();
+    }
+
+    #[cfg(feature = "build-full")]
+    {
     let (base_url, token) = {
         let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
         (guard.base_url.clone(), guard.token.clone())
     };
 
     request_json(Method::GET, &format!("{base_url}/v1/voices"), &token, None).await
+    }
+
+    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
+    {
+        Err(anyhow!("Unsupported build variant for voice list"))
+    }
 }
 
 async fn request_json(method: Method, url: &str, token: &str, body: Option<Value>) -> Result<Value> {
@@ -1734,33 +2267,45 @@ async fn request_json(method: Method, url: &str, token: &str, body: Option<Value
         .with_context(|| format!("Failed to decode JSON response for {url}"))
 }
 
+fn build_variant_name() -> &'static str {
+    BUILD_VARIANT
+}
+
+fn qwen_modes_enabled() -> bool {
+    cfg!(feature = "build-full")
+}
+
 fn model_options() -> Vec<ModelOption> {
-    vec![
-        ModelOption {
-            id: MODEL_KYUTAI.to_string(),
-            label: "Kyutai Pocket TTS".to_string(),
-            status: "ready".to_string(),
-            notes: format!("Main read-aloud path ({KYUTAI_REPO})"),
-        },
-        ModelOption {
+    let mut options = vec![ModelOption {
+        id: MODEL_KYUTAI.to_string(),
+        label: "Kyutai Pocket TTS".to_string(),
+        status: "ready".to_string(),
+        notes: format!("Main read-aloud path ({KYUTAI_REPO})"),
+    }];
+
+    if qwen_modes_enabled() {
+        options.push(ModelOption {
             id: MODEL_CUSTOM.to_string(),
             label: "Qwen CustomVoice (preset speakers)".to_string(),
             status: "ready".to_string(),
             notes: format!("Secondary path ({QWEN_CUSTOM_REPO})"),
-        },
-        ModelOption {
+        });
+        options.push(ModelOption {
             id: MODEL_BASE.to_string(),
             label: "Qwen Base (clone path)".to_string(),
             status: "planned".to_string(),
             notes: format!("Model repo prefetched: {QWEN_BASE_REPO}"),
-        },
-    ]
+        });
+    }
+
+    options
 }
 
 fn speaker_presets(model: &str) -> Vec<SpeakerPreset> {
     let presets: &[SpeakerPresetRow] = match model {
         MODEL_KYUTAI => &KYUTAI_VOICE_PRESETS,
-        _ => &QWEN_SPEAKER_PRESETS,
+        _ if qwen_modes_enabled() => &QWEN_SPEAKER_PRESETS,
+        _ => &KYUTAI_VOICE_PRESETS,
     };
 
     presets
@@ -1855,6 +2400,16 @@ fn app_settings_path(app: &AppHandle) -> Option<PathBuf> {
     app.path_resolver()
         .app_config_dir()
         .map(|path| path.join(SETTINGS_FILE_NAME))
+}
+
+fn runtime_snapshot(state: &mut EngineState) -> (bool, Option<u32>) {
+    #[cfg(feature = "build-base")]
+    {
+        if state.local_kyutai.is_some() {
+            return (true, None);
+        }
+    }
+    child_runtime_snapshot(state)
 }
 
 fn child_runtime_snapshot(state: &mut EngineState) -> (bool, Option<u32>) {
@@ -1955,6 +2510,7 @@ fn resolve_engine_data_dir(_app: &AppHandle, _engine_root: Option<&Path>) -> Res
     }
 }
 
+#[cfg(feature = "build-full")]
 fn build_engine_launch_command(
     app: &AppHandle,
     engine_root: Option<&Path>,
@@ -2053,6 +2609,7 @@ fn is_kyutai_model_dir(path: &Path) -> bool {
 }
 
 #[cfg(not(debug_assertions))]
+#[cfg(feature = "build-full")]
 fn resolve_bundled_engine_executable(app: &AppHandle) -> Option<PathBuf> {
     if let Ok(raw_override) = std::env::var("VOICEREADER_ENGINE_EXECUTABLE") {
         let trimmed = raw_override.trim();
@@ -2114,6 +2671,7 @@ fn resolve_bundled_engine_executable(app: &AppHandle) -> Option<PathBuf> {
 }
 
 #[cfg(not(debug_assertions))]
+#[cfg(feature = "build-full")]
 fn find_sidecar_in_dir(dir: &Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries {
@@ -2148,6 +2706,7 @@ fn find_sidecar_in_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(not(debug_assertions))]
+#[cfg(feature = "build-full")]
 fn is_sidecar_filename(name: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -2161,45 +2720,54 @@ fn is_sidecar_filename(name: &str) -> bool {
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64", not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn current_target_triple() -> &'static str {
     "x86_64-pc-windows-msvc"
 }
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64", not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn current_target_triple() -> &'static str {
     "aarch64-pc-windows-msvc"
 }
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64", not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn current_target_triple() -> &'static str {
     "x86_64-apple-darwin"
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64", not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn current_target_triple() -> &'static str {
     "aarch64-apple-darwin"
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn current_target_triple() -> &'static str {
     "x86_64-unknown-linux-gnu"
 }
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64", not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn current_target_triple() -> &'static str {
     "aarch64-unknown-linux-gnu"
 }
 
 #[cfg(all(target_os = "windows", not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn sidecar_executable_filename() -> &'static str {
     "tts-engine.exe"
 }
 
 #[cfg(all(not(target_os = "windows"), not(debug_assertions)))]
+#[cfg(feature = "build-full")]
 fn sidecar_executable_filename() -> &'static str {
     "tts-engine"
 }
 
+#[cfg(feature = "build-full")]
 fn resolve_python_executable(engine_root: &Path) -> String {
     #[cfg(target_os = "windows")]
     {
@@ -2234,6 +2802,7 @@ fn normalize_windows_extended_path(path: PathBuf) -> PathBuf {
     path
 }
 
+#[cfg(feature = "build-full")]
 fn generate_token() -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)

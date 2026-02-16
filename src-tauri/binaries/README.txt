@@ -1,18 +1,24 @@
-Place bundled sidecar binaries in this folder.
+VoiceReader binaries/assets in this folder depend on build profile.
 
-Expected naming:
-- Windows: tts-engine-x86_64-pc-windows-msvc/tts-engine.exe
-- macOS (Intel): tts-engine-x86_64-apple-darwin/tts-engine
-- macOS (Apple Silicon): tts-engine-aarch64-apple-darwin/tts-engine
-- Linux (x86_64): tts-engine-x86_64-unknown-linux-gnu/tts-engine
+Build profiles:
+- Base build (`build-base`):
+  - Uses Rust-native Kyutai runtime only (no Python sidecar).
+  - Requires bundled Kyutai model files under:
+    - src-tauri/binaries/models/Verylicious/pocket-tts-ungated
+  - Does not include Qwen runtime/models/GPU path.
+  - Kyutai in current app flow is English-only.
+- Full build (`build-full`):
+  - Uses Python sidecar runtime plus Kyutai/Qwen model paths.
+  - Sidecar expected naming:
+    - Windows: tts-engine-x86_64-pc-windows-msvc/tts-engine.exe
+    - macOS (Intel): tts-engine-x86_64-apple-darwin/tts-engine
+    - macOS (Apple Silicon): tts-engine-aarch64-apple-darwin/tts-engine
+    - Linux (x86_64): tts-engine-x86_64-unknown-linux-gnu/tts-engine
 
-Use:
-- npm run sidecar:build
+Build helpers:
+- Full sidecar build: npm run sidecar:build
+- Bundle Kyutai model assets only: npm run models:bundle:kyutai
 
-to generate and copy the platform sidecar here before packaging.
-
-Bundled model assets:
-- src-tauri/binaries/models/Verylicious/pocket-tts-ungated
-
-The packaged app will use this bundled Kyutai model path first (offline first-run),
-then fall back to on-demand download only if the bundled model is missing.
+Portable packaging:
+- Base portable: npm run desktop:build:base:portable
+- Full portable: npm run desktop:build:full:portable
