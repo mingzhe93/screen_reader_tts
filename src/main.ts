@@ -97,6 +97,13 @@ type PrefetchModelsResult = {
   hf_cache_dir: string;
 };
 
+type QueuedPlayback = {
+  buffers: AudioBuffer[];
+  bufferedSeconds: number;
+  started: boolean;
+  terminal: boolean;
+};
+
 const VOICE_ORDINAL_STORAGE_KEY = "voicereader.saved_voice_ordinals.v1";
 const THEME_STORAGE_KEY = "voicereader.theme.v1";
 
@@ -175,7 +182,7 @@ app.innerHTML = `
               <label>Rate <input id="rate" type="number" min="0.25" max="4" step="0.05" value="1.5" /></label>
               <label>Pitch <input id="pitch" type="number" min="0.5" max="2" step="0.05" value="1" /></label>
               <label>Volume <input id="volume" type="number" min="0" max="2" step="0.05" value="1" /></label>
-              <label>Chunk Max Chars <input id="chunk-max" type="number" min="100" max="2000" step="10" value="160" /></label>
+              <label>Chunk Max Chars <input id="chunk-max" type="number" min="100" max="200" step="10" value="200" /></label>
             </div>
           </details>
 
@@ -323,6 +330,7 @@ let runtimeWasDown = false;
 const activeAudioSources = new Set<AudioBufferSourceNode>();
 const suppressedJobIds = new Set<string>();
 const playbackChunkCounts = new Map<string, number>();
+const queuedPlaybackByJob = new Map<string, QueuedPlayback>();
 let hasOutputPrimed = false;
 let hasStartupSilenceInjected = false;
 let currentPresetSpeakers: SpeakerPreset[] = [];
@@ -699,10 +707,52 @@ function ensureAudioContext(): AudioContext {
   return audioContext;
 }
 
+function selectedRateSetting(): number {
+  const parsed = Number(rateInput.value);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.min(4, Math.max(0.25, parsed));
+}
+
+function minPrebufferSecondsForRate(): number {
+  // Faster playback drains buffered audio sooner; hold more before starting.
+  const rate = selectedRateSetting();
+  const base = 0.24;
+  if (rate <= 1) {
+    return base;
+  }
+  if (rate <= 2) {
+    const scaled = base + (rate - 1) * 0.45;
+    return Math.min(0.85, Math.max(base, scaled));
+  }
+  const highRateScaled = 0.85 + (rate - 2) * 1.0;
+  return Math.min(2.0, Math.max(0.85, highRateScaled));
+}
+
+function ensureQueuedPlayback(jobId: string): QueuedPlayback {
+  const existing = queuedPlaybackByJob.get(jobId);
+  if (existing) {
+    return existing;
+  }
+  const created: QueuedPlayback = {
+    buffers: [],
+    bufferedSeconds: 0,
+    started: false,
+    terminal: false,
+  };
+  queuedPlaybackByJob.set(jobId, created);
+  return created;
+}
+
+function clearQueuedPlayback(): void {
+  queuedPlaybackByJob.clear();
+}
+
 function nextChunkLeadSeconds(jobId: string): number {
-  const DEFAULT_LEAD_SECONDS = 0.02;
-  const FIRST_CHUNK_LEAD_SECONDS = 0.16;
-  const FIRST_OUTPUT_PREROLL_SECONDS = 0.26;
+  const DEFAULT_LEAD_SECONDS = 0.015;
+  const FIRST_CHUNK_LEAD_SECONDS = 0.1;
+  const FIRST_OUTPUT_PREROLL_SECONDS = 0.14;
 
   let lead = DEFAULT_LEAD_SECONDS;
   if (jobId) {
@@ -718,6 +768,51 @@ function nextChunkLeadSeconds(jobId: string): number {
     hasOutputPrimed = true;
   }
   return lead;
+}
+
+function scheduleAudioBuffer(jobId: string, buffer: AudioBuffer): void {
+  const context = ensureAudioContext();
+  const source = context.createBufferSource();
+  source.buffer = buffer;
+  source.connect(context.destination);
+  activeAudioSources.add(source);
+  source.onended = () => {
+    activeAudioSources.delete(source);
+  };
+
+  const now = context.currentTime;
+  const leadSeconds = nextChunkLeadSeconds(jobId);
+  const startAt = Math.max(playbackCursor, now + leadSeconds);
+  source.start(startAt);
+  playbackCursor = startAt + buffer.duration;
+}
+
+function flushQueuedPlayback(jobId: string, forceStart: boolean): void {
+  const queued = queuedPlaybackByJob.get(jobId);
+  if (!queued) {
+    return;
+  }
+
+  if (!queued.started) {
+    const minPrebufferSeconds = minPrebufferSecondsForRate();
+    if (!forceStart && queued.bufferedSeconds < minPrebufferSeconds) {
+      return;
+    }
+    queued.started = true;
+  }
+
+  while (queued.buffers.length > 0) {
+    const buffer = queued.buffers.shift();
+    if (!buffer) {
+      continue;
+    }
+    scheduleAudioBuffer(jobId, buffer);
+    queued.bufferedSeconds = Math.max(0, queued.bufferedSeconds - buffer.duration);
+  }
+
+  if (queued.terminal && queued.buffers.length === 0) {
+    queuedPlaybackByJob.delete(jobId);
+  }
 }
 
 function prependSilence(samples: Float32Array, sampleRate: number, ms: number): Float32Array {
@@ -786,23 +881,20 @@ async function enqueueAudioChunk(eventPayload: Record<string, unknown>): Promise
     samples = prependSilence(samples, sampleRate, 160);
     hasStartupSilenceInjected = true;
   }
+  // Normalize to a plain ArrayBuffer-backed Float32Array for strict DOM typings.
+  const channelSamples = new Float32Array(samples);
   const buffer = context.createBuffer(1, samples.length, sampleRate);
-  buffer.copyToChannel(samples, 0, 0);
-
-  const source = context.createBufferSource();
-  source.buffer = buffer;
-  source.connect(context.destination);
-  activeAudioSources.add(source);
-  source.onended = () => {
-    activeAudioSources.delete(source);
-  };
-
-  const now = context.currentTime;
+  buffer.copyToChannel(channelSamples, 0, 0);
   const jobId = String(eventPayload.job_id ?? "");
-  const leadSeconds = nextChunkLeadSeconds(jobId);
-  const startAt = Math.max(playbackCursor, now + leadSeconds);
-  source.start(startAt);
-  playbackCursor = startAt + buffer.duration;
+  if (!jobId) {
+    scheduleAudioBuffer(jobId, buffer);
+    return;
+  }
+
+  const queued = ensureQueuedPlayback(jobId);
+  queued.buffers.push(buffer);
+  queued.bufferedSeconds += buffer.duration;
+  flushQueuedPlayback(jobId, false);
 }
 
 function resetPlaybackCursor(): void {
@@ -826,6 +918,8 @@ function stopAllPlayback(): void {
     }
   }
   activeAudioSources.clear();
+  clearQueuedPlayback();
+  playbackChunkCounts.clear();
   resetPlaybackCursor();
 }
 
@@ -1276,6 +1370,7 @@ async function bindActions(): Promise<void> {
   });
 
   readBtn.addEventListener("click", async () => {
+    await applySpeakSettings();
     const response = await invoke<Record<string, unknown>>("trigger_read_selection");
     log(String(response.message ?? "Triggered read-selection"));
   });
@@ -1287,6 +1382,7 @@ async function bindActions(): Promise<void> {
   });
 
   speakBtn.addEventListener("click", async () => {
+    await applySpeakSettings();
     const text = speakText.value;
     const response = await invoke<Record<string, unknown>>("speak_text", { text });
     log(String(response.message ?? "Speak requested"));
@@ -1313,6 +1409,7 @@ async function bindEvents(): Promise<void> {
       if (jobId) {
         suppressedJobIds.delete(jobId);
         playbackChunkCounts.delete(jobId);
+        queuedPlaybackByJob.delete(jobId);
       }
       stopAllPlayback();
       return;
@@ -1322,8 +1419,15 @@ async function bindEvents(): Promise<void> {
       if (jobId) {
         suppressedJobIds.delete(jobId);
         playbackChunkCounts.delete(jobId);
+        const queued = queuedPlaybackByJob.get(jobId);
+        if (queued) {
+          queued.terminal = true;
+          flushQueuedPlayback(jobId, true);
+        }
       }
-      resetPlaybackCursor();
+      if (activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0) {
+        resetPlaybackCursor();
+      }
     }
   });
 
@@ -1332,6 +1436,11 @@ async function bindEvents(): Promise<void> {
     if (jobId !== "unknown") {
       suppressedJobIds.delete(jobId);
       playbackChunkCounts.set(jobId, 0);
+      for (const existingJobId of Array.from(queuedPlaybackByJob.keys())) {
+        if (existingJobId !== jobId) {
+          queuedPlaybackByJob.delete(existingJobId);
+        }
+      }
     }
     log(`job_started id=${jobId}`);
   });
@@ -1349,6 +1458,7 @@ async function bindEvents(): Promise<void> {
     if (jobId) {
       suppressedJobIds.add(jobId);
       playbackChunkCounts.delete(jobId);
+      queuedPlaybackByJob.delete(jobId);
     }
     stopAllPlayback();
     log(`playback_stop job_id=${jobId || "unknown"}`);

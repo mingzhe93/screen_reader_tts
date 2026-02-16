@@ -1,6 +1,11 @@
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -14,6 +19,9 @@ const META_FILE_NAME: &str = "meta.json";
 const REF_AUDIO_FILE_NAME: &str = "reference.wav";
 const LOCAL_CONFIG_VARIANT: &str = "voicereader-pocket-tts-local";
 const RUNTIME_CONFIG_DIR_NAME: &str = "pocket-tts-runtime";
+const MAX_SENTENCES_PER_CHUNK: usize = 1;
+const FIRST_CHUNK_MAX_SENTENCES: usize = 1;
+const FIRST_CHUNK_MAX_CHARS: usize = 200;
 
 #[derive(Clone)]
 pub enum LocalJobEndState {
@@ -30,6 +38,167 @@ pub struct SavedVoiceMeta {
     pub language_hint: String,
     pub description: Option<String>,
     pub ref_text: Option<String>,
+}
+
+struct SoxTempoStream {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout_rx: Receiver<Vec<u8>>,
+    stdout_join: Option<JoinHandle<()>>,
+    pending: Vec<u8>,
+    frame_samples: usize,
+}
+
+impl SoxTempoStream {
+    fn new(rate: f32, sample_rate: u32) -> Option<Self> {
+        if sample_rate == 0 {
+            return None;
+        }
+        let sox_path = resolve_sox_path_cached()?;
+        let factors = decompose_tempo_factors(rate);
+        if factors.is_empty() {
+            return None;
+        }
+
+        let mut command = Command::new(sox_path);
+        command
+            .arg("-q")
+            .arg("-t")
+            .arg("raw")
+            .arg("-r")
+            .arg(sample_rate.to_string())
+            .arg("-e")
+            .arg("signed-integer")
+            .arg("-b")
+            .arg("16")
+            .arg("-c")
+            .arg("1")
+            .arg("-L")
+            .arg("-")
+            .arg("-t")
+            .arg("raw")
+            .arg("-e")
+            .arg("signed-integer")
+            .arg("-b")
+            .arg("16")
+            .arg("-c")
+            .arg("1")
+            .arg("-L")
+            .arg("-");
+
+        for factor in factors {
+            command.arg("tempo").arg(format!("{factor:.6}"));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+
+        let stdin = child.stdin.take()?;
+        let mut stdout = child.stdout.take()?;
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let join = std::thread::spawn(move || {
+            let mut buffer = [0u8; 8192];
+            loop {
+                match stdout.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buffer[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let frame_samples = if rate >= 3.0 {
+            24_576
+        } else if rate >= 2.0 {
+            16_384
+        } else {
+            8_192
+        };
+
+        Some(Self {
+            child,
+            stdin: Some(stdin),
+            stdout_rx: rx,
+            stdout_join: Some(join),
+            pending: Vec::new(),
+            frame_samples,
+        })
+    }
+
+    fn push_samples(&mut self, samples: &[i16]) -> Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let stdin = self.stdin.as_mut().ok_or_else(|| anyhow!("SoX stdin closed"))?;
+        stdin
+            .write_all(&pcm_i16_to_le_bytes(samples))
+            .context("Failed writing PCM data to SoX stdin")?;
+        let _ = stdin.flush();
+        Ok(())
+    }
+
+    fn drain_available_frames(&mut self) -> Vec<Vec<i16>> {
+        while let Ok(bytes) = self.stdout_rx.try_recv() {
+            self.pending.extend_from_slice(&bytes);
+        }
+        self.take_ready_frames()
+    }
+
+    fn finish_and_drain(&mut self) -> Vec<Vec<i16>> {
+        self.stdin.take();
+        let _ = self.child.wait();
+        if let Some(join) = self.stdout_join.take() {
+            let _ = join.join();
+        }
+        while let Ok(bytes) = self.stdout_rx.try_recv() {
+            self.pending.extend_from_slice(&bytes);
+        }
+
+        let mut frames = self.take_ready_frames();
+        let trailing = bytes_to_pcm_i16_drain_all(&mut self.pending);
+        if !trailing.is_empty() {
+            frames.push(trailing);
+        }
+        frames
+    }
+
+    fn abort(&mut self) {
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(join) = self.stdout_join.take() {
+            let _ = join.join();
+        }
+        self.pending.clear();
+    }
+
+    fn take_ready_frames(&mut self) -> Vec<Vec<i16>> {
+        let frame_bytes = self.frame_samples * 2;
+        let mut frames: Vec<Vec<i16>> = Vec::new();
+        while self.pending.len() >= frame_bytes {
+            let raw: Vec<u8> = self.pending.drain(..frame_bytes).collect();
+            let pcm = bytes_to_pcm_i16(&raw);
+            if !pcm.is_empty() {
+                frames.push(pcm);
+            }
+        }
+        frames
+    }
 }
 
 pub struct LocalKyutaiRuntime {
@@ -220,6 +389,7 @@ impl LocalKyutaiRuntime {
         selected_preset: &str,
         text: &str,
         chunk_max_chars: u32,
+        rate: f32,
         volume: f32,
         cancel: &AtomicBool,
         mut on_chunk: F,
@@ -228,19 +398,83 @@ impl LocalKyutaiRuntime {
         F: FnMut(usize, &[i16], u32) -> Result<()>,
     {
         let mut chunk_index: usize = 0;
-        let chunk_size = usize::max(chunk_max_chars as usize, 100);
+        let rate_clamped = rate.clamp(0.25, 4.0);
+        let rate_active = (rate_clamped - 1.0).abs() > f32::EPSILON;
+        let mut sox_stream = if rate_active {
+            SoxTempoStream::new(rate_clamped, self.sample_rate)
+        } else {
+            None
+        };
+        let chunk_size = usize::min(usize::max(chunk_max_chars as usize, 100), FIRST_CHUNK_MAX_CHARS);
         let split = self.model.split_into_best_sentences(text);
-        let text_chunks = cap_chunks_by_chars(split, text, chunk_size);
+        let text_chunks = cap_chunks_by_chars(split, text, chunk_size, MAX_SENTENCES_PER_CHUNK);
 
         for text_chunk in text_chunks {
             if cancel.load(Ordering::SeqCst) {
+                if let Some(stream) = sox_stream.as_mut() {
+                    stream.abort();
+                }
                 return Ok(LocalJobEndState::Canceled);
             }
 
             let voice_state = self.resolve_voice_state(voice_id, selected_preset)?;
+            if rate_active {
+                let tensor = self
+                    .model
+                    .generate(&text_chunk, &voice_state)
+                    .context("Pocket-TTS generation failed")?;
+                if cancel.load(Ordering::SeqCst) {
+                    if let Some(stream) = sox_stream.as_mut() {
+                        stream.abort();
+                    }
+                    return Ok(LocalJobEndState::Canceled);
+                }
+
+                let gain: f32 = volume.clamp(0.0, 2.0);
+                let values = tensor
+                    .flatten_all()
+                    .context("Failed to flatten Pocket-TTS tensor")?
+                    .to_vec1::<f32>()
+                    .context("Failed to convert Pocket-TTS tensor to f32 samples")?;
+                let mut pcm = Vec::with_capacity(values.len());
+                for sample in values {
+                    let scaled = (sample * gain).clamp(-1.0, 1.0);
+                    pcm.push((scaled * 32767.0) as i16);
+                }
+                if pcm.is_empty() {
+                    continue;
+                }
+
+                if let Some(rate_stream) = sox_stream.as_mut() {
+                    rate_stream.push_samples(&pcm)?;
+                    let mut combined: Vec<i16> = Vec::new();
+                    for adjusted in rate_stream.drain_available_frames() {
+                        if adjusted.is_empty() {
+                            continue;
+                        }
+                        combined.extend_from_slice(&adjusted);
+                    }
+                    if !combined.is_empty() {
+                        on_chunk(chunk_index, &combined, self.sample_rate)?;
+                        chunk_index += 1;
+                    }
+                } else {
+                    pcm = resample_pcm_by_rate(&pcm, rate_clamped);
+                    if pcm.is_empty() {
+                        continue;
+                    }
+                    on_chunk(chunk_index, &pcm, self.sample_rate)?;
+                    chunk_index += 1;
+                }
+                continue;
+            }
+
             let stream = self.model.generate_stream(&text_chunk, &voice_state);
             for maybe_tensor in stream {
                 if cancel.load(Ordering::SeqCst) {
+                    if let Some(stream) = sox_stream.as_mut() {
+                        stream.abort();
+                    }
                     return Ok(LocalJobEndState::Canceled);
                 }
                 let tensor = maybe_tensor.context("Pocket-TTS stream generation failed")?;
@@ -255,8 +489,47 @@ impl LocalKyutaiRuntime {
                     let scaled = (sample * gain).clamp(-1.0, 1.0);
                     pcm.push((scaled * 32767.0) as i16);
                 }
+                if pcm.is_empty() {
+                    continue;
+                }
+
+                if let Some(rate_stream) = sox_stream.as_mut() {
+                    rate_stream.push_samples(&pcm)?;
+                    let mut combined: Vec<i16> = Vec::new();
+                    for adjusted in rate_stream.drain_available_frames() {
+                        if adjusted.is_empty() {
+                            continue;
+                        }
+                        combined.extend_from_slice(&adjusted);
+                    }
+                    if !combined.is_empty() {
+                        on_chunk(chunk_index, &combined, self.sample_rate)?;
+                        chunk_index += 1;
+                    }
+                    continue;
+                }
+
+                if rate_active {
+                    pcm = resample_pcm_by_rate(&pcm, rate_clamped);
+                    if pcm.is_empty() {
+                        continue;
+                    }
+                }
                 on_chunk(chunk_index, &pcm, self.sample_rate)?;
                 chunk_index += 1;
+            }
+        }
+
+        if let Some(rate_stream) = sox_stream.as_mut() {
+            let mut combined: Vec<i16> = Vec::new();
+            for adjusted in rate_stream.finish_and_drain() {
+                if adjusted.is_empty() {
+                    continue;
+                }
+                combined.extend_from_slice(&adjusted);
+            }
+            if !combined.is_empty() {
+                on_chunk(chunk_index, &combined, self.sample_rate)?;
             }
         }
 
@@ -367,44 +640,80 @@ impl LocalKyutaiRuntime {
     }
 }
 
-fn cap_chunks_by_chars(split: Vec<String>, original_text: &str, max_chars: usize) -> Vec<String> {
+fn cap_chunks_by_chars(
+    split: Vec<String>,
+    original_text: &str,
+    max_chars: usize,
+    max_sentences_per_chunk: usize,
+) -> Vec<String> {
     let mut output: Vec<String> = Vec::new();
     let source = if split.is_empty() {
         vec![original_text.to_string()]
     } else {
         split
     };
+    let sentence_limit = usize::max(1, max_sentences_per_chunk);
+    let first_sentence_limit = usize::max(1, usize::min(sentence_limit, FIRST_CHUNK_MAX_SENTENCES));
+    let first_chunk_char_limit = usize::max(100, usize::min(max_chars, FIRST_CHUNK_MAX_CHARS));
+    let mut grouped = String::new();
+    let mut grouped_sentences = 0usize;
 
-    for chunk in source {
-        let trimmed = chunk.trim();
+    let flush_group = |output: &mut Vec<String>, grouped: &mut String, grouped_sentences: &mut usize| {
+        if grouped.trim().is_empty() {
+            grouped.clear();
+            *grouped_sentences = 0;
+            return;
+        }
+        output.push(grouped.trim().to_string());
+        grouped.clear();
+        *grouped_sentences = 0;
+    };
+
+    for sentence in source {
+        let trimmed = sentence.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed.chars().count() <= max_chars {
-            output.push(trimmed.to_string());
+
+        let building_first_chunk = output.is_empty();
+        let active_sentence_limit = if building_first_chunk {
+            first_sentence_limit
+        } else {
+            sentence_limit
+        };
+        let active_char_limit = if building_first_chunk {
+            first_chunk_char_limit
+        } else {
+            max_chars
+        };
+
+        let sentence_chars = trimmed.chars().count();
+        if sentence_chars > active_char_limit {
+            flush_group(&mut output, &mut grouped, &mut grouped_sentences);
+            output.extend(split_long_segment_by_words(trimmed, active_char_limit));
             continue;
         }
 
-        let mut current = String::new();
-        for word in trimmed.split_whitespace() {
-            let next_len = if current.is_empty() {
-                word.chars().count()
-            } else {
-                current.chars().count() + 1 + word.chars().count()
-            };
-            if !current.is_empty() && next_len > max_chars {
-                output.push(current);
-                current = word.to_string();
-            } else {
-                if !current.is_empty() {
-                    current.push(' ');
-                }
-                current.push_str(word);
-            }
+        let next_len = if grouped.is_empty() {
+            sentence_chars
+        } else {
+            grouped.chars().count() + 1 + sentence_chars
+        };
+        let reached_sentence_limit = grouped_sentences >= active_sentence_limit;
+        let would_exceed_chars = !grouped.is_empty() && next_len > active_char_limit;
+        if reached_sentence_limit || would_exceed_chars {
+            flush_group(&mut output, &mut grouped, &mut grouped_sentences);
         }
-        if !current.is_empty() {
-            output.push(current);
+
+        if !grouped.is_empty() {
+            grouped.push(' ');
         }
+        grouped.push_str(trimmed);
+        grouped_sentences += 1;
+    }
+
+    if !grouped.is_empty() {
+        output.push(grouped.trim().to_string());
     }
 
     if output.is_empty() {
@@ -412,6 +721,223 @@ fn cap_chunks_by_chars(split: Vec<String>, original_text: &str, max_chars: usize
     } else {
         output
     }
+}
+
+fn split_long_segment_by_words(input: &str, max_chars: usize) -> Vec<String> {
+    let mut output: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for word in input.split_whitespace() {
+        let word_chars = word.chars().count();
+
+        if word_chars > max_chars {
+            if !current.is_empty() {
+                output.push(current);
+                current = String::new();
+            }
+            let mut token = String::new();
+            let mut token_chars = 0usize;
+            for ch in word.chars() {
+                if token_chars >= max_chars {
+                    output.push(token);
+                    token = String::new();
+                    token_chars = 0;
+                }
+                token.push(ch);
+                token_chars += 1;
+            }
+            if !token.is_empty() {
+                output.push(token);
+            }
+            continue;
+        }
+
+        let next_len = if current.is_empty() {
+            word_chars
+        } else {
+            current.chars().count() + 1 + word_chars
+        };
+        if !current.is_empty() && next_len > max_chars {
+            output.push(current);
+            current = word.to_string();
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+    }
+
+    if !current.is_empty() {
+        output.push(current);
+    }
+    output
+}
+
+fn resample_pcm_by_rate(input: &[i16], rate: f32) -> Vec<i16> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    if (rate - 1.0).abs() <= f32::EPSILON {
+        return input.to_vec();
+    }
+
+    let input_len = input.len();
+    let output_len = usize::max(1, ((input_len as f32) / rate).round() as usize);
+    let mut output = Vec::with_capacity(output_len);
+
+    for out_index in 0..output_len {
+        let src_pos = (out_index as f32) * rate;
+        let left_idx = usize::min(src_pos.floor() as usize, input_len.saturating_sub(1));
+        let right_idx = usize::min(left_idx + 1, input_len.saturating_sub(1));
+        let frac = (src_pos - (left_idx as f32)).clamp(0.0, 1.0);
+
+        let left = input[left_idx] as f32;
+        let right = input[right_idx] as f32;
+        let interpolated = left + (right - left) * frac;
+        output.push(interpolated.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+    }
+
+    output
+}
+
+fn decompose_tempo_factors(rate: f32) -> Vec<f32> {
+    if rate <= 0.0 {
+        return Vec::new();
+    }
+    if (rate - 1.0).abs() <= f32::EPSILON {
+        return vec![1.0];
+    }
+
+    // Prefer several smaller tempo steps over one large step; this
+    // generally preserves speech timbre better at high speedups.
+    let max_step = 1.35_f32;
+    if rate > 1.0 {
+        let mut steps = (rate.ln() / max_step.ln()).ceil() as usize;
+        if steps == 0 {
+            steps = 1;
+        }
+        let factor = rate.powf(1.0 / steps as f32);
+        return vec![factor.clamp(0.5, 2.0); steps];
+    }
+
+    let mut steps = ((1.0 / rate).ln() / max_step.ln()).ceil() as usize;
+    if steps == 0 {
+        steps = 1;
+    }
+    let factor = rate.powf(1.0 / steps as f32);
+    vec![factor.clamp(0.5, 2.0); steps]
+}
+
+fn resolve_sox_path_cached() -> Option<PathBuf> {
+    static SOX_PATH_CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SOX_PATH_CACHE.get_or_init(resolve_sox_path).clone()
+}
+
+fn resolve_sox_path() -> Option<PathBuf> {
+    if command_exists("sox") {
+        return Some(PathBuf::from("sox"));
+    }
+    find_sox_in_windows_winget_location()
+}
+
+fn command_exists(command: &str) -> bool {
+    Command::new(command)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
+fn find_sox_in_windows_winget_location() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
+
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    let root = PathBuf::from(local_app_data)
+        .join("Microsoft")
+        .join("WinGet")
+        .join("Packages");
+    if !root.exists() {
+        return None;
+    }
+
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&root)
+        .ok()?
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let name = path.file_name()?.to_string_lossy().to_string();
+            if name.starts_with("ChrisBagwell.SoX_") {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort();
+
+    for candidate in candidates {
+        if let Ok(entries) = std::fs::read_dir(&candidate) {
+            let mut nested_bins: Vec<PathBuf> = entries
+                .filter_map(|entry| {
+                    let path = entry.ok()?.path();
+                    if !path.is_dir() {
+                        return None;
+                    }
+                    let name = path.file_name()?.to_string_lossy().to_string();
+                    if name.starts_with("sox-") {
+                        let binary = path.join("sox.exe");
+                        if binary.exists() {
+                            return Some(binary);
+                        }
+                    }
+                    None
+                })
+                .collect();
+            nested_bins.sort();
+            if let Some(binary) = nested_bins.into_iter().next() {
+                return Some(binary);
+            }
+        }
+
+        let direct_binary = candidate.join("sox.exe");
+        if direct_binary.exists() {
+            return Some(direct_binary);
+        }
+    }
+
+    None
+}
+
+fn pcm_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
+fn bytes_to_pcm_i16(bytes: &[u8]) -> Vec<i16> {
+    let even_len = bytes.len() - (bytes.len() % 2);
+    let mut output = Vec::with_capacity(even_len / 2);
+    for chunk in bytes[..even_len].chunks_exact(2) {
+        output.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    output
+}
+
+fn bytes_to_pcm_i16_drain_all(buffer: &mut Vec<u8>) -> Vec<i16> {
+    let even_len = buffer.len() - (buffer.len() % 2);
+    if even_len == 0 {
+        return Vec::new();
+    }
+    let drained: Vec<u8> = buffer.drain(..even_len).collect();
+    bytes_to_pcm_i16(&drained)
 }
 
 fn now_unix_timestamp_string() -> String {

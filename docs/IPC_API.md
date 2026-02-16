@@ -263,7 +263,7 @@ Start speaking text using a specified voice.
     "pitch": 1.0,
     "volume": 1.0,
     "chunking": {
-      "max_chars": 400
+      "max_chars": 500
     }
   }
 }
@@ -288,6 +288,9 @@ Notes:
 - `settings.rate` is applied engine-side by time-scaling each returned chunk.
 - `settings.volume` is applied engine-side by scaling PCM amplitude per chunk.
 - `settings.pitch` is accepted by schema but currently reserved (no-op in Phase 1 runtime).
+- Chunking defaults are tuned for smoother streaming playback:
+  - `settings.chunking.max_chars` default `500`
+  - sentence-boundary grouping up to `3` sentences per chunk (engine runtime policy)
 
 ---
 
@@ -518,6 +521,9 @@ Current Phase 1 behavior:
 - `rate`: implemented (engine post-processing, chunk time-scale).
 - `volume`: implemented (engine post-processing, PCM gain).
 - `pitch`: accepted but reserved/no-op for now.
+- chunk policy defaults:
+  - `chunking.max_chars=500`
+  - up to 3 sentences per chunk (runtime policy)
 
 ---
 

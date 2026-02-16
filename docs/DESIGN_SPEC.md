@@ -130,10 +130,17 @@ Requirements:
 ### 5.1 Chunking ("streaming UX")
 - Split text by sentence boundaries where possible
 - Enforce chunk limits:
-  - max chars per chunk (e.g., 300-500)
+  - max chars per chunk (default: `500`, tunable `100-2000`)
+  - max sentences per chunk (default: `3`)
   - optional max duration estimate
 - Queue chunks sequentially to engine
 - Playback begins as soon as first chunk returns audio
+
+Implementation note:
+- We observed playback underflow at high rates when chunks were too small, especially with pitch-preserving time-scaling.
+- Grouping up to 3 sentences and using ~500 char chunks reduced packet churn and made playback more stable in both:
+  - Base build (Rust Kyutai runtime)
+  - Full build (Python sidecar with Kyutai/Qwen)
 
 ### 5.2 Job model
 - One active "Speak" job at a time in Phase 1

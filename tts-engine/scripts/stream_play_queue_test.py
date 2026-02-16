@@ -33,7 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default="http://127.0.0.1:8765")
     parser.add_argument("--token", default="dev-token")
     parser.add_argument("--voice-id", default="0")
-    parser.add_argument("--chunk-max-chars", type=int, default=160)
+    parser.add_argument("--chunk-max-chars", type=int, default=200)
     parser.add_argument("--rate", type=float, default=1.0)
     parser.add_argument("--pitch", type=float, default=1.0)
     parser.add_argument("--volume", type=float, default=1.0)

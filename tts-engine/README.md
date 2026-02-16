@@ -205,7 +205,7 @@ With engine already running:
 
 ```powershell
 cd tts-engine
-python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 160 --prefetch-queue-size 5 --start-playback-after 2
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 500 --prefetch-queue-size 5 --start-playback-after 2
 ```
 
 This script:
@@ -218,7 +218,7 @@ Optional flags:
 
 ```powershell
 # force smaller chunks to stress chunking behavior
-python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 120 --prefetch-queue-size 5 --start-playback-after 2
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 200 --prefetch-queue-size 5 --start-playback-after 2
 
 # save the combined streamed audio
 python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --save-wav-path ./out_stream.wav --prefetch-queue-size 5 --start-playback-after 2
@@ -239,7 +239,7 @@ python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0
 ```
 
 Defaults in this one-command flow:
-- `ChunkMaxChars=160`
+- `ChunkMaxChars=500`
 - `PrefetchQueueSize=5`
 - `StartPlaybackAfter=2`
 - warmup is triggered with `wait=true` before speak
@@ -274,10 +274,11 @@ python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0 -
 
 ## Performance notes (chunk pauses)
 
-Long pauses between heard chunks can come from:
+Long pauses or broken-sounding playback can come from:
 - CPU inference (`QwenDeviceMap=cpu`) which is much slower than CUDA on this model size.
 - Sequential per-chunk generation: the engine generates chunk N+1 only after chunk N has completed.
 - Synchronous playback in the Windows test client path to preserve chunk order.
+- Small chunk sizes at high playback rates (tempo processing can output bursty packets, causing buffer underflow).
 
 How to diagnose quickly:
 - In `stream_play_queue_test.py`, check printed timing lines:
@@ -291,7 +292,10 @@ How to reduce pauses:
 - Use CUDA-enabled torch (`QwenDeviceMap=cuda:0`, `QwenDtype=bfloat16`).
 - Use queue buffering (`PrefetchQueueSize=5`, `StartPlaybackAfter=2`).
 - Trigger warmup (`POST /v1/warmup` with `wait=true`) on startup and after model changes.
-- Keep chunk size moderate (`ChunkMaxChars=140` to `180`) for earlier first chunk with fewer boundaries.
+- Use larger chunk windows for smoother playback:
+  - default `ChunkMaxChars=500`
+  - group up to 3 sentences per chunk
+  - for low-latency tuning, try `ChunkMaxChars=350` to `600` depending on hardware.
 
 Cancel behavior details:
 - `POST /v1/cancel` is honored at chunk boundaries.

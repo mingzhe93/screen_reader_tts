@@ -24,7 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qwen-attn-implementation", default="")
     parser.add_argument("--qwen-speaker", default="")
     parser.add_argument("--ws-timeout-sec", type=int, default=120)
-    parser.add_argument("--chunk-max-chars", type=int, default=160)
+    parser.add_argument("--chunk-max-chars", type=int, default=200)
     parser.add_argument("--rate", type=float, default=1.0)
     parser.add_argument("--pitch", type=float, default=1.0)
     parser.add_argument("--volume", type=float, default=1.0)

@@ -146,7 +146,7 @@ class UpdateVoiceRequest(BaseModel):
 
 
 class ChunkingSettings(BaseModel):
-    max_chars: int = Field(default=400, ge=100, le=2000)
+    max_chars: int = Field(default=200, ge=100, le=2000)
 
 
 class SpeakSettings(BaseModel):

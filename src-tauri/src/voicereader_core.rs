@@ -127,7 +127,7 @@ impl Default for EngineState {
                 rate: 1.5,
                 pitch: 1.0,
                 volume: 1.0,
-                chunk_max_chars: 160,
+                chunk_max_chars: 200,
             },
             last_job_id: None,
             suppressed_job_ids: HashSet::new(),
@@ -1593,9 +1593,9 @@ async fn speak_and_stream(
 
     #[cfg(feature = "build-base")]
     {
-        // Pocket-TTS Rust path currently applies post-processing volume only.
-        // Keep rate/pitch in state for cross-build UI compatibility.
-        let _requested_prosody = (settings.rate, settings.pitch);
+        // Base Rust Kyutai path currently applies rate + volume.
+        // Pitch remains reserved/no-op for cross-build UI compatibility.
+        let _requested_pitch = settings.pitch;
 
         if selected_model != MODEL_KYUTAI {
             return Err(anyhow!(
@@ -1666,6 +1666,7 @@ async fn speak_and_stream(
                     &selected_preset,
                     &trimmed,
                     settings.chunk_max_chars,
+                    settings.rate,
                     settings.volume,
                     &cancel_flag,
                     |chunk_index, pcm, sample_rate| {
