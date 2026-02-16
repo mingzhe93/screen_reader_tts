@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -458,12 +459,65 @@ def _resolve_sox_path() -> str | None:
         return _SOX_PATH
 
     _SOX_LOOKUP_ATTEMPTED = True
+    env_override = os.getenv("VOICEREADER_SOX_PATH", "").strip()
+    if env_override:
+        candidate = Path(env_override)
+        if candidate.exists():
+            _SOX_PATH = str(candidate.resolve())
+            return _SOX_PATH
+
+    bundled = _find_bundled_sox_near_runtime()
+    if bundled is not None:
+        _SOX_PATH = bundled
+        return _SOX_PATH
+
     _SOX_PATH = shutil.which("sox")
     if _SOX_PATH:
         return _SOX_PATH
 
     _SOX_PATH = _find_sox_in_windows_winget_location()
     return _SOX_PATH
+
+
+def _find_bundled_sox_near_runtime() -> str | None:
+    binary_name = "sox.exe" if os.name == "nt" else "sox"
+    roots: list[Path] = []
+
+    try:
+        exe_parent = Path(sys.executable).resolve().parent
+        roots.append(exe_parent)
+        roots.append(exe_parent.parent)
+        roots.append(exe_parent.parent.parent)
+    except Exception:
+        pass
+    try:
+        roots.append(Path.cwd())
+    except Exception:
+        pass
+
+    seen: set[Path] = set()
+    deduped_roots: list[Path] = []
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        deduped_roots.append(root)
+
+    for root in deduped_roots:
+        candidates = [
+            root / "binaries" / "sox" / binary_name,
+            root / "resources" / "binaries" / "sox" / binary_name,
+            root / "binaries" / binary_name,
+            root / "resources" / "binaries" / binary_name,
+            root / "sox" / binary_name,
+            root / "resources" / "sox" / binary_name,
+            root / binary_name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate.resolve())
+
+    return None
 
 
 def _find_sox_in_windows_winget_location() -> str | None:

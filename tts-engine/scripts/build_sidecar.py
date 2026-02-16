@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import shutil
 import subprocess
@@ -148,6 +149,57 @@ def ensure_bundled_kyutai_model(root: Path, engine_dir: Path, python: Path) -> P
     return target_repo
 
 
+def _find_sox_executable() -> Path | None:
+    raw_override = os.getenv("VOICEREADER_SOX_PATH", "").strip()
+    if raw_override:
+        candidate = Path(raw_override)
+        if candidate.exists():
+            return candidate
+
+    which_path = shutil.which("sox")
+    if which_path:
+        return Path(which_path)
+
+    if not sys.platform.startswith("win"):
+        return None
+
+    local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        return None
+    root = Path(local_app_data) / "Microsoft" / "WinGet" / "Packages"
+    if not root.exists():
+        return None
+
+    for candidate in sorted(root.glob("ChrisBagwell.SoX_*")):
+        for nested in sorted(candidate.glob("sox-*/sox.exe")):
+            if nested.exists():
+                return nested
+        direct = candidate / "sox.exe"
+        if direct.exists():
+            return direct
+    return None
+
+
+def ensure_bundled_sox(root: Path) -> Path | None:
+    sox_executable = _find_sox_executable()
+    target_dir = root / "src-tauri" / "binaries" / "sox"
+
+    if sox_executable is None:
+        print("WARNING: SoX not found on build machine. Portable/runtime will use pitch-shifting rate fallback.")
+        return None
+
+    source_dir = sox_executable.parent
+    if not source_dir.exists():
+        print("WARNING: SoX path resolved but parent directory is missing; skipping SoX bundling.")
+        return None
+
+    if target_dir.exists():
+        _remove_path_with_retry(target_dir)
+    shutil.copytree(source_dir, target_dir)
+    print(f"Bundled SoX runtime to: {target_dir}")
+    return target_dir
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build the Python sidecar runtime and/or ensure bundled Kyutai model files."
@@ -174,6 +226,7 @@ def main() -> int:
 
     if args.models_only:
         ensure_bundled_kyutai_model(root=root, engine_dir=engine_dir, python=python)
+        ensure_bundled_sox(root=root)
         return 0
 
     ensure_pyinstaller(python, engine_dir)
@@ -231,6 +284,7 @@ def main() -> int:
         print(f"Removed legacy onefile sidecar: {legacy_onefile_path}")
 
     ensure_bundled_kyutai_model(root=root, engine_dir=engine_dir, python=python)
+    ensure_bundled_sox(root=root)
 
     return 0
 

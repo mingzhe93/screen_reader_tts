@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -257,6 +257,9 @@ impl LocalKyutaiRuntime {
     }
 
     pub fn health_payload(&self, selected_preset: &str) -> Value {
+        let sox_detail = resolve_sox_path_cached()
+            .map(|path| format!("sox={}", path.display()))
+            .unwrap_or_else(|| "sox=unavailable(resample_fallback_pitch_shift)".to_string());
         json!({
             "engine_version": "0.1.0",
             "active_model_id": self.model_id,
@@ -272,10 +275,11 @@ impl LocalKyutaiRuntime {
                 "model_loaded": true,
                 "fallback_active": false,
                 "detail": format!(
-                    "model={}, source={}, preset={}",
+                    "model={}, source={}, preset={}, {}",
                     self.model_id,
                     self.model_dir.display(),
-                    selected_preset
+                    selected_preset,
+                    sox_detail
                 ),
                 "supports_default_voice": true,
                 "supports_cloned_voices": true,
@@ -835,10 +839,64 @@ fn resolve_sox_path_cached() -> Option<PathBuf> {
 }
 
 fn resolve_sox_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("VOICEREADER_SOX_PATH").map(PathBuf::from) {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    if let Some(path) = find_bundled_sox_near_current_executable() {
+        return Some(path);
+    }
     if command_exists("sox") {
         return Some(PathBuf::from("sox"));
     }
     find_sox_in_windows_winget_location()
+}
+
+fn find_bundled_sox_near_current_executable() -> Option<PathBuf> {
+    let sox_name = if cfg!(target_os = "windows") {
+        "sox.exe"
+    } else {
+        "sox"
+    };
+
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            roots.push(parent.to_path_buf());
+            if let Some(grand_parent) = parent.parent() {
+                roots.push(grand_parent.to_path_buf());
+                if let Some(great_grand_parent) = grand_parent.parent() {
+                    roots.push(great_grand_parent.to_path_buf());
+                }
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for root in roots {
+        if !seen.insert(root.clone()) {
+            continue;
+        }
+        let candidates = [
+            root.join("binaries").join("sox").join(sox_name),
+            root.join("resources").join("binaries").join("sox").join(sox_name),
+            root.join("binaries").join(sox_name),
+            root.join("resources").join("binaries").join(sox_name),
+            root.join("sox").join(sox_name),
+            root.join("resources").join("sox").join(sox_name),
+            root.join(sox_name),
+        ];
+        for candidate in candidates {
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn command_exists(command: &str) -> bool {

@@ -5,7 +5,8 @@
   "tauri": {
     "bundle": {
       "resources": [
-        "binaries/models/**/*"
+        "binaries/models/**/*",
+        "binaries/sox/**/*"
       ]
     }
   }

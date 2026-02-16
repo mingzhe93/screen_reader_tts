@@ -104,6 +104,16 @@ def main() -> int:
         print("Copying bundled models (base variant)...", flush=True)
         (portable_dir / "binaries").mkdir(parents=True, exist_ok=True)
         _copytree(source_models_dir, portable_dir / "binaries" / "models")
+        source_sox_dir = binaries_dir / "sox"
+        if source_sox_dir.exists():
+            print("Copying bundled SoX runtime (base variant)...", flush=True)
+            _copytree(source_sox_dir, portable_dir / "binaries" / "sox")
+        else:
+            print(
+                "WARNING: bundled SoX runtime not found under src-tauri/binaries/sox. "
+                "Rate control will use pitch-shifting fallback on machines without SoX installed.",
+                flush=True,
+            )
 
     readme_path = portable_dir / "README-PORTABLE.txt"
     readme_path.write_text(
