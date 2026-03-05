@@ -1,0 +1,142 @@
+:root {
+  --toolbar-bg: rgba(18, 25, 34, 0.7);
+  --toolbar-line: rgba(200, 221, 241, 0.34);
+  --toolbar-ink: #e7edf5;
+  --toolbar-muted: #a6b5c8;
+  --toolbar-accent: #2bc6b6;
+  --toolbar-danger: #ff8a6f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#toolbar-app {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  font-family: "Space Grotesk", "Avenir Next", "Trebuchet MS", sans-serif;
+  user-select: none;
+  padding: 1px;
+}
+
+.toolbar-shell {
+  width: 100%;
+  height: 100%;
+  border: none;
+  border-radius: 17px;
+  background: var(--toolbar-bg);
+  backdrop-filter: blur(12px);
+  box-shadow: inset 0 0 0 1px var(--toolbar-line);
+  color: var(--toolbar-ink);
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.55rem 0.68rem;
+  overflow: hidden;
+  justify-items: center;
+  align-content: center;
+}
+
+.toolbar-source {
+  width: 100%;
+  font-size: 0.82rem;
+  color: var(--toolbar-muted);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  cursor: grab;
+}
+
+.toolbar-source:active {
+  cursor: grabbing;
+}
+
+.toolbar-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  width: 100%;
+}
+
+.toolbar-rate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 54px;
+  border: 1px dashed var(--toolbar-accent);
+  border-radius: 999px;
+  background: rgba(43, 198, 182, 0.2);
+  color: #d2fbf6;
+  font-size: 0.82rem;
+  font-weight: 700;
+  height: 32px;
+  padding: 0 0.52rem;
+}
+
+.toolbar-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--toolbar-line);
+  border-radius: 11px;
+  background: rgba(17, 24, 34, 0.65);
+  color: var(--toolbar-ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+.toolbar-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  display: block;
+}
+
+.toolbar-btn:hover {
+  border-color: var(--toolbar-accent);
+}
+
+.toolbar-btn-primary {
+  width: 42px;
+  height: 42px;
+  border-color: var(--toolbar-accent);
+  background: linear-gradient(135deg, #14a494, #0a8f82);
+  color: #fff;
+}
+
+.toolbar-btn-stop:hover {
+  border-color: var(--toolbar-danger);
+  color: var(--toolbar-danger);
+}
+
+.hidden {
+  display: none !important;
+}
+
+.toolbar-shell.skip-back-noop {
+  animation: toolbar-noop-flash 220ms ease;
+}
+
+@keyframes toolbar-noop-flash {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+  100% {
+    opacity: 1;
+  }
+}

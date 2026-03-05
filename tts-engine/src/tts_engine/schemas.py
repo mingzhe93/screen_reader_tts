@@ -199,6 +199,22 @@ class CancelResponse(BaseModel):
     canceled: bool
 
 
+class UpdatePlaybackRequest(BaseModel):
+    rate: float | None = Field(default=None, ge=0.25, le=4.0)
+    pitch: float | None = Field(default=None, ge=0.5, le=2.0)
+    volume: float | None = Field(default=None, ge=0.0, le=2.0)
+
+    @model_validator(mode="after")
+    def validate_any_field(self) -> "UpdatePlaybackRequest":
+        if self.rate is None and self.pitch is None and self.volume is None:
+            raise ValueError("At least one playback field is required")
+        return self
+
+
+class UpdatePlaybackResponse(BaseModel):
+    updated: bool
+
+
 class WarmupRequest(BaseModel):
     wait: bool = False
     force: bool = False

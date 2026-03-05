@@ -1,53 +1,61 @@
-﻿VoiceReader Engine API (Phase 1, Full build sidecar)
+VoiceReader Engine API (Current Implementation, Full Build Sidecar)
 
 ## 1. Overview
-This document describes the Python sidecar HTTP/WS API used by the Full build profile.
+This document describes the Python sidecar HTTP and WebSocket API used by the
+`build-full` profile.
 
-In the Base build profile, VoiceReader uses an in-process Rust Kyutai runtime and does not expose this localhost API.
+`build-base` does not use this localhost API. It runs Kyutai in-process in
+Rust.
 
 - Transport:
-  - HTTP for request/response control
-  - WebSocket for audio chunk and job event streaming
-- Security:
-  - App generates a high-entropy session token before launching Engine
-  - Token is passed via inherited env var (`SPEAK_SELECTION_ENGINE_TOKEN`) in current app/runtime flow
-  - Engine binds loopback only (`127.0.0.1`) on an app-chosen port
-  - Query-string auth tokens are disabled
+  - HTTP for control requests
+  - WebSocket for streamed job events and audio chunks
+- Bind:
+  - Loopback only (`127.0.0.1`)
+- Auth:
+  - Bearer token required for HTTP and WS
 
-### 1.1 Auth policy
-- HTTP requests: `Authorization: Bearer <token>` (required)
-- WebSocket requests (preferred): `Authorization: Bearer <token>`
-- WebSocket fallback (for clients that cannot set custom headers):
-  - `Sec-WebSocket-Protocol: auth.bearer.v1, <token>`
-  - server validates the second protocol token as the auth token
-  - server responds with `Sec-WebSocket-Protocol: auth.bearer.v1`
+## 2. Auth Policy
 
-### 1.2 Build profile applicability
-- Base build (`build-base`):
-  - Runtime: Rust-native Kyutai (English-only in current app flow)
-  - No Python sidecar process
-  - No HTTP/WS localhost engine API surface
-  - No Qwen/GPU model path
-- Full build (`build-full`):
-  - Runtime: Python sidecar
-  - This API applies
-  - Qwen model/GPU path available when dependencies and hardware are present
+### 2.1 HTTP
+All HTTP requests require:
 
-## 2. Conventions
+```text
+Authorization: Bearer <token>
+```
 
-### 2.1 Content types
-- Requests/Responses: `application/json`
-- Audio chunks: JSON events with base64 PCM in Phase 1
+### 2.2 WebSocket
+Preferred:
 
-### 2.2 IDs
+```text
+Authorization: Bearer <token>
+```
+
+Fallback for clients that cannot set auth headers:
+
+```text
+Sec-WebSocket-Protocol: auth.bearer.v1, <token>
+```
+
+If valid, server accepts and returns:
+
+```text
+Sec-WebSocket-Protocol: auth.bearer.v1
+```
+
+## 3. Conventions
+
+### 3.1 Content types
+- Requests and responses: `application/json`
+- Audio stream frames: JSON with base64 PCM (`pcm_s16le`)
+
+### 3.2 IDs
 - `job_id`: UUID
-- `voice_id`: string
-  - reserved built-in default voice: `"0"`
-  - cloned voice: UUID string
-- `model_id`: string (example: `qwen3-tts-12hz-0.6b-base`)
+- `voice_id`:
+  - `"0"` reserved built-in voice
+  - UUID for cloned voices
 
-### 2.3 Error format
-All errors return:
+### 3.3 Error shape
 
 ```json
 {
@@ -59,217 +67,40 @@ All errors return:
 }
 ```
 
-### 2.4 Session bootstrap (current status)
-Bootstrap stdin schema is intentionally deferred for now. Current behavior:
-1) app/launcher sets token via `SPEAK_SELECTION_ENGINE_TOKEN`
-2) app/launcher starts engine process with `--server --port <port>` (+ optional `--data-dir`)
+## 4. HTTP API (`/v1`)
 
-Standalone engine testing behavior:
-1) set token via `SPEAK_SELECTION_ENGINE_TOKEN`
-2) launch engine with `python -m tts_engine --server --port <port>`
+### 4.1 `GET /health`
+Returns runtime health and capabilities.
 
-A strict stdin bootstrap JSON schema will be finalized during Tauri integration.
+### 4.2 `GET /voices`
+Lists built-in and cloned voices.
 
-Note:
-- Base build does not use this bootstrap flow because it does not launch Python sidecar.
+### 4.3 `POST /voices/clone`
+Creates a reusable cloned voice profile.
 
-Local storage defaults (standalone):
-- engine data dir: `./.data` (or `--data-dir`)
-- Hugging Face cache: `<data_dir>/hf-cache`
-- local model mirrors (if prefetched): `<data_dir>/models/<org>/<repo>`
+### 4.4 `DELETE /voices/{voice_id}`
+Deletes a cloned voice. `voice_id="0"` cannot be deleted.
 
-### 2.5 Error/status mapping
-- `INVALID_AUDIO`, `EMPTY_TEXT`, `VOICE_CLONE_FAILED`: HTTP `400`
-- `VOICE_NOT_FOUND`, `JOB_NOT_FOUND`: HTTP `404`
-- `MODEL_NOT_READY`: HTTP `409`
-- `JOB_IN_PROGRESS`: HTTP `409`
-- `UNAUTHORIZED`: HTTP `401`
-- `FORBIDDEN`: HTTP `403`
-- `INFERENCE_FAILED`: HTTP `500`
+### 4.5 `POST /speak`
+Starts a new job.
 
-### 2.6 Process lifecycle (recommended)
-- App launches engine as a child process (non-detached) and keeps the process handle.
-- On app shutdown:
-  1) call `POST /v1/quit` with Bearer token
-  2) wait for process exit for a short timeout (e.g., 2-5 seconds)
-  3) if still alive, force-kill process
-
----
-
-## 3. HTTP API
-
-Base path: `/v1`
-
-### 3.1 GET /health
-
-Returns engine status and capabilities.
-
-**Response 200**
-
-```json
-{
-  "engine_version": "0.1.0",
-  "active_model_id": "Verylicious/pocket-tts-ungated",
-  "device": "cpu",
-  "capabilities": {
-    "supports_voice_clone": true,
-    "supports_audio_chunk_stream": true,
-    "supports_true_streaming_inference": false,
-    "languages": ["en"]
-  },
-  "runtime": {
-    "backend": "kyutai_pocket_tts",
-    "model_loaded": true,
-    "fallback_active": false,
-    "detail": "model=Verylicious/pocket-tts-ungated, default_voice_prompt=alba",
-    "supports_default_voice": true,
-    "supports_cloned_voices": true,
-    "warmup": {
-      "status": "ready",
-      "runs": 1,
-      "last_reason": "startup",
-      "last_started_at": "ISO8601",
-      "last_completed_at": "ISO8601",
-      "last_duration_ms": 1500,
-      "last_error": null
-    }
-  }
-}
-```
-
-Notes:
-- In `VOICEREADER_SYNTH_BACKEND=auto`, engine may fall back to `backend=mock` if Kyutai/Qwen runtime cannot be loaded.
-- Use `runtime` fields to confirm if real model inference is active.
-- `capabilities.supports_voice_clone` is backend-dependent (currently true on `kyutai_pocket_tts` and `mock`, false on `qwen_custom_voice`).
-- `capabilities.languages` is backend-dependent (`["en"]` on current Kyutai app flow; broader set on `qwen_custom_voice`/`mock`).
-
----
-
-### 3.2 GET /voices
-
-List available voices.
-
-**Response 200**
-
-```json
-{
-  "voices": [
-    {
-      "voice_id": "0",
-      "display_name": "Default Built-in Voice",
-      "created_at": "1970-01-01T00:00:00Z",
-      "tts_model_id": "Verylicious/pocket-tts-ungated",
-      "language_hint": "auto"
-    },
-    {
-      "voice_id": "uuid",
-      "display_name": "My Voice",
-      "created_at": "ISO8601",
-      "tts_model_id": "Verylicious/pocket-tts-ungated",
-      "language_hint": "en"
-    }
-  ]
-}
-```
-
----
-
-### 3.3 POST /voices/clone
-
-Create a new reusable voice profile from a reference sample.
-For Kyutai backend, the engine materializes and stores a reusable `prompt.safetensors` under the voice directory.
-
-**Request**
-
-```json
-{
-  "display_name": "My Voice",
-  "ref_audio": {
-    "path": "/path/to/sample.wav"
-  },
-  "ref_text": "Optional transcript",
-  "language": "en",
-  "options": {
-    "normalize_audio": true
-  }
-}
-```
-
-Alternative audio input (base64):
-
-```json
-{
-  "display_name": "My Voice",
-  "ref_audio": {
-    "wav_base64": "..."
-  },
-  "ref_text": "Optional transcript"
-}
-```
-
-**Response 200**
-
-```json
-{
-  "voice_id": "uuid",
-  "display_name": "My Voice",
-  "created_at": "ISO8601",
-  "tts_model_id": "Verylicious/pocket-tts-ungated"
-}
-```
-
-**Errors**
-
-- `INVALID_AUDIO`
-- `MODEL_NOT_READY`
-- `VOICE_CLONE_FAILED`
-
----
-
-### 3.4 DELETE /voices/{voice_id}
-
-Delete a cloned voice profile and its stored artifacts.
-
-Notes:
-- `voice_id="0"` is reserved and cannot be deleted.
-
-**Response 200**
-
-```json
-{ "deleted": true }
-```
-
-**Errors**
-
-- `VOICE_NOT_FOUND`
-
----
-
-### 3.5 POST /speak
-
-Start speaking text using a specified voice.
-
-`voice_id` is optional. If omitted, default built-in voice `"0"` is used.
-
-**Request**
+Request example:
 
 ```json
 {
   "voice_id": "0",
-  "text": "Hello world...",
+  "text": "Hello world",
   "language": "en",
   "settings": {
     "rate": 1.0,
     "pitch": 1.0,
     "volume": 1.0,
-    "chunking": {
-      "max_chars": 500
-    }
+    "chunking": { "max_chars": 500 }
   }
 }
 ```
 
-**Response 200**
+Response:
 
 ```json
 {
@@ -278,188 +109,100 @@ Start speaking text using a specified voice.
 }
 ```
 
-**Errors**
-
-- `VOICE_NOT_FOUND` (for non-default unknown voice IDs)
-- `EMPTY_TEXT`
-- `MODEL_NOT_READY` (for known-but-unsupported voice modes on current backend, e.g., cloned voice on `qwen_custom_voice`)
-
 Notes:
-- `settings.rate` is applied engine-side by time-scaling each returned chunk.
-- `settings.volume` is applied engine-side by scaling PCM amplitude per chunk.
-- `settings.pitch` is accepted by schema but currently reserved (no-op in Phase 1 runtime).
-- Chunking defaults are tuned for smoother streaming playback:
-  - `settings.chunking.max_chars` default `500`
-  - sentence-boundary grouping up to `3` sentences per chunk (engine runtime policy)
+- Starting a new job cancels any previous active job.
+- Playback controls in `settings` are the initial values for the job.
 
----
+### 4.6 `POST /cancel`
+Cancels a job.
 
-### 3.6 POST /cancel
-
-Cancel an active job.
-
-**Request**
+Request:
 
 ```json
 { "job_id": "uuid" }
 ```
 
-**Response 200**
+Response:
 
 ```json
 { "canceled": true }
 ```
 
-**Errors**
+### 4.7 `POST /jobs/{job_id}/playback`
+Updates playback controls for a running job.
 
-- `JOB_NOT_FOUND`
-
-Notes:
-- Cancel is honored at chunk boundaries.
-- If cancel arrives while a chunk is generating, that in-flight chunk is dropped and not emitted to WS.
-- Terminal event after successful cancellation is `JOB_CANCELED`.
-
----
-
-### 3.7 POST /quit
-
-Request graceful engine shutdown.
-
-**Request**
+Request:
 
 ```json
-{}
+{
+  "rate": 1.5,
+  "pitch": 1.0,
+  "volume": 1.0
+}
 ```
 
-**Response 200**
+Fields are optional, but at least one of `rate`, `pitch`, `volume` is required.
+
+Response:
+
+```json
+{ "updated": true }
+```
+
+Behavior:
+- Update is applied to the job state immediately.
+- Effective audio change happens on the next chunk processing cycle in the
+  sidecar job loop.
+- `pitch` is accepted by schema but currently reserved (no active pitch DSP in
+  the sidecar controls path).
+
+Errors:
+- `404 JOB_NOT_FOUND` if job is missing or already completed
+- `422` validation error if payload has no playback fields
+
+### 4.8 `POST /models/activate`
+Reloads model/runtime configuration and triggers warmup.
+
+### 4.9 `POST /models/prefetch`
+Downloads model repositories into local model storage.
+
+Request:
+
+```json
+{ "mode": "qwen_all" }
+```
+
+Allowed `mode` values:
+- `qwen_custom`
+- `qwen_base`
+- `qwen_all`
+- `all`
+
+### 4.10 `POST /warmup`
+Triggers warmup inference.
+
+### 4.11 `POST /quit`
+Requests graceful sidecar shutdown.
+
+Response:
 
 ```json
 { "quitting": true }
 ```
 
-Notes:
-- Protected by the same Bearer-token auth as all other endpoints.
-- Intended for app/test cleanup. Callers should still apply a force-kill fallback if process does not exit in time.
+## 5. WebSocket API
 
----
+### 5.1 `WS /v1/stream/{job_id}`
+Streams JSON events.
 
-### 3.8 POST /warmup
+Event types:
+- `JOB_STARTED`
+- `AUDIO_CHUNK`
+- `JOB_DONE`
+- `JOB_CANCELED`
+- `JOB_ERROR`
 
-Trigger warmup inference for the currently loaded backend/model.
-
-**Request**
-
-```json
-{
-  "wait": true,
-  "force": false,
-  "reason": "app_startup"
-}
-```
-
-Fields:
-- `wait`: if `true`, response returns after warmup completes
-- `force`: if `true`, run warmup even when status is already `ready`
-- `reason`: optional tag for logs/diagnostics
-
-**Response 200**
-
-```json
-{
-  "accepted": true,
-  "warmup": {
-    "status": "ready",
-    "runs": 2,
-    "last_reason": "app_startup",
-    "last_started_at": "ISO8601",
-    "last_completed_at": "ISO8601",
-    "last_duration_ms": 1020,
-    "last_error": null
-  }
-}
-```
-
-Notes:
-- Warmup can also run automatically on startup (`VOICEREADER_WARMUP_ON_STARTUP=true`).
-- Any future model-switch flow should call `/v1/warmup` after activating a new model.
-
----
-
-### 3.9 POST /models/activate
-
-Activate/reload the runtime backend/model config and trigger warmup for the new runtime.
-
-This endpoint is intended for app-side model switch flows and engine troubleshooting.
-
-**Request**
-
-```json
-{
-  "synth_backend": "kyutai",
-  "active_model_id": "kyutai-pocket-tts-ungated",
-  "kyutai_model_name": "Verylicious/pocket-tts-ungated",
-  "kyutai_voice_prompt": "alba",
-  "kyutai_sample_rate": 24000,
-  "warmup_wait": true,
-  "warmup_force": true,
-  "reason": "app_model_switch"
-}
-```
-
-Fields are optional. Omitted fields keep their current runtime value.
-
-**Response 200**
-
-```json
-{
-  "reloaded": true,
-  "warmup_accepted": true,
-  "active_model_id": "Verylicious/pocket-tts-ungated",
-  "runtime": {
-    "backend": "kyutai_pocket_tts",
-    "model_loaded": true,
-    "fallback_active": false,
-    "detail": "model=..., default_voice_prompt=alba",
-    "supports_default_voice": true,
-    "supports_cloned_voices": true,
-    "warmup": {
-      "status": "ready",
-      "runs": 1,
-      "last_reason": "app_model_switch",
-      "last_started_at": "ISO8601",
-      "last_completed_at": "ISO8601",
-      "last_duration_ms": 1200,
-      "last_error": null
-    }
-  }
-}
-```
-
-**Errors**
-- `JOB_IN_PROGRESS` (cannot switch while a speak job is active)
-- `MODEL_NOT_READY` (new backend/model failed to initialize)
-
----
-
-## 4. WebSocket Streaming API
-
-### 4.1 WS /v1/stream/{job_id}
-
-Events are JSON messages in Phase 1. Later versions may switch audio frames to binary.
-
-Auth:
-- preferred: `Authorization: Bearer <token>`
-- fallback: `Sec-WebSocket-Protocol: auth.bearer.v1, <token>`
-
-#### Event: JOB_STARTED
-
-```json
-{ "type": "JOB_STARTED", "job_id": "uuid" }
-```
-
-#### Event: AUDIO_CHUNK
-
-Contains PCM audio (16-bit signed little-endian), base64 encoded.
+`AUDIO_CHUNK` example:
 
 ```json
 {
@@ -475,79 +218,30 @@ Contains PCM audio (16-bit signed little-endian), base64 encoded.
   "text_range": {
     "chunk_index": 0,
     "start_char": 0,
-    "end_char": 132
+    "end_char": 120
   }
 }
 ```
 
-#### Event: JOB_DONE
+## 6. Playback Control Semantics
 
-```json
-{ "type": "JOB_DONE", "job_id": "uuid" }
-```
+Validation ranges:
+- `rate`: `0.25` to `4.0`
+- `pitch`: `0.5` to `2.0`
+- `volume`: `0.0` to `2.0`
+- `chunking.max_chars`: `100` to `2000`
 
-#### Event: JOB_CANCELED
+Current sidecar implementation:
+- `rate`: time-stretch with pitch-preserving preference:
+  1. SoX (`tempo`)
+  2. `librosa.effects.time_stretch`
+  3. linear resample fallback
+- `volume`: applied by PCM amplitude scaling
+- `pitch`: accepted and stored, currently reserved/no-op
 
-```json
-{ "type": "JOB_CANCELED", "job_id": "uuid" }
-```
-
-#### Event: JOB_ERROR
-
-```json
-{
-  "type": "JOB_ERROR",
-  "job_id": "uuid",
-  "error": {
-    "code": "INFERENCE_FAILED",
-    "message": "Details...",
-    "details": {}
-  }
-}
-```
-
----
-
-## 5. Settings schema (engine-facing)
-
-Suggested engine settings validation:
-
-- `rate`: float (0.25-4.0)
-- `pitch`: float (0.5-2.0)
-- `volume`: float (0.0-2.0)
-- `chunking.max_chars`: int (100-2000)
-
-Current Phase 1 behavior:
-- `rate`: implemented (engine post-processing, chunk time-scale).
-- `volume`: implemented (engine post-processing, PCM gain).
-- `pitch`: accepted but reserved/no-op for now.
-- chunk policy defaults:
-  - `chunking.max_chars=500`
-  - up to 3 sentences per chunk (runtime policy)
-
----
-
-## 6. Standalone engine validation
-
-Recommended order before app integration (Full build sidecar path):
-1) run engine server with token env var
-2) call `/v1/health`
-3) call `/v1/voices` and verify default voice `"0"` is present
-4) call `/v1/speak` using `voice_id: "0"`
-5) connect to WS stream and verify `JOB_STARTED -> AUDIO_CHUNK* -> JOB_DONE`
-6) call `/v1/quit` to ensure clean shutdown
-7) optionally call `/v1/warmup` with `wait=true` before latency-sensitive tests
-
----
-
-## 7. Future extensions (non-breaking plan)
-
-- Add `/models` endpoints:
-  - list installed
-  - download/install
-  - set active
-- Add `/voices/clone/transcribe` flow:
-  - run optional ASR and return transcript
-- Add binary WS frames for audio chunks
-- Support multi-job queueing
-
+## 7. Process Lifecycle Notes
+- App should keep sidecar as a child process.
+- On app shutdown:
+  1. call `POST /v1/quit`
+  2. wait briefly for exit
+  3. force-kill only if still running

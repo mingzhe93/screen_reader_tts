@@ -39,6 +39,8 @@ from .schemas import (
     SpeakResponse,
     PrefetchModelsRequest,
     PrefetchModelsResponse,
+    UpdatePlaybackRequest,
+    UpdatePlaybackResponse,
     VoiceSummary,
     UpdateVoiceRequest,
     WarmupRequest,
@@ -324,6 +326,23 @@ def create_app(config: EngineConfig) -> FastAPI:
                     status_code=404,
                 )
             return CancelResponse(canceled=True)
+
+    @router.post("/jobs/{job_id}/playback", response_model=UpdatePlaybackResponse)
+    async def update_job_playback(job_id: UUID, payload: UpdatePlaybackRequest) -> UpdatePlaybackResponse:
+        async with runtime_lock:
+            updated = await jobs.update_job_playback(
+                job_id,
+                rate=payload.rate,
+                pitch=payload.pitch,
+                volume=payload.volume,
+            )
+            if not updated:
+                raise EngineError(
+                    code="JOB_NOT_FOUND",
+                    message=f"Job {job_id} was not found",
+                    status_code=404,
+                )
+            return UpdatePlaybackResponse(updated=True)
 
     @router.post("/models/activate", response_model=ActivateModelResponse)
     async def activate_model(payload: ActivateModelRequest | None = None) -> ActivateModelResponse:

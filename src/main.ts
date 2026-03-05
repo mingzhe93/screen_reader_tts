@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/tauri";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import "./styles.css";
 
 type JsonValue = Record<string, unknown>;
@@ -51,6 +51,28 @@ type ModelUpdatePayload = {
 
 type JobCancelRequestedPayload = {
   job_id: string;
+};
+
+type JobStartedPayload = {
+  job_id: string;
+  ws_url: string;
+  source: string;
+  source_window?: string;
+  rate?: number;
+};
+
+type ToolbarActionPayload = {
+  action: "pause-toggle" | "skip-back" | "skip-forward" | "stop";
+};
+
+type ToolbarShowPayload = {
+  job_id: string;
+  source_window: string;
+  rate: number;
+};
+
+type ToolbarPausePayload = {
+  paused: boolean;
 };
 
 type CloneVoiceResult = {
@@ -343,6 +365,9 @@ let savedVoiceOrdinals = loadSavedVoiceOrdinals();
 let qwenEnabled = true;
 let pendingHotkeyCapture = "";
 let cloneStatusTimeoutId: number | null = null;
+let toolbarPaused = false;
+let activeJobSourceWindow = "";
+let activeToolbarJobId = "";
 
 applyTheme(currentTheme, false);
 
@@ -695,6 +720,53 @@ function selectedRateSetting(): number {
   return Math.min(4, Math.max(0.25, parsed));
 }
 
+function sourceLabelFromWindowTitle(sourceWindow: string): string {
+  const trimmed = sourceWindow.trim();
+  if (!trimmed) {
+    return "Reading aloud...";
+  }
+  const segments = trimmed
+    .split(" - ")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+  return segments[segments.length - 1] ?? trimmed;
+}
+
+function showToolbar(sourceWindow: string, rate: number): void {
+  activeJobSourceWindow = sourceWindow.trim();
+  toolbarPaused = false;
+  const payload: ToolbarShowPayload = {
+    job_id: activeToolbarJobId,
+    source_window: sourceLabelFromWindowTitle(activeJobSourceWindow),
+    rate,
+  };
+  void emit("voicereader:toolbar-show", payload);
+  void emit("voicereader:toolbar-paused", { paused: false } satisfies ToolbarPausePayload);
+}
+
+function hideToolbar(): void {
+  toolbarPaused = false;
+  activeJobSourceWindow = "";
+  activeToolbarJobId = "";
+  void emit("voicereader:toolbar-hide", {});
+}
+
+async function togglePlaybackPause(): Promise<void> {
+  const context = ensureAudioContext();
+  if (toolbarPaused) {
+    if (context.state === "suspended") {
+      await context.resume();
+    }
+    toolbarPaused = false;
+  } else {
+    if (context.state !== "suspended") {
+      await context.suspend();
+    }
+    toolbarPaused = true;
+  }
+  void emit("voicereader:toolbar-paused", { paused: toolbarPaused } satisfies ToolbarPausePayload);
+}
+
 function minPrebufferSecondsForRate(): number {
   // Faster playback drains buffered audio sooner; hold more before starting.
   const rate = selectedRateSetting();
@@ -758,6 +830,13 @@ function scheduleAudioBuffer(jobId: string, buffer: AudioBuffer): void {
   activeAudioSources.add(source);
   source.onended = () => {
     activeAudioSources.delete(source);
+    if (jobId !== activeToolbarJobId) {
+      return;
+    }
+    if (activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0) {
+      resetPlaybackCursor();
+      hideToolbar();
+    }
   };
 
   const now = context.currentTime;
@@ -851,7 +930,7 @@ async function enqueueAudioChunk(eventPayload: Record<string, unknown>): Promise
   }
 
   const context = ensureAudioContext();
-  if (context.state === "suspended") {
+  if (context.state === "suspended" && !toolbarPaused) {
     await context.resume();
   }
 
@@ -884,8 +963,8 @@ function resetPlaybackCursor(): void {
   playbackCursor = audioContext.currentTime;
 }
 
-function stopAllPlayback(): void {
-  for (const source of activeAudioSources) {
+function stopActiveSources(): void {
+  for (const source of Array.from(activeAudioSources)) {
     try {
       source.stop(0);
     } catch {
@@ -898,9 +977,31 @@ function stopAllPlayback(): void {
     }
   }
   activeAudioSources.clear();
+}
+
+function stopAllPlayback(): void {
+  stopActiveSources();
   clearQueuedPlayback();
   playbackChunkCounts.clear();
   resetPlaybackCursor();
+}
+
+function skipPlaybackForward(): void {
+  if (!activeToolbarJobId) {
+    return;
+  }
+  stopActiveSources();
+  resetPlaybackCursor();
+  flushQueuedPlayback(activeToolbarJobId, true);
+  if (activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0) {
+    hideToolbar();
+  }
+}
+
+async function toolbarStopPlayback(): Promise<void> {
+  stopAllPlayback();
+  await invoke("cancel_active_job");
+  hideToolbar();
 }
 
 async function refreshHealthAndVoices(): Promise<void> {
@@ -1360,6 +1461,43 @@ async function bindActions(): Promise<void> {
 }
 
 async function bindEvents(): Promise<void> {
+  await listen<ToolbarActionPayload>("voicereader:toolbar-action", async ({ payload }) => {
+    const action = payload.action;
+    if (action === "pause-toggle") {
+      try {
+        await togglePlaybackPause();
+      } catch (error) {
+        log(`Pause/resume failed: ${String(error)}`, "error");
+      }
+      return;
+    }
+    if (action === "skip-forward") {
+      skipPlaybackForward();
+      return;
+    }
+    if (action === "skip-back") {
+      void emit("voicereader:toolbar-skip-back-noop", {});
+      return;
+    }
+    if (action === "stop") {
+      try {
+        await toolbarStopPlayback();
+        log("Playback stopped from toolbar");
+      } catch (error) {
+        log(`Toolbar stop failed: ${String(error)}`, "error");
+      }
+    }
+  });
+
+  await listen<Record<string, unknown>>("voicereader:rate-updated", ({ payload }) => {
+    const parsed = Number(payload.rate ?? NaN);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    const normalized = Math.min(4, Math.max(0.25, parsed));
+    rateInput.value = normalized.toFixed(2).replace(/\.?0+$/, "");
+  });
+
   await listen<JsonValue>("voicereader:ws-event", async ({ payload }) => {
     const eventType = String(payload.type ?? "UNKNOWN");
     const jobId = String(payload.job_id ?? "");
@@ -1382,6 +1520,9 @@ async function bindEvents(): Promise<void> {
         queuedPlaybackByJob.delete(jobId);
       }
       stopAllPlayback();
+      if (!jobId || jobId === activeToolbarJobId) {
+        hideToolbar();
+      }
       return;
     }
 
@@ -1397,21 +1538,31 @@ async function bindEvents(): Promise<void> {
       }
       if (activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0) {
         resetPlaybackCursor();
+        if (!jobId || jobId === activeToolbarJobId) {
+          hideToolbar();
+        }
       }
     }
   });
 
-  await listen<Record<string, unknown>>("voicereader:job-started", ({ payload }) => {
+  await listen<JobStartedPayload>("voicereader:job-started", ({ payload }) => {
     const jobId = String(payload.job_id ?? "unknown");
+    const sourceWindow = String(payload.source_window ?? "");
+    const playbackRate = Number(payload.rate ?? selectedRateSetting());
+    const toolbarRate = Number.isFinite(playbackRate)
+      ? Math.min(4, Math.max(0.25, playbackRate))
+      : selectedRateSetting();
     if (jobId !== "unknown") {
       suppressedJobIds.delete(jobId);
       playbackChunkCounts.set(jobId, 0);
+      activeToolbarJobId = jobId;
       for (const existingJobId of Array.from(queuedPlaybackByJob.keys())) {
         if (existingJobId !== jobId) {
           queuedPlaybackByJob.delete(existingJobId);
         }
       }
     }
+    showToolbar(sourceWindow, toolbarRate);
     log(`job_started id=${jobId}`);
   });
 
@@ -1431,6 +1582,9 @@ async function bindEvents(): Promise<void> {
       queuedPlaybackByJob.delete(jobId);
     }
     stopAllPlayback();
+    if (!jobId || jobId === activeToolbarJobId) {
+      hideToolbar();
+    }
     log(`playback_stop job_id=${jobId || "unknown"}`);
   });
 

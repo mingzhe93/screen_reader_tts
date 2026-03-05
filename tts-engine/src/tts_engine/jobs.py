@@ -90,6 +90,26 @@ class JobManager:
             job.cancel_event.set()
             return True
 
+    async def update_job_playback(
+        self,
+        job_id: UUID,
+        *,
+        rate: float | None = None,
+        pitch: float | None = None,
+        volume: float | None = None,
+    ) -> bool:
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            if not job or job.done_event.is_set():
+                return False
+            if rate is not None:
+                job.rate = rate
+            if pitch is not None:
+                job.pitch = pitch
+            if volume is not None:
+                job.volume = volume
+            return True
+
     async def subscribe(
         self, job_id: UUID
     ) -> tuple[asyncio.Queue[dict[str, Any] | None], list[dict[str, Any]]]:

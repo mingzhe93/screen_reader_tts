@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +23,7 @@ const RUNTIME_CONFIG_DIR_NAME: &str = "pocket-tts-runtime";
 const MAX_SENTENCES_PER_CHUNK: usize = 1;
 const FIRST_CHUNK_MAX_SENTENCES: usize = 1;
 const FIRST_CHUNK_MAX_CHARS: usize = 200;
+const RATE_CONTROL_POLL_SAMPLES: usize = 960;
 
 #[derive(Clone)]
 pub enum LocalJobEndState {
@@ -417,9 +418,9 @@ impl LocalKyutaiRuntime {
         selected_preset: &str,
         text: &str,
         chunk_max_chars: u32,
-        rate: f32,
         volume: f32,
         cancel: &AtomicBool,
+        active_rate_steps: &AtomicU32,
         on_chunk: F,
     ) -> Result<(LocalJobEndState, bool)>
     where
@@ -427,9 +428,11 @@ impl LocalKyutaiRuntime {
     {
         let mut chunk_index: usize = 0;
         let mut had_audio = false;
-        let rate_clamped = rate.clamp(0.25, 4.0);
-        let rate_active = (rate_clamped - 1.0).abs() > f32::EPSILON;
-        let mut sox_stream = if rate_active {
+        let mut rate_clamped = (active_rate_steps.load(Ordering::SeqCst).clamp(1, 16) as f32) / 4.0;
+        // Always use the chunk-based pipeline so live rate changes can be applied
+        // during a running stream, including transitions from 1.0 -> != 1.0.
+        let rate_active = true;
+        let mut sox_stream = if (rate_clamped - 1.0).abs() > f32::EPSILON {
             SoxTempoStream::new(rate_clamped, self.sample_rate)
         } else {
             None
@@ -562,23 +565,97 @@ impl LocalKyutaiRuntime {
                     continue;
                 }
 
-                if let Some(rate_stream) = sox_stream.as_mut() {
-                    rate_stream.push_samples(&pcm)?;
-                    let mut combined: Vec<i16> = Vec::new();
-                    for adjusted in rate_stream.drain_available_frames() {
-                        if !adjusted.is_empty() {
-                            combined.extend_from_slice(&adjusted);
+                let mut cursor = 0usize;
+                let mut segment_start = 0usize;
+                let mut segment_rate = rate_clamped;
+
+                while cursor < pcm.len() {
+                    if cancel.load(Ordering::SeqCst) {
+                        drop(queue);
+                        if let Some(stream) = sox_stream.as_mut() {
+                            stream.abort();
                         }
+                        return Ok((LocalJobEndState::Canceled, had_audio));
                     }
-                    if !combined.is_empty() {
-                        emit!(chunk_index, &combined, self.sample_rate);
-                        chunk_index += 1;
+
+                    let next_cursor = usize::min(cursor + RATE_CONTROL_POLL_SAMPLES, pcm.len());
+                    let desired_rate = (active_rate_steps.load(Ordering::SeqCst).clamp(1, 16) as f32) / 4.0;
+                    if (desired_rate - segment_rate).abs() > f32::EPSILON {
+                        if cursor > segment_start {
+                            let segment = &pcm[segment_start..cursor];
+                            if let Some(rate_stream) = sox_stream.as_mut() {
+                                rate_stream.push_samples(segment)?;
+                                let mut combined: Vec<i16> = Vec::new();
+                                for adjusted in rate_stream.drain_available_frames() {
+                                    if !adjusted.is_empty() {
+                                        combined.extend_from_slice(&adjusted);
+                                    }
+                                }
+                                if !combined.is_empty() {
+                                    emit!(chunk_index, &combined, self.sample_rate);
+                                    chunk_index += 1;
+                                }
+                            } else if (segment_rate - 1.0).abs() <= f32::EPSILON {
+                                emit!(chunk_index, segment, self.sample_rate);
+                                chunk_index += 1;
+                            } else {
+                                let resampled = resample_pcm_by_rate(segment, segment_rate);
+                                if !resampled.is_empty() {
+                                    emit!(chunk_index, &resampled, self.sample_rate);
+                                    chunk_index += 1;
+                                }
+                            }
+                        }
+
+                        if let Some(rate_stream) = sox_stream.as_mut() {
+                            let mut combined: Vec<i16> = Vec::new();
+                            for adjusted in rate_stream.finish_and_drain() {
+                                if !adjusted.is_empty() {
+                                    combined.extend_from_slice(&adjusted);
+                                }
+                            }
+                            if !combined.is_empty() {
+                                emit!(chunk_index, &combined, self.sample_rate);
+                                chunk_index += 1;
+                            }
+                        }
+
+                        rate_clamped = desired_rate;
+                        segment_rate = desired_rate;
+                        sox_stream = if (rate_clamped - 1.0).abs() > f32::EPSILON {
+                            SoxTempoStream::new(rate_clamped, self.sample_rate)
+                        } else {
+                            None
+                        };
+                        segment_start = cursor;
                     }
-                } else {
-                    let resampled = resample_pcm_by_rate(&pcm, rate_clamped);
-                    if !resampled.is_empty() {
-                        emit!(chunk_index, &resampled, self.sample_rate);
+
+                    cursor = next_cursor;
+                }
+
+                if cursor > segment_start {
+                    let segment = &pcm[segment_start..cursor];
+                    if let Some(rate_stream) = sox_stream.as_mut() {
+                        rate_stream.push_samples(segment)?;
+                        let mut combined: Vec<i16> = Vec::new();
+                        for adjusted in rate_stream.drain_available_frames() {
+                            if !adjusted.is_empty() {
+                                combined.extend_from_slice(&adjusted);
+                            }
+                        }
+                        if !combined.is_empty() {
+                            emit!(chunk_index, &combined, self.sample_rate);
+                            chunk_index += 1;
+                        }
+                    } else if (segment_rate - 1.0).abs() <= f32::EPSILON {
+                        emit!(chunk_index, segment, self.sample_rate);
                         chunk_index += 1;
+                    } else {
+                        let resampled = resample_pcm_by_rate(segment, segment_rate);
+                        if !resampled.is_empty() {
+                            emit!(chunk_index, &resampled, self.sample_rate);
+                            chunk_index += 1;
+                        }
                     }
                 }
             }

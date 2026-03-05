@@ -19,7 +19,10 @@ use rand::{distributions::Alphanumeric, Rng};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, ClipboardManager, GlobalShortcutManager, Manager, RunEvent, State};
+use tauri::{
+    AppHandle, ClipboardManager, GlobalShortcutManager, Manager, RunEvent, State, WindowBuilder,
+    WindowUrl,
+};
 use tokio::time::{sleep, Duration};
 #[cfg(feature = "build-full")]
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -33,7 +36,7 @@ use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 #[cfg(feature = "build-base")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(feature = "build-base")]
 use crate::kyutai_local::{LocalJobEndState, LocalKyutaiRuntime};
@@ -58,6 +61,8 @@ const HOTKEY_MODIFIER_RELEASE_TIMEOUT_MS: u64 = 350;
 const HOTKEY_MODIFIER_RELEASE_POLL_MS: u64 = 10;
 const DEFAULT_FALLBACK_HOTKEY: &str = "CmdOrCtrl+Shift+S";
 const SETTINGS_FILE_NAME: &str = "settings.json";
+const TOOLBAR_WINDOW_LABEL: &str = "toolbar";
+const TOOLBAR_WINDOW_PATH: &str = "toolbar.html";
 
 #[cfg(feature = "build-full")]
 const BUILD_VARIANT: &str = "full";
@@ -87,6 +92,8 @@ struct EngineState {
     local_kyutai: Option<Arc<Mutex<LocalKyutaiRuntime>>>,
     #[cfg(feature = "build-base")]
     active_cancel_flag: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "build-base")]
+    active_rate_steps: Option<Arc<AtomicU32>>,
     token: String,
     port: u16,
     base_url: String,
@@ -112,6 +119,8 @@ impl Default for EngineState {
             local_kyutai: None,
             #[cfg(feature = "build-base")]
             active_cancel_flag: None,
+            #[cfg(feature = "build-base")]
+            active_rate_steps: None,
             token: String::new(),
             port: 0,
             base_url: String::new(),
@@ -188,6 +197,13 @@ struct GenericResult {
 }
 
 #[derive(Serialize)]
+struct SpeakRateResult {
+    ok: bool,
+    message: String,
+    rate: f32,
+}
+
+#[derive(Serialize)]
 struct CloneVoiceResult {
     ok: bool,
     message: String,
@@ -216,6 +232,8 @@ struct JobStartedPayload {
     job_id: String,
     ws_url: String,
     source: String,
+    source_window: String,
+    rate: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -226,6 +244,11 @@ struct JobCancelRequestedPayload {
 #[derive(Clone, Serialize)]
 struct HotkeyUpdatedPayload {
     hotkey: String,
+}
+
+#[derive(Clone, Serialize)]
+struct RateUpdatedPayload {
+    rate: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -413,6 +436,17 @@ pub fn run_app() {
                     };
                 }
             }
+
+            if let Err(err) = create_toolbar_window(&handle) {
+                let msg = format!("Toolbar window startup failed: {err:#}");
+                eprintln!("{msg}");
+                if let Ok(mut guard) = state.inner.lock() {
+                    guard.startup_error = match guard.startup_error.take() {
+                        Some(existing) => Some(format!("{existing}\n{msg}")),
+                        None => Some(msg),
+                    };
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -430,6 +464,7 @@ pub fn run_app() {
             delete_saved_voice,
             set_preset_speaker,
             set_speak_settings,
+            cycle_speak_rate,
             set_hotkey,
             speak_text,
             trigger_read_selection,
@@ -441,6 +476,30 @@ pub fn run_app() {
     app.run(|app_handle, event| {
         handle_run_event(app_handle, &event);
     });
+}
+
+fn create_toolbar_window(app: &AppHandle) -> Result<()> {
+    if app.get_window(TOOLBAR_WINDOW_LABEL).is_some() {
+        return Ok(());
+    }
+
+    WindowBuilder::new(
+        app,
+        TOOLBAR_WINDOW_LABEL,
+        WindowUrl::App(TOOLBAR_WINDOW_PATH.into()),
+    )
+    .title("VoiceReader Toolbar")
+    .inner_size(360.0, 108.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .build()
+    .context("Failed to build toolbar window")?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1141,6 +1200,7 @@ async fn set_preset_speaker(
 
 #[tauri::command]
 fn set_speak_settings(
+    app: AppHandle,
     state: State<'_, SharedState>,
     rate: f32,
     pitch: f32,
@@ -1160,17 +1220,74 @@ fn set_speak_settings(
         return Err("chunk_max_chars must be in [100, 2000]".to_string());
     }
 
-    let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
-    guard.speak_settings = SpeakSettingsState {
-        rate,
-        pitch,
-        volume,
-        chunk_max_chars,
-    };
+    {
+        let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        guard.speak_settings = SpeakSettingsState {
+            rate,
+            pitch,
+            volume,
+            chunk_max_chars,
+        };
+        #[cfg(feature = "build-base")]
+        if let Some(active_steps) = guard.active_rate_steps.as_ref() {
+            active_steps.store(rate_to_steps(rate), Ordering::SeqCst);
+        }
+    }
+
+    let _ = app.emit_all("voicereader:rate-updated", RateUpdatedPayload { rate });
+
+    #[cfg(feature = "build-full")]
+    {
+        let state_clone = state.inner.clone();
+        let requested_rate = rate;
+        tauri::async_runtime::spawn(async move {
+            if let Err(err) = update_active_job_playback_rate_full(&state_clone, requested_rate).await {
+                eprintln!("Active job rate update failed: {err:#}");
+            }
+        });
+    }
 
     Ok(GenericResult {
         ok: true,
         message: "Playback settings updated".to_string(),
+    })
+}
+
+#[tauri::command]
+fn cycle_speak_rate(app: AppHandle, state: State<'_, SharedState>) -> Result<SpeakRateResult, String> {
+    let next_rate = {
+        let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        let current_steps = (clamp_speak_rate(guard.speak_settings.rate) * 4.0).round() as i32;
+        let clamped_steps = current_steps.clamp(1, 16);
+        let next_steps = if clamped_steps >= 16 { 1 } else { clamped_steps + 1 };
+        let next_rate = next_steps as f32 / 4.0;
+        guard.speak_settings.rate = next_rate;
+        #[cfg(feature = "build-base")]
+        if let Some(active_steps) = guard.active_rate_steps.as_ref() {
+            active_steps.store(next_steps as u32, Ordering::SeqCst);
+        }
+        next_rate
+    };
+
+    let _ = app.emit_all(
+        "voicereader:rate-updated",
+        RateUpdatedPayload { rate: next_rate },
+    );
+
+    #[cfg(feature = "build-full")]
+    {
+        let state_clone = state.inner.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(err) = update_active_job_playback_rate_full(&state_clone, next_rate).await {
+                eprintln!("Active job rate update failed: {err:#}");
+            }
+        });
+    }
+
+    Ok(SpeakRateResult {
+        ok: true,
+        message: format!("Playback rate set to {:.2}x", next_rate),
+        rate: next_rate,
     })
 }
 
@@ -1244,7 +1361,7 @@ async fn speak_text(
     text: String,
 ) -> Result<GenericResult, String> {
     ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
-    let job_id = speak_and_stream(&app, &state.inner, text, "manual")
+    let job_id = speak_and_stream(&app, &state.inner, text, "manual", "")
         .await
         .map_err(to_cmd_error)?;
     Ok(GenericResult {
@@ -1298,6 +1415,7 @@ async fn cancel_active_job(app: AppHandle, state: State<'_, SharedState>) -> Res
         if let Some(cancel_flag) = guard.active_cancel_flag.as_ref() {
             cancel_flag.store(true, Ordering::SeqCst);
         }
+        guard.active_rate_steps = None;
         if guard.last_job_id.as_deref() == Some(job_id.as_str()) {
             guard.last_job_id = None;
         }
@@ -1408,6 +1526,8 @@ fn should_ignore_hotkey_while_app_focused(app: &AppHandle) -> bool {
 async fn read_selection_and_speak_inner(app: &AppHandle, state: &Arc<Mutex<EngineState>>) -> Result<()> {
     ensure_engine_ready(app, state).await?;
 
+    // Capture source window before simulated Ctrl+C changes focus state.
+    let source_window = get_foreground_window_title().unwrap_or_default();
     let text = capture_selected_text_from_active_app(app).await;
     let Some(text) = text else {
         let _ = app.emit_all(
@@ -1417,7 +1537,14 @@ async fn read_selection_and_speak_inner(app: &AppHandle, state: &Arc<Mutex<Engin
         return Ok(());
     };
 
-    let _ = speak_and_stream(app, state, text, "hotkey_selection_capture").await?;
+    let _ = speak_and_stream(
+        app,
+        state,
+        text,
+        "hotkey_selection_capture",
+        &source_window,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1579,11 +1706,48 @@ fn trigger_copy_shortcut_windows() -> bool {
     sent == inputs.len() as u32
 }
 
+#[cfg(target_os = "windows")]
+fn get_foreground_window_title() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+    };
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        return None;
+    }
+
+    let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+    if title_len <= 0 {
+        return None;
+    }
+
+    let mut title_buf = vec![0u16; title_len as usize + 1];
+    let written = unsafe { GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32) };
+    if written <= 0 {
+        return None;
+    }
+
+    let title = String::from_utf16_lossy(&title_buf[..written as usize])
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return None;
+    }
+    Some(title)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_foreground_window_title() -> Option<String> {
+    None
+}
+
 async fn speak_and_stream(
     app: &AppHandle,
     state: &Arc<Mutex<EngineState>>,
     text: String,
     source: &str,
+    source_window: &str,
 ) -> Result<String> {
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
@@ -1635,10 +1799,12 @@ async fn speak_and_stream(
 
         let job_id = Uuid::new_v4().to_string();
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let active_rate_steps = Arc::new(AtomicU32::new(rate_to_steps(settings.rate)));
         {
             let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
             guard.last_job_id = Some(job_id.clone());
             guard.active_cancel_flag = Some(cancel_flag.clone());
+            guard.active_rate_steps = Some(active_rate_steps.clone());
             guard.suppressed_job_ids.remove(&job_id);
             if guard.suppressed_job_ids.len() > 128 {
                 guard.suppressed_job_ids.clear();
@@ -1651,6 +1817,8 @@ async fn speak_and_stream(
                 job_id: job_id.clone(),
                 ws_url: format!("local://stream/{job_id}"),
                 source: source.to_string(),
+                source_window: source_window.to_string(),
+                rate: settings.rate,
             },
         );
 
@@ -1681,9 +1849,9 @@ async fn speak_and_stream(
                     &selected_preset,
                     &trimmed,
                     settings.chunk_max_chars,
-                    settings.rate,
                     settings.volume,
                     &cancel_flag,
+                    &active_rate_steps,
                     move |chunk_index, pcm, sample_rate| {
                         let mut bytes = Vec::with_capacity(pcm.len() * 2);
                         for sample in pcm {
@@ -1738,6 +1906,7 @@ async fn speak_and_stream(
                     guard.last_job_id = None;
                 }
                 guard.active_cancel_flag = None;
+                guard.active_rate_steps = None;
                 guard.suppressed_job_ids.remove(&job_id_clone);
             }
         });
@@ -1792,6 +1961,8 @@ async fn speak_and_stream(
             job_id: speak_response.job_id.clone(),
             ws_url: speak_response.ws_url.clone(),
             source: source.to_string(),
+            source_window: source_window.to_string(),
+            rate: settings.rate,
         },
     );
 
@@ -1939,6 +2110,7 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
             guard.hf_cache_dir = hf_cache_dir.to_string_lossy().to_string();
             guard.last_job_id = None;
             guard.active_cancel_flag = None;
+            guard.active_rate_steps = None;
             guard.suppressed_job_ids.clear();
             guard.selected_model = MODEL_KYUTAI.to_string();
         }
@@ -2048,6 +2220,7 @@ async fn shutdown_engine(state: &Arc<Mutex<EngineState>>) {
             cancel_flag.store(true, Ordering::SeqCst);
         }
         guard.active_cancel_flag = None;
+        guard.active_rate_steps = None;
         guard.local_kyutai = None;
         guard.last_job_id = None;
         guard.suppressed_job_ids.clear();
@@ -2259,6 +2432,35 @@ async fn engine_list_voices_inner(state: &Arc<Mutex<EngineState>>) -> Result<Val
     }
 }
 
+#[cfg(feature = "build-full")]
+async fn update_active_job_playback_rate_full(state: &Arc<Mutex<EngineState>>, rate: f32) -> Result<()> {
+    let (base_url, token, job_id) = {
+        let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+        (
+            guard.base_url.clone(),
+            guard.token.clone(),
+            guard.last_job_id.clone(),
+        )
+    };
+
+    let Some(job_id) = job_id else {
+        return Ok(());
+    };
+    if base_url.is_empty() || token.is_empty() {
+        return Ok(());
+    }
+
+    let _ = request_json(
+        Method::POST,
+        &format!("{base_url}/v1/jobs/{job_id}/playback"),
+        &token,
+        Some(json!({ "rate": clamp_speak_rate(rate) })),
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn request_json(method: Method, url: &str, token: &str, body: Option<Value>) -> Result<Value> {
     let client = Client::new();
     let mut request = client
@@ -2372,6 +2574,15 @@ fn normalize_hotkey(value: &str) -> Result<String> {
         return Err(anyhow!("Hotkey cannot be empty"));
     }
     Ok(normalized)
+}
+
+fn clamp_speak_rate(rate: f32) -> f32 {
+    rate.clamp(0.25, 4.0)
+}
+
+#[cfg(feature = "build-base")]
+fn rate_to_steps(rate: f32) -> u32 {
+    (clamp_speak_rate(rate) * 4.0).round().clamp(1.0, 16.0) as u32
 }
 
 fn is_hotkey_os_reserved(hotkey: &str) -> bool {
@@ -2850,12 +3061,28 @@ impl Drop for SharedState {
 
 #[allow(clippy::needless_pass_by_value)]
 pub fn handle_run_event(app: &AppHandle, event: &RunEvent) {
-    if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
-        if let Some(state) = app.try_state::<SharedState>() {
-            let state = state.inner.clone();
-            tauri::async_runtime::block_on(async {
-                shutdown_engine(&state).await;
-            });
+    match event {
+        RunEvent::WindowEvent { label, event, .. } => {
+            if label == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+                )
+            {
+                if let Some(toolbar_window) = app.get_window(TOOLBAR_WINDOW_LABEL) {
+                    let _ = toolbar_window.close();
+                }
+                app.exit(0);
+            }
         }
+        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            if let Some(state) = app.try_state::<SharedState>() {
+                let state = state.inner.clone();
+                tauri::async_runtime::block_on(async {
+                    shutdown_engine(&state).await;
+                });
+            }
+        }
+        _ => {}
     }
 }

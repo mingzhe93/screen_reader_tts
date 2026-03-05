@@ -9,21 +9,33 @@ Status: Phase 1 core goals are complete.
 
 - Runs in the background (tray/menu bar)
 - Reads out **highlighted text** from the active application via a hotkey
-- Uses **accessibility APIs first** (Windows UIA, macOS AX), with a **clipboard fallback**
+- Uses clipboard copy-and-restore selection capture in the current app flow
+- Shows a floating toolbar in a separate window while audio is playing:
+  - always-on-top
+  - draggable
+  - semi-transparent pill UI
+  - persistent position across app restarts
 - Supports **voice cloning**:
   - Clone a voice once from a short audio sample
   - Save the cloned voice locally
   - Reuse it for all future speech generation
+- Supports live playback-rate updates (`0.25x` to `4.0x`) from both main UI and toolbar
 - Works fully offline by default:
   - Base build bundles **Kyutai Pocket TTS** with Rust-native runtime
   - Full build supports optional Qwen models (download on demand)
+
+## Platform status (current)
+- **Windows**: primary implementation path (full hotkey selection + source-window toolbar label)
+- **macOS**: partial parity today
+  - floating toolbar window and playback controls work
+  - hotkey selection capture and source-window title capture are not yet at Windows parity
 
 ## Why this exists
 Browser TTS extensions are often slow, inconsistent, and limited in voice quality. Meanwhile, modern TTS models can produce far more natural speech. VoiceReader brings that quality to a simple "highlight -> hotkey -> listen" workflow, locally and privately.
 
 ## Core principles
 - **Offline-first & private**: everything runs on-device
-- **Accessibility-first**: selection capture via OS accessibility APIs before clipboard fallback
+- **Fast control feedback**: playback controls update active jobs while streaming
 - **Model-swappable**: clean backend interface so we can add/replace models over time
 - **Fast perceived latency**: chunked generation + immediate playback
 
@@ -46,8 +58,13 @@ This is what is wired right now:
 
 ### Desktop app (Tauri)
 - Windowed app with a simple "Reader" page
-- Global hotkey: user-configurable (default: Windows `Alt+Shift+S`, macOS `Cmd+Shift+S`)
+- Global hotkey: user-configurable (default: Windows `Alt+Shift+Space`, macOS `Cmd+Shift+Space`)
 - End-to-end flow: hotkey/manual speak -> local runtime (Base) or `/v1/speak` + WS stream (Full) -> local playback
+- Floating toolbar runs as its own Tauri window:
+  - frameless, transparent, always-on-top, skip-taskbar
+  - rate/pause/stop/skip controls
+  - source label from active window title when available
+  - defaults to bottom-left and restores last dragged position
 - Full build sidecar lifecycle from app:
   - launch on startup
   - health handshake
@@ -65,17 +82,20 @@ This is what is wired right now:
   - Kyutai bundled by default
   - Supports read + clone + saved voice reuse
   - English-only synthesis in current app flow
+  - Live playback-rate changes are applied during running streams via shared atomic rate state
 - **Full build (`build-full`)**:
   - Python sidecar daemon (kept warm)
   - Loads Kyutai/Qwen model(s) from local engine data dir
   - Optional Qwen runtime path: CUDA + `torch.bfloat16` with `attn_implementation="flash_attention_2"` when available
   - Windows Qwen fallback path: CUDA + BF16 + `attn_implementation="sdpa"` if FlashAttention 2 is unavailable
-  - Provides IPC API endpoints for `speak`, `cancel`, and voice cloning/listing/deletion
+  - Provides IPC API endpoints for `speak`, `cancel`, `/jobs/{job_id}/playback`, and voice cloning/listing/deletion
   - Includes warmup support and model activation endpoint
 
 ### Known limitations in this slice
-- Selection capture is currently clipboard-based only (UIA/AX capture not wired yet)
+- Selection capture is currently clipboard-based; Windows copy injection is implemented, non-Windows parity is incomplete
+- Source window title capture for toolbar label is currently Windows-only
 - Qwen base/custom flows are Full build only and not bundled by default (download on demand)
+- `qwen_base_clone` mode is exposed but not currently enabled for read-aloud job start
 - Base build Kyutai runtime is English-only
 - Portable mode still depends on system WebView2 runtime on Windows
 
@@ -314,7 +334,7 @@ rustup self uninstall -y
 
 ### Phase 2 - performance & quality
 - Better chunking (prosody-aware splitting)
-- Robust cancellation + "skip sentence"
+- Advanced seek controls beyond current toolbar skip/cancel behavior
 - Per-app capture improvements and fallbacks
 - Multi-voice quick switching
 - Optional model caching policies and cleanup UI
@@ -334,10 +354,12 @@ rustup self uninstall -y
 
 ## Project docs
 - `model_registry.json` - draft registry for bundled default + on-demand model metadata (source, distribution mode, runtime notes)
-- `docs/DESIGN_SPEC.md` - system design, components, storage, packaging, milestones
-- `docs/IPC_API.md` - concrete API contract (HTTP/WS), schemas, errors, streaming events
+- `docs/DESIGN_SPEC.md` - current architecture and UX/runtime behavior
+- `docs/IPC_API.md` - concrete sidecar API contract (HTTP/WS), schemas, errors, streaming events
+- `docs/learnings.md` - implementation learnings on chunking, SoX/rate control, and playback pipeline behavior
 
 ---
 
 ## License
-TBD (project). Bundled/on-demand models retain their original licenses. The default bundled model is Kyutai Pocket TTS (`Verylicious/pocket-tts-ungated`, Apache-2.0). Qwen models are downloaded on demand.
+Project license: **MIT**.
+Third-party components/models retain their own licenses (Kyutai Pocket TTS and Qwen are Apache-2.0).
