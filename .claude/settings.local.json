@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check --features build-base)",
+      "Bash(cargo check --features build-full)"
+    ]
+  }
+}

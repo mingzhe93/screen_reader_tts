@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -202,7 +203,7 @@ impl SoxTempoStream {
 }
 
 pub struct LocalKyutaiRuntime {
-    model: TTSModel,
+    model: Arc<TTSModel>,
     sample_rate: u32,
     voices_dir: PathBuf,
     model_dir: PathBuf,
@@ -236,7 +237,7 @@ impl LocalKyutaiRuntime {
             .with_context(|| format!("Failed to create voices directory {}", voices_dir.display()))?;
 
         let mut runtime = Self {
-            model,
+            model: Arc::new(model),
             sample_rate,
             voices_dir,
             model_dir: model_dir.to_path_buf(),
@@ -386,6 +387,30 @@ impl LocalKyutaiRuntime {
         Ok(())
     }
 
+    /// Synthesizes `text` in chunks and streams PCM audio via `on_chunk`.
+    ///
+    /// Returns `(end_state, had_audio)`.  `had_audio` is `true` if at least one
+    /// non-empty PCM chunk was emitted, which the caller needs to decide whether
+    /// to broadcast a "had_audio" flag in the terminal event.
+    ///
+    /// # Parallelism
+    /// Multiple CPU cores are used concurrently for the `rate != 1.0` path:
+    ///   • Main thread  — SoX push/drain + emit for the current chunk
+    ///   • Up to N background threads — pre-generating upcoming chunks
+    ///   • SoX subprocess — tempo-stretches PCM in the background
+    ///
+    /// N = min(available_cores - 1, 4).  On an 8-core machine, up to 4 chunks
+    /// are generated concurrently in a sliding window, so by the time the main
+    /// thread finishes SoX + emit for chunk i, chunks i+1..i+4 are already
+    /// generated (or nearly so) and ready to emit with no pause.
+    ///
+    /// # `on_chunk` requirements
+    /// The bound `Fn + Send + 'static` (instead of `FnMut`) is intentional:
+    ///   • It removes the need for the caller to capture mutable state
+    ///     (`sent_any_chunk`) in the closure — that flag is now returned.
+    ///   • It leaves the door open for a future worker-thread drain loop that
+    ///     calls `on_chunk` from a dedicated thread, further overlapping SoX
+    ///     processing with model generation.
     pub fn stream_synthesize<F>(
         &mut self,
         voice_id: &str,
@@ -395,12 +420,13 @@ impl LocalKyutaiRuntime {
         rate: f32,
         volume: f32,
         cancel: &AtomicBool,
-        mut on_chunk: F,
-    ) -> Result<LocalJobEndState>
+        on_chunk: F,
+    ) -> Result<(LocalJobEndState, bool)>
     where
-        F: FnMut(usize, &[i16], u32) -> Result<()>,
+        F: Fn(usize, &[i16], u32) -> Result<()> + Send + 'static,
     {
         let mut chunk_index: usize = 0;
+        let mut had_audio = false;
         let rate_clamped = rate.clamp(0.25, 4.0);
         let rate_active = (rate_clamped - 1.0).abs() > f32::EPSILON;
         let mut sox_stream = if rate_active {
@@ -410,40 +436,128 @@ impl LocalKyutaiRuntime {
         };
         let chunk_size = usize::min(usize::max(chunk_max_chars as usize, 100), FIRST_CHUNK_MAX_CHARS);
         let split = self.model.split_into_best_sentences(text);
-        let text_chunks = cap_chunks_by_chars(split, text, chunk_size, MAX_SENTENCES_PER_CHUNK);
+        let text_chunks: Vec<String> =
+            cap_chunks_by_chars(split, text, chunk_size, MAX_SENTENCES_PER_CHUNK);
 
-        for text_chunk in text_chunks {
-            if cancel.load(Ordering::SeqCst) {
-                if let Some(stream) = sox_stream.as_mut() {
-                    stream.abort();
-                }
-                return Ok(LocalJobEndState::Canceled);
+        // Inline helper to track had_audio and forward to on_chunk.
+        macro_rules! emit {
+            ($idx:expr, $pcm:expr, $sr:expr) => {{
+                had_audio = true;
+                on_chunk($idx, $pcm, $sr)?;
+            }};
+        }
+
+        // Resolve the voice state once (cached after first call).
+        let voice_state = self.resolve_voice_state(voice_id, selected_preset)?;
+        let gain: f32 = volume.clamp(0.0, 2.0);
+
+        if rate_active {
+            // ------------------------------------------------------------------
+            // rate != 1.0  — parallel look-ahead generation
+            // ------------------------------------------------------------------
+            // We use model.generate() (full batch) so SoX receives a contiguous
+            // PCM batch.  Feeding SoX tiny per-token buffers via generate_stream
+            // causes output starvation at the frontend (see docs/learnings.md §1).
+            //
+            // TTSModel::generate() takes &self (shared ref) and ModelState is
+            // Clone, so we can run the *next* chunk's generation on a background
+            // thread while the main thread pushes the current chunk to SoX,
+            // drains, and emits.  This overlaps T_gen(N+1) with SoX(N) + emit(N),
+            // eliminating most of the inter-chunk gap.
+            //
+            //   Main thread:   [gen C0] [sox+emit C0 | join C1] [sox+emit C1 | join C2] …
+            //   Look-ahead:              [gen C1]                [gen C2]
+            // ------------------------------------------------------------------
+
+            type GenResult = Result<Vec<i16>>;
+            type LookAhead = JoinHandle<GenResult>;
+
+            /// Spawn a thread that runs model.generate() and returns PCM i16.
+            fn spawn_generate(
+                model: &Arc<TTSModel>,
+                text: String,
+                voice_state: ModelState,
+                gain: f32,
+            ) -> LookAhead {
+                let model = Arc::clone(model);
+                std::thread::spawn(move || -> GenResult {
+                    let tensor = model
+                        .generate(&text, &voice_state)
+                        .context("Pocket-TTS generation failed (look-ahead)")?;
+                    let values = tensor
+                        .flatten_all()
+                        .context("Failed to flatten look-ahead tensor")?
+                        .to_vec1::<f32>()
+                        .context("Failed to convert look-ahead tensor to f32")?;
+                    let mut pcm = Vec::with_capacity(values.len());
+                    for sample in values {
+                        let scaled = (sample * gain).clamp(-1.0, 1.0);
+                        pcm.push((scaled * 32767.0) as i16);
+                    }
+                    Ok(pcm)
+                })
             }
 
-            let voice_state = self.resolve_voice_state(voice_id, selected_preset)?;
-            if rate_active {
-                let tensor = self
-                    .model
-                    .generate(&text_chunk, &voice_state)
-                    .context("Pocket-TTS generation failed")?;
+            // Determine how many chunks to generate concurrently.
+            // Each generate() call uses MKL/BLAS internally (multi-threaded),
+            // so we cap concurrency to avoid thread contention.  Reserve 1
+            // core for the main thread (SoX + emit) and split the rest among
+            // concurrent generate() calls, with a ceiling of 4.
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            let look_ahead_depth = cores.saturating_sub(1).max(1).min(4);
+
+            // Pre-submit up to `look_ahead_depth` chunks.
+            let mut queue: VecDeque<LookAhead> = VecDeque::new();
+            let mut next_to_submit = 0usize;
+            while next_to_submit < text_chunks.len() && queue.len() < look_ahead_depth {
+                queue.push_back(spawn_generate(
+                    &self.model,
+                    text_chunks[next_to_submit].clone(),
+                    voice_state.clone(),
+                    gain,
+                ));
+                next_to_submit += 1;
+            }
+
+            for _i in 0..text_chunks.len() {
                 if cancel.load(Ordering::SeqCst) {
+                    drop(queue);
                     if let Some(stream) = sox_stream.as_mut() {
                         stream.abort();
                     }
-                    return Ok(LocalJobEndState::Canceled);
+                    return Ok((LocalJobEndState::Canceled, had_audio));
                 }
 
-                let gain: f32 = volume.clamp(0.0, 2.0);
-                let values = tensor
-                    .flatten_all()
-                    .context("Failed to flatten Pocket-TTS tensor")?
-                    .to_vec1::<f32>()
-                    .context("Failed to convert Pocket-TTS tensor to f32 samples")?;
-                let mut pcm = Vec::with_capacity(values.len());
-                for sample in values {
-                    let scaled = (sample * gain).clamp(-1.0, 1.0);
-                    pcm.push((scaled * 32767.0) as i16);
+                // Await the PCM from the earliest queued generation thread.
+                let pcm = match queue.pop_front() {
+                    Some(handle) => handle
+                        .join()
+                        .map_err(|_| anyhow!("Look-ahead generation thread panicked"))??,
+                    None => Vec::new(),
+                };
+
+                // Refill the queue: submit the next unstarted chunk so
+                // look_ahead_depth threads stay in flight.
+                if next_to_submit < text_chunks.len() {
+                    queue.push_back(spawn_generate(
+                        &self.model,
+                        text_chunks[next_to_submit].clone(),
+                        voice_state.clone(),
+                        gain,
+                    ));
+                    next_to_submit += 1;
                 }
+
+                if cancel.load(Ordering::SeqCst) {
+                    drop(queue);
+                    if let Some(stream) = sox_stream.as_mut() {
+                        stream.abort();
+                    }
+                    return Ok((LocalJobEndState::Canceled, had_audio));
+                }
+
                 if pcm.is_empty() {
                     continue;
                 }
@@ -452,91 +566,72 @@ impl LocalKyutaiRuntime {
                     rate_stream.push_samples(&pcm)?;
                     let mut combined: Vec<i16> = Vec::new();
                     for adjusted in rate_stream.drain_available_frames() {
-                        if adjusted.is_empty() {
-                            continue;
+                        if !adjusted.is_empty() {
+                            combined.extend_from_slice(&adjusted);
                         }
-                        combined.extend_from_slice(&adjusted);
                     }
                     if !combined.is_empty() {
-                        on_chunk(chunk_index, &combined, self.sample_rate)?;
+                        emit!(chunk_index, &combined, self.sample_rate);
                         chunk_index += 1;
                     }
                 } else {
-                    pcm = resample_pcm_by_rate(&pcm, rate_clamped);
-                    if pcm.is_empty() {
-                        continue;
-                    }
-                    on_chunk(chunk_index, &pcm, self.sample_rate)?;
-                    chunk_index += 1;
-                }
-                continue;
-            }
-
-            let stream = self.model.generate_stream(&text_chunk, &voice_state);
-            for maybe_tensor in stream {
-                if cancel.load(Ordering::SeqCst) {
-                    if let Some(stream) = sox_stream.as_mut() {
-                        stream.abort();
-                    }
-                    return Ok(LocalJobEndState::Canceled);
-                }
-                let tensor = maybe_tensor.context("Pocket-TTS stream generation failed")?;
-                let gain: f32 = volume.clamp(0.0, 2.0);
-                let values = tensor
-                    .flatten_all()
-                    .context("Failed to flatten Pocket-TTS tensor chunk")?
-                    .to_vec1::<f32>()
-                    .context("Failed to convert Pocket-TTS tensor chunk to f32 samples")?;
-                let mut pcm = Vec::with_capacity(values.len());
-                for sample in values {
-                    let scaled = (sample * gain).clamp(-1.0, 1.0);
-                    pcm.push((scaled * 32767.0) as i16);
-                }
-                if pcm.is_empty() {
-                    continue;
-                }
-
-                if let Some(rate_stream) = sox_stream.as_mut() {
-                    rate_stream.push_samples(&pcm)?;
-                    let mut combined: Vec<i16> = Vec::new();
-                    for adjusted in rate_stream.drain_available_frames() {
-                        if adjusted.is_empty() {
-                            continue;
-                        }
-                        combined.extend_from_slice(&adjusted);
-                    }
-                    if !combined.is_empty() {
-                        on_chunk(chunk_index, &combined, self.sample_rate)?;
+                    let resampled = resample_pcm_by_rate(&pcm, rate_clamped);
+                    if !resampled.is_empty() {
+                        emit!(chunk_index, &resampled, self.sample_rate);
                         chunk_index += 1;
                     }
-                    continue;
                 }
+            }
 
-                if rate_active {
-                    pcm = resample_pcm_by_rate(&pcm, rate_clamped);
+            // Flush remaining SoX output for the last chunk.
+            if let Some(rate_stream) = sox_stream.as_mut() {
+                let mut combined: Vec<i16> = Vec::new();
+                for adjusted in rate_stream.finish_and_drain() {
+                    if !adjusted.is_empty() {
+                        combined.extend_from_slice(&adjusted);
+                    }
+                }
+                if !combined.is_empty() {
+                    emit!(chunk_index, &combined, self.sample_rate);
+                }
+            }
+        } else {
+            // ------------------------------------------------------------------
+            // rate == 1.0  — streaming tokens, no SoX
+            // ------------------------------------------------------------------
+            // generate_stream() works here because each token is emitted
+            // immediately without a rate-multiplied input threshold to satisfy.
+            for text_chunk in &text_chunks {
+                if cancel.load(Ordering::SeqCst) {
+                    return Ok((LocalJobEndState::Canceled, had_audio));
+                }
+                let stream = self.model.generate_stream(text_chunk, &voice_state);
+                for maybe_tensor in stream {
+                    if cancel.load(Ordering::SeqCst) {
+                        return Ok((LocalJobEndState::Canceled, had_audio));
+                    }
+                    let tensor =
+                        maybe_tensor.context("Pocket-TTS stream generation failed")?;
+                    let values = tensor
+                        .flatten_all()
+                        .context("Failed to flatten Pocket-TTS tensor chunk")?
+                        .to_vec1::<f32>()
+                        .context("Failed to convert Pocket-TTS tensor chunk to f32")?;
+                    let mut pcm = Vec::with_capacity(values.len());
+                    for sample in values {
+                        let scaled = (sample * gain).clamp(-1.0, 1.0);
+                        pcm.push((scaled * 32767.0) as i16);
+                    }
                     if pcm.is_empty() {
                         continue;
                     }
+                    emit!(chunk_index, &pcm, self.sample_rate);
+                    chunk_index += 1;
                 }
-                on_chunk(chunk_index, &pcm, self.sample_rate)?;
-                chunk_index += 1;
             }
         }
 
-        if let Some(rate_stream) = sox_stream.as_mut() {
-            let mut combined: Vec<i16> = Vec::new();
-            for adjusted in rate_stream.finish_and_drain() {
-                if adjusted.is_empty() {
-                    continue;
-                }
-                combined.extend_from_slice(&adjusted);
-            }
-            if !combined.is_empty() {
-                on_chunk(chunk_index, &combined, self.sample_rate)?;
-            }
-        }
-
-        Ok(LocalJobEndState::Done)
+        Ok((LocalJobEndState::Done, had_audio))
     }
 
     fn resolve_voice_state(&mut self, voice_id: &str, selected_preset: &str) -> Result<ModelState> {

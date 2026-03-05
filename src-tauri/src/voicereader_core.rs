@@ -1670,8 +1670,13 @@ async fn speak_and_stream(
                     }),
                 );
 
-                let mut sent_any_chunk = false;
-                let stream_end = runtime.stream_synthesize(
+                // had_audio is now returned from stream_synthesize rather than
+                // captured via &mut in the closure, so the closure is Fn + Send + 'static.
+                // The 'static bound requires the closure to own its captures, so we move
+                // dedicated clones in rather than borrowing the outer locals.
+                let app_for_chunk = app_clone.clone();
+                let job_id_for_chunk = job_id_clone.clone();
+                let (stream_end, had_audio) = runtime.stream_synthesize(
                     &voice_id,
                     &selected_preset,
                     &trimmed,
@@ -1679,15 +1684,14 @@ async fn speak_and_stream(
                     settings.rate,
                     settings.volume,
                     &cancel_flag,
-                    |chunk_index, pcm, sample_rate| {
-                        sent_any_chunk = true;
+                    move |chunk_index, pcm, sample_rate| {
                         let mut bytes = Vec::with_capacity(pcm.len() * 2);
                         for sample in pcm {
                             bytes.extend_from_slice(&sample.to_le_bytes());
                         }
                         let payload = json!({
                             "type": "AUDIO_CHUNK",
-                            "job_id": job_id_clone.clone(),
+                            "job_id": job_id_for_chunk.clone(),
                             "chunk_index": chunk_index,
                             "audio": {
                                 "format": "pcm_s16le",
@@ -1696,7 +1700,7 @@ async fn speak_and_stream(
                                 "data_base64": BASE64_STANDARD.encode(&bytes),
                             }
                         });
-                        let _ = app_clone.emit_all("voicereader:ws-event", payload);
+                        let _ = app_for_chunk.emit_all("voicereader:ws-event", payload);
                         Ok(())
                     },
                 )?;
@@ -1711,7 +1715,7 @@ async fn speak_and_stream(
                     json!({
                         "type": terminal,
                         "job_id": job_id_clone.clone(),
-                        "had_audio": sent_any_chunk,
+                        "had_audio": had_audio,
                     }),
                 );
                 Ok(())

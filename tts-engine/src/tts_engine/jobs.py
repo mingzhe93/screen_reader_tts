@@ -118,6 +118,20 @@ class JobManager:
             return not active_job.done_event.is_set()
 
     async def _run_job(self, job: JobState) -> None:
+        # Holds the Future for the next chunk's synthesis so we can pre-start it
+        # before awaiting the current chunk's SoX processing.
+        next_synth_future: asyncio.Future[SynthesizedAudio] | None = None
+
+        async def _cancel_next_synth() -> None:
+            nonlocal next_synth_future
+            if next_synth_future is not None and not next_synth_future.done():
+                next_synth_future.cancel()
+                try:
+                    await next_synth_future
+                except (asyncio.CancelledError, Exception):
+                    pass
+                next_synth_future = None
+
         try:
             await self._publish(
                 job,
@@ -128,49 +142,79 @@ class JobManager:
             )
 
             chunks = split_text_into_chunks(job.text, max_chars=job.max_chars)
+            if not chunks:
+                await self._publish(
+                    job,
+                    {"type": "JOB_DONE", "job_id": str(job.job_id)},
+                    terminal=True,
+                )
+                return
+
             sequence = 1
-            for chunk in chunks:
+            loop = asyncio.get_running_loop()
+
+            # Pre-submit synthesis of the first chunk so it starts running
+            # immediately, before we enter the loop.
+            next_synth_future = loop.run_in_executor(
+                None,
+                self._synthesizer.synthesize_chunk,
+                chunks[0].text,
+                job.voice_id,
+                job.language,
+            )
+
+            for i, chunk in enumerate(chunks):
                 if job.cancel_event.is_set():
+                    await _cancel_next_synth()
                     await self._publish(
                         job,
-                        {
-                            "type": "JOB_CANCELED",
-                            "job_id": str(job.job_id),
-                        },
+                        {"type": "JOB_CANCELED", "job_id": str(job.job_id)},
                         terminal=True,
                     )
                     return
 
+                # Await synthesis of chunk i (was already running in the thread pool).
+                assert next_synth_future is not None
+                synthesized = await next_synth_future
+                next_synth_future = None
+
+                if job.cancel_event.is_set():
+                    await self._publish(
+                        job,
+                        {"type": "JOB_CANCELED", "job_id": str(job.job_id)},
+                        terminal=True,
+                    )
+                    return
+
+                # Immediately pre-submit synthesis of chunk i+1 to the thread pool
+                # BEFORE awaiting SoX for chunk i.  synthesize_chunk uses C extensions
+                # (GIL released during inference) and SoX runs as a subprocess, so both
+                # threads execute truly in parallel — no concurrent model access because
+                # chunk i synthesis has already completed above.
+                if i + 1 < len(chunks):
+                    next_synth_future = loop.run_in_executor(
+                        None,
+                        self._synthesizer.synthesize_chunk,
+                        chunks[i + 1].text,
+                        job.voice_id,
+                        job.language,
+                    )
+
+                # Apply SoX/controls in the thread pool so the event loop stays
+                # responsive and SoX runs concurrently with chunk i+1 synthesis.
                 synthesized = await asyncio.to_thread(
-                    self._synthesizer.synthesize_chunk,
-                    chunk.text,
-                    job.voice_id,
-                    job.language,
-                )
-                if job.cancel_event.is_set():
-                    await self._publish(
-                        job,
-                        {
-                            "type": "JOB_CANCELED",
-                            "job_id": str(job.job_id),
-                        },
-                        terminal=True,
-                    )
-                    return
-
-                synthesized = _apply_playback_controls(
+                    _apply_playback_controls,
                     synthesized,
-                    rate=job.rate,
-                    pitch=job.pitch,
-                    volume=job.volume,
+                    job.rate,
+                    job.pitch,
+                    job.volume,
                 )
+
                 if job.cancel_event.is_set():
+                    await _cancel_next_synth()
                     await self._publish(
                         job,
-                        {
-                            "type": "JOB_CANCELED",
-                            "job_id": str(job.job_id),
-                        },
+                        {"type": "JOB_CANCELED", "job_id": str(job.job_id)},
                         terminal=True,
                     )
                     return
@@ -216,6 +260,7 @@ class JobManager:
                     terminal=True,
                 )
         except asyncio.CancelledError:
+            await _cancel_next_synth()
             if not self._has_terminal_event(job):
                 await self._publish(
                     job,
@@ -227,6 +272,7 @@ class JobManager:
                 )
             raise
         except Exception as exc:  # pragma: no cover - fallback guard
+            await _cancel_next_synth()
             await self._publish(
                 job,
                 {
