@@ -15,12 +15,16 @@ const version = packageJson.version;
 // Update Cargo.toml
 const cargoTomlPath = path.join(__dirname, '..', 'src-tauri', 'Cargo.toml');
 let cargoToml = fs.readFileSync(cargoTomlPath, 'utf8');
-
-// Replace version in [package] section (first occurrence)
 cargoToml = cargoToml.replace(
   /^version = "[^"]*"$/m,
   `version = "${version}"`
 );
-
 fs.writeFileSync(cargoTomlPath, cargoToml);
-console.log(`✓ Synced version ${version} to src-tauri/Cargo.toml`);
+
+// Update tauri.conf.json
+const tauriConfPath = path.join(__dirname, '..', 'src-tauri', 'tauri.conf.json');
+const tauriConf = JSON.parse(fs.readFileSync(tauriConfPath, 'utf8'));
+tauriConf.package.version = version;
+fs.writeFileSync(tauriConfPath, JSON.stringify(tauriConf, null, 2) + '\n');
+
+console.log(`✓ Synced version ${version} to src-tauri/Cargo.toml and src-tauri/tauri.conf.json`);
