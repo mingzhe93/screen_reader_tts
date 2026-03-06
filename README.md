@@ -25,10 +25,12 @@ Status: Phase 1 core goals are complete.
   - Full build supports optional Qwen models (download on demand)
 
 ## Platform status (current)
-- **Windows**: primary implementation path (full hotkey selection + source-window toolbar label)
-- **macOS**: partial parity today
+- **Windows**: full implementation (hotkey selection via SendInput Ctrl+C, source-window title via Win32)
+- **macOS**: full parity
+  - hotkey selection capture via CGEvent Cmd+C simulation
+  - source-window title via NSWorkspace frontmostApplication
+  - modifier-release detection via CGEventSource flags
   - floating toolbar window and playback controls work
-  - hotkey selection capture and source-window title capture are not yet at Windows parity
 
 ## Why this exists
 Browser TTS extensions are often slow, inconsistent, and limited in voice quality. Meanwhile, modern TTS models can produce far more natural speech. VoiceReader brings that quality to a simple "highlight -> hotkey -> listen" workflow, locally and privately.

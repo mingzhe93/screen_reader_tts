@@ -202,7 +202,6 @@ app.innerHTML = `
             <summary>Advanced Settings</summary>
             <div class="controls">
               <label>Rate <input id="rate" type="number" min="0.25" max="4" step="0.05" value="1.5" /></label>
-              <label>Pitch <input id="pitch" type="number" min="0.5" max="2" step="0.05" value="1" /></label>
               <label>Volume <input id="volume" type="number" min="0" max="2" step="0.05" value="1" /></label>
               <label>Chunk Max Chars <input id="chunk-max" type="number" min="100" max="200" step="10" value="200" /></label>
             </div>
@@ -336,7 +335,6 @@ const downloadQwenBaseBtn = document.querySelector<HTMLButtonElement>("#download
 const downloadQwenAllBtn = document.querySelector<HTMLButtonElement>("#download-qwen-all-btn")!;
 
 const rateInput = document.querySelector<HTMLInputElement>("#rate")!;
-const pitchInput = document.querySelector<HTMLInputElement>("#pitch")!;
 const volumeInput = document.querySelector<HTMLInputElement>("#volume")!;
 const chunkMaxInput = document.querySelector<HTMLInputElement>("#chunk-max")!;
 
@@ -1205,13 +1203,11 @@ function renderVoicesTable(): void {
 
 async function applySpeakSettings(): Promise<void> {
   const rate = Number(rateInput.value);
-  const pitch = Number(pitchInput.value);
   const volume = Number(volumeInput.value);
   const chunkMaxChars = Number(chunkMaxInput.value);
 
   await invoke("set_speak_settings", {
     rate,
-    pitch,
     volume,
     chunkMaxChars,
   });
@@ -1334,7 +1330,7 @@ async function bindActions(): Promise<void> {
     log(`Selected saved voice ${selected.label}`);
   });
 
-  [rateInput, pitchInput, volumeInput, chunkMaxInput].forEach((input) => {
+  [rateInput, volumeInput, chunkMaxInput].forEach((input) => {
     input.addEventListener("change", async () => {
       await applySpeakSettings();
       log("Speak settings updated");

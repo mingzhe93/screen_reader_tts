@@ -672,40 +672,6 @@ impl LocalKyutaiRuntime {
                     emit!(chunk_index, &combined, self.sample_rate);
                 }
             }
-        } else {
-            // ------------------------------------------------------------------
-            // rate == 1.0  — streaming tokens, no SoX
-            // ------------------------------------------------------------------
-            // generate_stream() works here because each token is emitted
-            // immediately without a rate-multiplied input threshold to satisfy.
-            for text_chunk in &text_chunks {
-                if cancel.load(Ordering::SeqCst) {
-                    return Ok((LocalJobEndState::Canceled, had_audio));
-                }
-                let stream = self.model.generate_stream(text_chunk, &voice_state);
-                for maybe_tensor in stream {
-                    if cancel.load(Ordering::SeqCst) {
-                        return Ok((LocalJobEndState::Canceled, had_audio));
-                    }
-                    let tensor =
-                        maybe_tensor.context("Pocket-TTS stream generation failed")?;
-                    let values = tensor
-                        .flatten_all()
-                        .context("Failed to flatten Pocket-TTS tensor chunk")?
-                        .to_vec1::<f32>()
-                        .context("Failed to convert Pocket-TTS tensor chunk to f32")?;
-                    let mut pcm = Vec::with_capacity(values.len());
-                    for sample in values {
-                        let scaled = (sample * gain).clamp(-1.0, 1.0);
-                        pcm.push((scaled * 32767.0) as i16);
-                    }
-                    if pcm.is_empty() {
-                        continue;
-                    }
-                    emit!(chunk_index, &pcm, self.sample_rate);
-                    chunk_index += 1;
-                }
-            }
         }
 
         Ok((LocalJobEndState::Done, had_audio))

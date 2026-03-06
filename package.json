@@ -1,6 +1,6 @@
 {
   "name": "voicereader-desktop",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,16 +9,24 @@
     "preview": "vite preview",
     "sidecar:build": "python ./tts-engine/scripts/build_sidecar.py",
     "models:bundle:kyutai": "python ./tts-engine/scripts/build_sidecar.py --models-only",
+    "predesktop:dev": "node scripts/sync-version.js",
     "desktop:dev": "tauri dev --features build-full",
+    "predesktop:dev:full": "node scripts/sync-version.js",
     "desktop:dev:full": "tauri dev --features build-full",
+    "predesktop:dev:base": "node scripts/sync-version.js",
     "desktop:dev:base": "tauri dev --features build-base",
     "desktop:build": "npm run desktop:build:full",
+    "predesktop:build:full": "node scripts/sync-version.js",
     "desktop:build:full": "tauri build --features build-full",
+    "predesktop:build:base": "node scripts/sync-version.js",
     "desktop:build:base": "tauri build --features build-base --config src-tauri/tauri.base.conf.json --bundles none",
+    "predesktop:build:base:installer": "node scripts/sync-version.js",
     "desktop:build:base:installer": "tauri build --features build-base --config src-tauri/tauri.base.conf.json",
     "desktop:build:standalone": "npm run desktop:build:full",
     "desktop:build:portable": "npm run desktop:build:full:portable",
+    "predesktop:build:full:portable": "node scripts/sync-version.js",
     "desktop:build:full:portable": "npm run sidecar:build && npm run build && tauri build --features build-full --bundles none && python ./scripts/package_portable.py --variant full",
+    "predesktop:build:base:portable": "node scripts/sync-version.js",
     "desktop:build:base:portable": "npm run models:bundle:kyutai && npm run build && tauri build --features build-base --config src-tauri/tauri.base.conf.json --bundles none && python ./scripts/package_portable.py --variant base"
   },
   "dependencies": {

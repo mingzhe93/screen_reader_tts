@@ -59,7 +59,14 @@ const SELECTION_COPY_TIMEOUT_MS: u64 = 500;
 const SELECTION_COPY_POLL_MS: u64 = 25;
 const HOTKEY_MODIFIER_RELEASE_TIMEOUT_MS: u64 = 350;
 const HOTKEY_MODIFIER_RELEASE_POLL_MS: u64 = 10;
-const DEFAULT_FALLBACK_HOTKEY: &str = "CmdOrCtrl+Shift+S";
+#[cfg(target_os = "windows")]
+const DEFAULT_FALLBACK_HOTKEY: &str = "Alt+S";
+
+#[cfg(target_os = "macos")]
+const DEFAULT_FALLBACK_HOTKEY: &str = "Option+S";
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+const DEFAULT_FALLBACK_HOTKEY: &str = "Ctrl+Shift+S";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const TOOLBAR_WINDOW_LABEL: &str = "toolbar";
 const TOOLBAR_WINDOW_PATH: &str = "toolbar.html";
@@ -81,7 +88,6 @@ struct SharedState {
 #[derive(Clone)]
 struct SpeakSettingsState {
     rate: f32,
-    pitch: f32,
     volume: f32,
     chunk_max_chars: u32,
 }
@@ -134,7 +140,6 @@ impl Default for EngineState {
             hotkey: default_hotkey(),
             speak_settings: SpeakSettingsState {
                 rate: 1.5,
-                pitch: 1.0,
                 volume: 1.0,
                 chunk_max_chars: 200,
             },
@@ -1203,15 +1208,11 @@ fn set_speak_settings(
     app: AppHandle,
     state: State<'_, SharedState>,
     rate: f32,
-    pitch: f32,
     volume: f32,
     chunk_max_chars: u32,
 ) -> Result<GenericResult, String> {
     if !(0.25..=4.0).contains(&rate) {
         return Err("rate must be in [0.25, 4.0]".to_string());
-    }
-    if !(0.5..=2.0).contains(&pitch) {
-        return Err("pitch must be in [0.5, 2.0]".to_string());
     }
     if !(0.0..=2.0).contains(&volume) {
         return Err("volume must be in [0.0, 2.0]".to_string());
@@ -1224,7 +1225,6 @@ fn set_speak_settings(
         let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
         guard.speak_settings = SpeakSettingsState {
             rate,
-            pitch,
             volume,
             chunk_max_chars,
         };
@@ -1630,7 +1630,12 @@ fn hotkey_modifiers_pressed() -> bool {
         return hotkey_modifiers_pressed_windows();
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        return hotkey_modifiers_pressed_macos();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         false
     }
@@ -1659,7 +1664,12 @@ fn trigger_system_copy_shortcut() -> bool {
         return trigger_copy_shortcut_windows();
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        return trigger_copy_shortcut_macos();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         false
     }
@@ -1706,6 +1716,84 @@ fn trigger_copy_shortcut_windows() -> bool {
     sent == inputs.len() as u32
 }
 
+#[cfg(target_os = "macos")]
+fn hotkey_modifiers_pressed_macos() -> bool {
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::event::CGEventFlags;
+
+    let source_state = CGEventSourceStateID::CombinedSessionState;
+    let flags = CGEventSource::flags_state(source_state);
+
+    flags.contains(CGEventFlags::CGEventFlagCommand)
+        || flags.contains(CGEventFlags::CGEventFlagShift)
+        || flags.contains(CGEventFlags::CGEventFlagControl)
+        || flags.contains(CGEventFlags::CGEventFlagAlternate)
+}
+
+#[cfg(target_os = "macos")]
+fn trigger_copy_shortcut_macos() -> bool {
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    // Virtual key code for 'C' on macOS.
+    const VK_C: CGKeyCode = 0x08;
+
+    let source = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+        Ok(src) => src,
+        Err(_) => return false,
+    };
+
+    let key_down = match CGEvent::new_keyboard_event(source.clone(), VK_C, true) {
+        Ok(evt) => evt,
+        Err(_) => return false,
+    };
+    let key_up = match CGEvent::new_keyboard_event(source, VK_C, false) {
+        Ok(evt) => evt,
+        Err(_) => return false,
+    };
+
+    // Hold Cmd while pressing C (simulates Cmd+C).
+    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+
+    key_down.post(CGEventTapLocation::HID);
+    key_up.post(CGEventTapLocation::HID);
+
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn get_frontmost_app_name_macos() -> Option<String> {
+    use objc::{class, msg_send, sel, sel_impl};
+    use objc::runtime::Object;
+    use core_foundation::string::CFString;
+    use core_foundation::base::{CFType, TCFType};
+
+    unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace.is_null() {
+            return None;
+        }
+        let app: *mut Object = msg_send![workspace, frontmostApplication];
+        if app.is_null() {
+            return None;
+        }
+        let name: *mut Object = msg_send![app, localizedName];
+        if name.is_null() {
+            return None;
+        }
+
+        // NSString -> CFString -> Rust String
+        let cf_str = CFString::wrap_under_get_rule(name as *const _);
+        let result = cf_str.to_string();
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn get_foreground_window_title() -> Option<String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -1737,7 +1825,12 @@ fn get_foreground_window_title() -> Option<String> {
     Some(title)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+fn get_foreground_window_title() -> Option<String> {
+    get_frontmost_app_name_macos()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn get_foreground_window_title() -> Option<String> {
     None
 }
@@ -1767,10 +1860,6 @@ async fn speak_and_stream(
 
     #[cfg(feature = "build-base")]
     {
-        // Base Rust Kyutai path currently applies rate + volume.
-        // Pitch remains reserved/no-op for cross-build UI compatibility.
-        let _requested_pitch = settings.pitch;
-
         if selected_model != MODEL_KYUTAI {
             return Err(anyhow!(
                 "Base build supports Kyutai Pocket TTS only. Switch model to kyutai_pocket_tts."
@@ -1927,7 +2016,6 @@ async fn speak_and_stream(
         "text": trimmed,
         "settings": {
             "rate": settings.rate,
-            "pitch": settings.pitch,
             "volume": settings.volume,
             "chunking": {
                 "max_chars": settings.chunk_max_chars,
@@ -2545,11 +2633,11 @@ fn active_speaker_for_model(state: &EngineState) -> String {
 fn default_hotkey() -> String {
     #[cfg(target_os = "macos")]
     {
-        return "Cmd+Shift+Space".to_string();
+        return "Option+S".to_string();
     }
     #[cfg(target_os = "windows")]
     {
-        return "Alt+Shift+Space".to_string();
+        return "Alt+S".to_string();
     }
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {

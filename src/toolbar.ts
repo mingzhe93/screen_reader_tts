@@ -143,7 +143,7 @@ async function setDefaultToolbarPosition(): Promise<void> {
 async function restoreToolbarPosition(): Promise<void> {
   const saved = readSavedToolbarPosition();
   if (saved) {
-    await appWindow.setPosition(new LogicalPosition(saved.x, saved.y));
+    await appWindow.setPosition(new PhysicalPosition(saved.x, saved.y));
     return;
   }
   await setDefaultToolbarPosition();
@@ -184,7 +184,6 @@ skipForwardBtn.addEventListener("click", () => {
 
 skipBackBtn.addEventListener("click", () => {
   dispatchAction("skip-back");
-  flashSkipBackNoop();
 });
 
 void listen<ToolbarShowPayload>("voicereader:toolbar-show", async ({ payload }) => {
