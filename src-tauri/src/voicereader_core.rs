@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 #[cfg(feature = "build-full")]
@@ -15,14 +14,13 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 #[cfg(feature = "build-full")]
 use futures_util::StreamExt;
+#[cfg(feature = "build-full")]
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{
-    AppHandle, ClipboardManager, GlobalShortcutManager, Manager, RunEvent, State, WindowBuilder,
-    WindowUrl,
-};
+use tauri::{AppHandle, GlobalShortcutManager, Manager, RunEvent, State, WindowBuilder, WindowUrl};
+#[cfg(feature = "build-full")]
 use tokio::time::{sleep, Duration};
 #[cfg(feature = "build-full")]
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -39,7 +37,21 @@ use uuid::Uuid;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(feature = "build-base")]
+use crate::audio8_local::{
+    audio8_model_dir, gpu_provider_available, is_audio8_model_dir, ComputePreference, LocalAudio8Runtime,
+    AUDIO8_MODEL_FILES, AUDIO8_REPO,
+};
+#[cfg(feature = "build-base")]
 use crate::kyutai_local::{LocalJobEndState, LocalKyutaiRuntime};
+#[cfg(feature = "build-base")]
+use crate::model_download::download_model_files;
+use crate::selection::{capture_selected_text_from_active_app, get_foreground_window_title};
+#[cfg(feature = "build-base")]
+use crate::settings::persist_compute_device;
+use crate::settings::{
+    is_hotkey_os_reserved, load_saved_compute_device, load_saved_hotkey, normalize_hotkey, persist_hotkey,
+    COMPUTE_DEVICE_AUTO, COMPUTE_DEVICE_VALUES, DEFAULT_FALLBACK_HOTKEY,
+};
 
 #[cfg(all(feature = "build-full", feature = "build-base"))]
 compile_error!("features `build-full` and `build-base` are mutually exclusive");
@@ -50,24 +62,17 @@ compile_error!("one of `build-full` or `build-base` must be enabled");
 const MODEL_CUSTOM: &str = "qwen_custom_voice";
 const MODEL_BASE: &str = "qwen_base_clone";
 const MODEL_KYUTAI: &str = "kyutai_pocket_tts";
+const MODEL_AUDIO8: &str = "audio8_tts_0_1b";
+const AUDIO8_DEFAULT_SPEAKER: &str = "default";
+/// Size of the files in `AUDIO8_MODEL_FILES`, shown before the download starts.
+pub(crate) const AUDIO8_DOWNLOAD_SIZE_BYTES: u64 = 858_086_392;
+#[cfg(feature = "build-base")]
+static AUDIO8_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
 const QWEN_CUSTOM_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 const QWEN_BASE_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
 const KYUTAI_REPO: &str = "Verylicious/pocket-tts-ungated";
 #[cfg(feature = "build-full")]
 const TERMINAL_EVENTS: [&str; 3] = ["JOB_DONE", "JOB_CANCELED", "JOB_ERROR"];
-const SELECTION_COPY_TIMEOUT_MS: u64 = 500;
-const SELECTION_COPY_POLL_MS: u64 = 25;
-const HOTKEY_MODIFIER_RELEASE_TIMEOUT_MS: u64 = 350;
-const HOTKEY_MODIFIER_RELEASE_POLL_MS: u64 = 10;
-#[cfg(target_os = "windows")]
-const DEFAULT_FALLBACK_HOTKEY: &str = "Alt+S";
-
-#[cfg(target_os = "macos")]
-const DEFAULT_FALLBACK_HOTKEY: &str = "Option+S";
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-const DEFAULT_FALLBACK_HOTKEY: &str = "Ctrl+Shift+S";
-const SETTINGS_FILE_NAME: &str = "settings.json";
 const TOOLBAR_WINDOW_LABEL: &str = "toolbar";
 const TOOLBAR_WINDOW_PATH: &str = "toolbar.html";
 
@@ -76,9 +81,6 @@ const BUILD_VARIANT: &str = "full";
 
 #[cfg(feature = "build-base")]
 const BUILD_VARIANT: &str = "base";
-
-#[cfg(not(any(feature = "build-full", feature = "build-base")))]
-const BUILD_VARIANT: &str = "unknown";
 
 #[derive(Clone)]
 struct SharedState {
@@ -96,12 +98,20 @@ struct EngineState {
     child: Option<Child>,
     #[cfg(feature = "build-base")]
     local_kyutai: Option<Arc<Mutex<LocalKyutaiRuntime>>>,
+    /// Loaded on first use, because the model is an optional download.
+    #[cfg(feature = "build-base")]
+    local_audio8: Option<Arc<Mutex<LocalAudio8Runtime>>>,
+    /// Where the loaded Audio8 runtime decodes ("cpu", "directml", ...) and how that was
+    /// chosen. Kept here so status queries never wait on the runtime while it is speaking.
+    #[cfg(feature = "build-base")]
+    audio8_device: Option<(String, String)>,
+    /// The Compute Device setting: "auto", "gpu" or "cpu".
+    compute_device: String,
     #[cfg(feature = "build-base")]
     active_cancel_flag: Option<Arc<AtomicBool>>,
     #[cfg(feature = "build-base")]
     active_rate_steps: Option<Arc<AtomicU32>>,
     token: String,
-    port: u16,
     base_url: String,
     data_dir: String,
     models_dir: String,
@@ -124,11 +134,15 @@ impl Default for EngineState {
             #[cfg(feature = "build-base")]
             local_kyutai: None,
             #[cfg(feature = "build-base")]
+            local_audio8: None,
+            #[cfg(feature = "build-base")]
+            audio8_device: None,
+            compute_device: COMPUTE_DEVICE_AUTO.to_string(),
+            #[cfg(feature = "build-base")]
             active_cancel_flag: None,
             #[cfg(feature = "build-base")]
             active_rate_steps: None,
             token: String::new(),
-            port: 0,
             base_url: String::new(),
             data_dir: String::new(),
             models_dir: String::new(),
@@ -137,7 +151,7 @@ impl Default for EngineState {
             selected_model: MODEL_KYUTAI.to_string(),
             selected_qwen_speaker: "Ryan".to_string(),
             selected_kyutai_voice: "alba".to_string(),
-            hotkey: default_hotkey(),
+            hotkey: DEFAULT_FALLBACK_HOTKEY.to_string(),
             speak_settings: SpeakSettingsState {
                 rate: 1.5,
                 volume: 1.0,
@@ -148,11 +162,6 @@ impl Default for EngineState {
             startup_error: None,
         }
     }
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct AppSettingsFile {
-    hotkey: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -179,10 +188,35 @@ struct BootstrapPayload {
     startup_error: Option<String>,
     build_variant: String,
     qwen_enabled: bool,
+    audio8_supported: bool,
+    audio8_downloaded: bool,
     models: Vec<ModelOption>,
     preset_speakers: Vec<SpeakerPreset>,
     health: Value,
     voices: Value,
+}
+
+#[derive(Serialize)]
+struct Audio8ModelStatus {
+    supported: bool,
+    downloaded: bool,
+    loaded: bool,
+    model_dir: String,
+    repo: String,
+    download_size_bytes: u64,
+}
+
+#[cfg(feature = "build-base")]
+#[derive(Serialize, Clone)]
+struct ModelDownloadPayload {
+    model: String,
+    state: String,
+    file: String,
+    file_index: usize,
+    file_count: usize,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -193,6 +227,25 @@ struct EngineRuntimePayload {
     selected_voice_id: String,
     selected_model: String,
     selected_speaker: String,
+    /// Display name of the selected model.
+    model_label: String,
+    /// What the selected model is running on, for example "CPU" or "GPU + CPU". Empty
+    /// when unknown (the sidecar build).
+    device_label: String,
+}
+
+#[derive(Serialize)]
+struct ComputeDevicePayload {
+    /// The saved setting: "auto", "gpu" or "cpu".
+    preference: String,
+    /// Whether this build and platform can use a GPU at all.
+    gpu_supported: bool,
+    /// Whether a model that can use the GPU is currently loaded.
+    model_loaded: bool,
+    /// Where that model's GPU-capable part is running ("cpu", "directml", ...).
+    active_device: Option<String>,
+    /// How the active device was chosen.
+    note: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -362,7 +415,11 @@ const QWEN_SPEAKER_PRESETS: [SpeakerPresetRow; 9] = [
     },
 ];
 
-const KYUTAI_VOICE_PRESETS: [SpeakerPresetRow; 8] = [
+// The first eight ship as precomputed embeddings with the bundled weights. The rest were
+// added upstream later (kyutai-labs/pocket-tts README) and are cloned at first use from
+// the reference clips fetched by scripts/fetch-kyutai-voices.js. Upstream's non-English
+// voices are left out: the bundled weights are English-only.
+const KYUTAI_VOICE_PRESETS: [SpeakerPresetRow; 21] = [
     SpeakerPresetRow {
         id: "alba",
         description: "Balanced English male voice (Pocket TTS preset).",
@@ -403,7 +460,78 @@ const KYUTAI_VOICE_PRESETS: [SpeakerPresetRow; 8] = [
         description: "Natural female voice (Pocket TTS preset).",
         native_language: "English",
     },
+    SpeakerPresetRow {
+        id: "anna",
+        description: "Female voice (VCTK speaker p228).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "vera",
+        description: "Female voice (VCTK speaker p229).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "mary",
+        description: "Female voice (VCTK speaker p333).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "jane",
+        description: "Female voice (VCTK speaker p339).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "eve",
+        description: "Female voice (VCTK speaker p361).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "caro_davy",
+        description: "Female voice (LibriVox reader Caro Davy).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "charles",
+        description: "Deep male voice (VCTK speaker p254).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "paul",
+        description: "Male voice (VCTK speaker p259).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "george",
+        description: "Male voice (VCTK speaker p315).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "michael",
+        description: "Male voice (VCTK speaker p360).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "bill_boerst",
+        description: "Male voice (LibriVox reader Bill Boerst).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "peter_yearsley",
+        description: "Male voice (LibriVox reader Peter Yearsley).",
+        native_language: "English",
+    },
+    SpeakerPresetRow {
+        id: "stuart_bell",
+        description: "Male voice (LibriVox reader Stuart Bell).",
+        native_language: "English",
+    },
 ];
+
+const AUDIO8_VOICE_PRESETS: [SpeakerPresetRow; 1] = [SpeakerPresetRow {
+    id: AUDIO8_DEFAULT_SPEAKER,
+    description: "Built-in Audio8 reference voice. Clone a voice to use your own.",
+    native_language: "Chinese",
+}];
 
 pub fn run_app() {
     let state = SharedState {
@@ -418,6 +546,11 @@ pub fn run_app() {
             if let Some(saved_hotkey) = load_saved_hotkey(&handle) {
                 if let Ok(mut guard) = state.inner.lock() {
                     guard.hotkey = saved_hotkey;
+                }
+            }
+            if let Some(saved_compute_device) = load_saved_compute_device(&handle) {
+                if let Ok(mut guard) = state.inner.lock() {
+                    guard.compute_device = saved_compute_device;
                 }
             }
             let init_result = tauri::async_runtime::block_on(async {
@@ -461,6 +594,10 @@ pub fn run_app() {
             engine_runtime_status,
             engine_storage_paths,
             prefetch_models,
+            audio8_model_status,
+            download_audio8_model,
+            get_compute_device,
+            set_compute_device,
             restart_engine,
             select_model,
             set_selected_voice,
@@ -554,6 +691,7 @@ async fn app_bootstrap(app: AppHandle, state: State<'_, SharedState>) -> Result<
             guard.selected_model.clone(),
             active_speaker_for_model(&guard),
             guard.startup_error.clone(),
+            audio8_downloaded(&guard),
         )
     };
     let selected_model = snapshot.2.clone();
@@ -564,9 +702,11 @@ async fn app_bootstrap(app: AppHandle, state: State<'_, SharedState>) -> Result<
         selected_model,
         selected_speaker: snapshot.3,
         startup_error: snapshot.4.or(startup_error),
-        build_variant: build_variant_name().to_string(),
+        build_variant: BUILD_VARIANT.to_string(),
         qwen_enabled: qwen_modes_enabled(),
-        models: model_options(),
+        audio8_supported: audio8_supported(),
+        audio8_downloaded: snapshot.5,
+        models: model_options(snapshot.5),
         preset_speakers: speaker_presets(&snapshot.2),
         health,
         voices,
@@ -597,7 +737,87 @@ fn engine_runtime_status(state: State<'_, SharedState>) -> Result<EngineRuntimeP
         selected_voice_id: guard.selected_voice_id.clone(),
         selected_model: guard.selected_model.clone(),
         selected_speaker: active_speaker,
+        model_label: model_label(&guard.selected_model).to_string(),
+        device_label: device_label(&guard),
     })
+}
+
+fn compute_device_payload(state: &EngineState) -> ComputeDevicePayload {
+    #[cfg(feature = "build-base")]
+    {
+        return ComputeDevicePayload {
+            preference: state.compute_device.clone(),
+            gpu_supported: gpu_provider_available(),
+            model_loaded: state.audio8_device.is_some(),
+            active_device: state.audio8_device.as_ref().map(|(device, _)| device.clone()),
+            note: state.audio8_device.as_ref().map(|(_, note)| note.clone()),
+        };
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        ComputeDevicePayload {
+            preference: state.compute_device.clone(),
+            gpu_supported: false,
+            model_loaded: false,
+            active_device: None,
+            note: None,
+        }
+    }
+}
+
+#[tauri::command]
+fn get_compute_device(state: State<'_, SharedState>) -> Result<ComputeDevicePayload, String> {
+    let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+    Ok(compute_device_payload(&guard))
+}
+
+/// Saves the Compute Device setting and, if a model that uses it is loaded, reloads that
+/// model so the change applies immediately.
+#[tauri::command]
+async fn set_compute_device(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    preference: String,
+) -> Result<ComputeDevicePayload, String> {
+    let normalized = preference.trim().to_lowercase();
+    if !COMPUTE_DEVICE_VALUES.contains(&normalized.as_str()) {
+        return Err("preference must be one of: auto, gpu, cpu".to_string());
+    }
+
+    #[cfg(feature = "build-base")]
+    {
+        let reload = {
+            let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+            let changed = guard.compute_device != normalized;
+            guard.compute_device = normalized.clone();
+            let loaded = guard.local_audio8.is_some();
+            if changed && loaded {
+                // The decoder session is tied to its device, so the runtime is rebuilt.
+                // Anything being spoken is stopped first.
+                if let Some(cancel_flag) = guard.active_cancel_flag.as_ref() {
+                    cancel_flag.store(true, Ordering::SeqCst);
+                }
+                guard.local_audio8 = None;
+                guard.audio8_device = None;
+            }
+            changed && loaded && guard.selected_model == MODEL_AUDIO8
+        };
+        if let Err(err) = persist_compute_device(&app, &normalized) {
+            emit_error(&app, &format!("Compute device was changed but not saved: {err:#}"));
+        }
+        if reload {
+            ensure_audio8_loaded(&state.inner).await.map_err(to_cmd_error)?;
+        }
+        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        return Ok(compute_device_payload(&guard));
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state);
+        Err("Compute device selection is available in the Base build only.".to_string())
+    }
 }
 
 #[tauri::command]
@@ -634,10 +854,7 @@ async fn prefetch_models(
         return Err("mode must be one of: qwen_custom, qwen_base, qwen_all, all".to_string());
     }
 
-    let (base_url, token) = {
-        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(&state.inner).map_err(to_cmd_error)?;
 
     let response_payload = request_json(
         Method::POST,
@@ -669,11 +886,199 @@ async fn prefetch_models(
 }
 
 #[tauri::command]
+async fn audio8_model_status(app: AppHandle, state: State<'_, SharedState>) -> Result<Audio8ModelStatus, String> {
+    #[cfg(feature = "build-base")]
+    {
+        ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        return Ok(Audio8ModelStatus {
+            supported: true,
+            downloaded: audio8_downloaded(&guard),
+            loaded: guard.local_audio8.is_some(),
+            model_dir: audio8_model_dir(Path::new(&guard.models_dir))
+                .to_string_lossy()
+                .to_string(),
+            repo: AUDIO8_REPO.to_string(),
+            download_size_bytes: AUDIO8_DOWNLOAD_SIZE_BYTES,
+        });
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state);
+        Ok(Audio8ModelStatus {
+            supported: false,
+            downloaded: false,
+            loaded: false,
+            model_dir: String::new(),
+            repo: String::new(),
+            download_size_bytes: AUDIO8_DOWNLOAD_SIZE_BYTES,
+        })
+    }
+}
+
+#[tauri::command]
+async fn download_audio8_model(app: AppHandle, state: State<'_, SharedState>) -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    {
+        ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+        let model_dir = {
+            let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+            audio8_model_dir(Path::new(&guard.models_dir))
+        };
+        if AUDIO8_DOWNLOAD_ACTIVE.swap(true, Ordering::SeqCst) {
+            return Err("An Audio8 model download is already running.".to_string());
+        }
+        let file_count = AUDIO8_MODEL_FILES.len();
+        let progress_app = app.clone();
+        let result = download_model_files(
+            AUDIO8_REPO,
+            &AUDIO8_MODEL_FILES,
+            &model_dir,
+            move |file, file_index, downloaded_bytes, total_bytes| {
+                let _ = progress_app.emit_all(
+                    "voicereader:model-download",
+                    ModelDownloadPayload {
+                        model: MODEL_AUDIO8.to_string(),
+                        state: "progress".to_string(),
+                        file: file.to_string(),
+                        file_index,
+                        file_count,
+                        downloaded_bytes,
+                        total_bytes,
+                        message: String::new(),
+                    },
+                );
+            },
+        )
+        .await
+        .and_then(|total_bytes| {
+            if is_audio8_model_dir(&model_dir) {
+                Ok(total_bytes)
+            } else {
+                Err(anyhow!("Audio8 model files are incomplete after download"))
+            }
+        });
+        AUDIO8_DOWNLOAD_ACTIVE.store(false, Ordering::SeqCst);
+
+        return match result {
+            Ok(total_bytes) => {
+                let message = format!("Audio8 TTS model downloaded to {}", model_dir.display());
+                let _ = app.emit_all(
+                    "voicereader:model-download",
+                    ModelDownloadPayload {
+                        model: MODEL_AUDIO8.to_string(),
+                        state: "done".to_string(),
+                        file: String::new(),
+                        file_index: file_count,
+                        file_count,
+                        downloaded_bytes: total_bytes,
+                        total_bytes,
+                        message: message.clone(),
+                    },
+                );
+                Ok(GenericResult { ok: true, message })
+            }
+            Err(err) => {
+                let message = to_cmd_error(err);
+                let _ = app.emit_all(
+                    "voicereader:model-download",
+                    ModelDownloadPayload {
+                        model: MODEL_AUDIO8.to_string(),
+                        state: "error".to_string(),
+                        file: String::new(),
+                        file_index: 0,
+                        file_count,
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        message: message.clone(),
+                    },
+                );
+                Err(message)
+            }
+        };
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state);
+        Err("Audio8 TTS is available in the Base build only.".to_string())
+    }
+}
+
+/// Returns the Audio8 runtime, loading the model on first use.
+#[cfg(feature = "build-base")]
+async fn ensure_audio8_loaded(state: &Arc<Mutex<EngineState>>) -> Result<Arc<Mutex<LocalAudio8Runtime>>> {
+    let (existing, data_dir, models_dir, compute) = {
+        let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+        (
+            guard.local_audio8.clone(),
+            guard.data_dir.clone(),
+            guard.models_dir.clone(),
+            ComputePreference::parse(&guard.compute_device).unwrap_or(ComputePreference::Auto),
+        )
+    };
+    if let Some(runtime) = existing {
+        return Ok(runtime);
+    }
+
+    let model_dir = audio8_model_dir(Path::new(&models_dir));
+    if !is_audio8_model_dir(&model_dir) {
+        return Err(anyhow!(
+            "Audio8 TTS model is not downloaded yet. Use \"Download Audio8 model\" first."
+        ));
+    }
+    let data_dir = PathBuf::from(data_dir);
+    let runtime =
+        tauri::async_runtime::spawn_blocking(move || LocalAudio8Runtime::new(&model_dir, &data_dir, compute))
+            .await
+            .map_err(|err| anyhow!("Audio8 model load task failed: {err}"))??;
+    let device = (
+        runtime.decoder_device_label().to_string(),
+        runtime.decoder_note().to_string(),
+    );
+    let runtime = Arc::new(Mutex::new(runtime));
+
+    let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+    if let Some(existing) = guard.local_audio8.clone() {
+        return Ok(existing);
+    }
+    guard.local_audio8 = Some(runtime.clone());
+    guard.audio8_device = Some(device);
+    Ok(runtime)
+}
+
+#[tauri::command]
 async fn restart_engine(app: AppHandle, state: State<'_, SharedState>) -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    let model_before_restart = {
+        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        guard.selected_model.clone()
+    };
+
     shutdown_engine(&state.inner).await;
     initialize_engine_if_needed(&app, &state.inner)
         .await
         .map_err(to_cmd_error)?;
+
+    // Starting the base runtime always selects Kyutai, because that is the only model
+    // guaranteed to be present. A restart should come back on the model that was in use.
+    #[cfg(feature = "build-base")]
+    let mut message = "Engine restarted and ready".to_string();
+    #[cfg(feature = "build-base")]
+    if model_before_restart == MODEL_AUDIO8 {
+        match ensure_audio8_loaded(&state.inner).await {
+            Ok(_) => {
+                let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+                guard.selected_model = MODEL_AUDIO8.to_string();
+            }
+            Err(err) => {
+                message = format!(
+                    "Engine restarted on Kyutai Pocket TTS; Audio8 TTS could not be reloaded: {err:#}"
+                );
+            }
+        }
+    }
 
     let selected_model = {
         let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
@@ -686,12 +1091,8 @@ async fn restart_engine(app: AppHandle, state: State<'_, SharedState>) -> Result
         let _ = apply_kyutai_model_activation(&state.inner).await;
     }
 
-    #[cfg(feature = "build-base")]
-    let message = "Kyutai runtime restarted and ready".to_string();
     #[cfg(feature = "build-full")]
     let message = "Engine sidecar restarted and handshake completed".to_string();
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    let message = "Runtime restarted".to_string();
 
     Ok(GenericResult {
         ok: true,
@@ -707,7 +1108,7 @@ async fn select_model(
 ) -> Result<SelectModelResult, String> {
     ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
     let normalized = model.trim().to_string();
-    if !qwen_modes_enabled() && normalized != MODEL_KYUTAI {
+    if !qwen_modes_enabled() && normalized != MODEL_KYUTAI && normalized != MODEL_AUDIO8 {
         return Err("Qwen model modes are available in Full build only.".to_string());
     }
 
@@ -773,6 +1174,30 @@ async fn select_model(
                 health,
             })
         }
+        MODEL_AUDIO8 => {
+            #[cfg(feature = "build-base")]
+            {
+                ensure_audio8_loaded(&state.inner).await.map_err(to_cmd_error)?;
+                {
+                    let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+                    guard.selected_model = MODEL_AUDIO8.to_string();
+                }
+                let health = engine_health_inner(&state.inner).await.map_err(to_cmd_error)?;
+                return Ok(SelectModelResult {
+                    selected_model: MODEL_AUDIO8.to_string(),
+                    selected_speaker: AUDIO8_DEFAULT_SPEAKER.to_string(),
+                    preset_speakers: speaker_presets(MODEL_AUDIO8),
+                    applied: true,
+                    message: "Audio8 TTS model is active for read-aloud".to_string(),
+                    health,
+                });
+            }
+
+            #[cfg(not(feature = "build-base"))]
+            {
+                Err("Audio8 TTS is available in the Base build only.".to_string())
+            }
+        }
         _ => Err("Unknown model id".to_string()),
     }
 }
@@ -818,9 +1243,9 @@ async fn clone_voice_from_audio(
             .map_err(|_| "State lock poisoned".to_string())?;
         guard.selected_model.clone()
     };
-    if selected_model != MODEL_KYUTAI {
+    if selected_model != MODEL_KYUTAI && selected_model != MODEL_AUDIO8 {
         return Err(
-            "Voice cloning is currently enabled for Kyutai mode only. Switch model to Kyutai Pocket TTS first."
+            "Voice cloning is available for Kyutai Pocket TTS and Audio8 TTS. Switch to one of those models first."
                 .to_string(),
         );
     }
@@ -833,16 +1258,19 @@ async fn clone_voice_from_audio(
         let language_hint = normalize_optional_text(language);
         let ref_text = normalize_optional_text(ref_text);
 
-        let runtime = {
-            let guard = state
-                .inner
-                .lock()
-                .map_err(|_| "State lock poisoned".to_string())?;
-            guard
-                .local_kyutai
-                .clone()
-                .ok_or_else(|| "Kyutai Rust runtime is not initialized".to_string())?
+        // Audio8 conditions on the transcript as well as the audio, so it is mandatory there.
+        let audio8_runtime = if selected_model == MODEL_AUDIO8 {
+            if ref_text.is_none() {
+                return Err(
+                    "Audio8 voice cloning needs the exact transcript of the reference audio.".to_string(),
+                );
+            }
+            Some(ensure_audio8_loaded(&state.inner).await.map_err(to_cmd_error)?)
+        } else {
+            None
         };
+
+        let runtime = local_kyutai_runtime(&state.inner).map_err(to_cmd_error)?;
 
         let cloned_meta = {
             let mut runtime_guard = runtime
@@ -852,6 +1280,26 @@ async fn clone_voice_from_audio(
                 .clone_voice(&normalized_name, &wav_bytes, language_hint, ref_text)
                 .map_err(to_cmd_error)?
         };
+
+        if let Some(audio8) = audio8_runtime {
+            let registered = audio8
+                .lock()
+                .map_err(|_| anyhow!("Audio8 runtime lock poisoned"))
+                .and_then(|mut audio8_guard| {
+                    audio8_guard.register_voice(
+                        &cloned_meta.voice_id,
+                        &wav_bytes,
+                        cloned_meta.ref_text.as_deref().unwrap_or_default(),
+                    )
+                });
+            if let Err(err) = registered {
+                // Do not leave behind a voice that cannot be used with the active model.
+                if let Ok(mut runtime_guard) = runtime.lock() {
+                    let _ = runtime_guard.delete_voice(&cloned_meta.voice_id);
+                }
+                return Err(to_cmd_error(err));
+            }
+        }
 
         {
             let mut guard = state
@@ -873,13 +1321,7 @@ async fn clone_voice_from_audio(
 
     #[cfg(feature = "build-full")]
     {
-    let (base_url, token) = {
-        let guard = state
-            .inner
-            .lock()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(&state.inner).map_err(to_cmd_error)?;
 
     let mut clone_payload = serde_json::Map::new();
     clone_payload.insert("display_name".to_string(), Value::String(normalized_name.clone()));
@@ -924,11 +1366,6 @@ async fn clone_voice_from_audio(
         voice_id: clone_response.voice_id,
     })
     }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err("Unsupported build variant for voice cloning".to_string())
-    }
 }
 
 #[tauri::command]
@@ -957,16 +1394,7 @@ async fn update_saved_voice(
 
     #[cfg(feature = "build-base")]
     {
-        let runtime = {
-            let guard = state
-                .inner
-                .lock()
-                .map_err(|_| "State lock poisoned".to_string())?;
-            guard
-                .local_kyutai
-                .clone()
-                .ok_or_else(|| "Kyutai Rust runtime is not initialized".to_string())?
-        };
+        let runtime = local_kyutai_runtime(&state.inner).map_err(to_cmd_error)?;
 
         let updated = {
             let mut runtime_guard = runtime
@@ -993,13 +1421,7 @@ async fn update_saved_voice(
 
     #[cfg(feature = "build-full")]
     {
-    let (base_url, token) = {
-        let guard = state
-            .inner
-            .lock()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(&state.inner).map_err(to_cmd_error)?;
 
     let normalized_language = normalize_optional_text(language);
     let normalized_description = normalize_optional_text(description);
@@ -1025,11 +1447,6 @@ async fn update_saved_voice(
         message: format!("Saved voice updated: {} ({})", response.display_name, response.voice_id),
     })
     }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err("Unsupported build variant for saved-voice update".to_string())
-    }
 }
 
 #[tauri::command]
@@ -1050,16 +1467,7 @@ async fn delete_saved_voice(
 
     #[cfg(feature = "build-base")]
     {
-        let runtime = {
-            let guard = state
-                .inner
-                .lock()
-                .map_err(|_| "State lock poisoned".to_string())?;
-            guard
-                .local_kyutai
-                .clone()
-                .ok_or_else(|| "Kyutai Rust runtime is not initialized".to_string())?
-        };
+        let runtime = local_kyutai_runtime(&state.inner).map_err(to_cmd_error)?;
         {
             let mut runtime_guard = runtime
                 .lock()
@@ -1067,6 +1475,18 @@ async fn delete_saved_voice(
             runtime_guard
                 .delete_voice(&normalized_voice_id)
                 .map_err(to_cmd_error)?;
+        }
+        let audio8_runtime = {
+            let guard = state
+                .inner
+                .lock()
+                .map_err(|_| "State lock poisoned".to_string())?;
+            guard.local_audio8.clone()
+        };
+        if let Some(audio8) = audio8_runtime {
+            if let Ok(mut audio8_guard) = audio8.lock() {
+                audio8_guard.invalidate_voice(&normalized_voice_id);
+            }
         }
 
         {
@@ -1087,13 +1507,7 @@ async fn delete_saved_voice(
 
     #[cfg(feature = "build-full")]
     {
-    let (base_url, token) = {
-        let guard = state
-            .inner
-            .lock()
-            .map_err(|_| "State lock poisoned".to_string())?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(&state.inner).map_err(to_cmd_error)?;
 
     let _ = request_json(
         Method::DELETE,
@@ -1118,11 +1532,6 @@ async fn delete_saved_voice(
         ok: true,
         message: format!("Deleted saved voice {normalized_voice_id}"),
     })
-    }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err("Unsupported build variant for saved-voice delete".to_string())
     }
 }
 
@@ -1186,6 +1595,17 @@ async fn set_preset_speaker(
                 preset_speakers: speaker_presets(MODEL_KYUTAI),
                 applied: true,
                 message: format!("Kyutai voice prompt switched to {speaker_id}"),
+                health,
+            })
+        }
+        MODEL_AUDIO8 => {
+            let health = engine_health_inner(&state.inner).await.map_err(to_cmd_error)?;
+            Ok(SelectModelResult {
+                selected_model: MODEL_AUDIO8.to_string(),
+                selected_speaker: AUDIO8_DEFAULT_SPEAKER.to_string(),
+                preset_speakers: speaker_presets(MODEL_AUDIO8),
+                applied: true,
+                message: "Audio8 uses its built-in voice or a saved cloned voice".to_string(),
                 health,
             })
         }
@@ -1332,12 +1752,7 @@ fn set_hotkey(
     }
 
     if let Err(err) = persist_hotkey(&app, &normalized) {
-        let _ = app.emit_all(
-            "voicereader:error",
-            ErrorPayload {
-                message: format!("Hotkey set but could not persist settings: {err:#}"),
-            },
-        );
+        emit_error(&app, &format!("Hotkey set but could not persist settings: {err:#}"));
     }
 
     let _ = app.emit_all(
@@ -1427,10 +1842,7 @@ async fn cancel_active_job(app: AppHandle, state: State<'_, SharedState>) -> Res
 
     #[cfg(feature = "build-full")]
     {
-    let (base_url, token) = {
-        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(&state.inner).map_err(to_cmd_error)?;
 
     let _ = request_json(
         Method::POST,
@@ -1452,11 +1864,6 @@ async fn cancel_active_job(app: AppHandle, state: State<'_, SharedState>) -> Res
         ok: true,
         message: format!("Cancel request sent for job {job_id}"),
     })
-    }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err("Unsupported build variant for cancel operation".to_string())
     }
 }
 
@@ -1548,293 +1955,6 @@ async fn read_selection_and_speak_inner(app: &AppHandle, state: &Arc<Mutex<Engin
     Ok(())
 }
 
-async fn capture_selected_text_from_active_app(app: &AppHandle) -> Option<String> {
-    let previous_clipboard = app.clipboard_manager().read_text().ok().flatten();
-    let probe_clipboard_value = build_selection_probe_value();
-    let probe_set = app
-        .clipboard_manager()
-        .write_text(probe_clipboard_value.clone())
-        .is_ok();
-
-    // Hotkey callback can run while Ctrl/Shift is still physically down.
-    // Wait briefly so simulated copy does not become Ctrl+Shift+C in target apps.
-    wait_for_hotkey_modifiers_release().await;
-
-    if !trigger_system_copy_shortcut() {
-        restore_clipboard_text(app, previous_clipboard, probe_set);
-        return None;
-    }
-
-    let previous_trimmed = previous_clipboard.as_deref().map(str::trim);
-    let started = Instant::now();
-    let mut captured: Option<String> = None;
-
-    while started.elapsed() < Duration::from_millis(SELECTION_COPY_TIMEOUT_MS) {
-        let current_clipboard = app.clipboard_manager().read_text().ok().flatten();
-        let normalized_current = normalized_clipboard_text(current_clipboard);
-        if let Some(current_text) = normalized_current {
-            let changed = if probe_set {
-                current_text != probe_clipboard_value
-            } else {
-                previous_trimmed.map_or(true, |prev| current_text != prev)
-            };
-            if changed {
-                captured = Some(current_text);
-                break;
-            }
-        }
-        sleep(Duration::from_millis(SELECTION_COPY_POLL_MS)).await;
-    }
-
-    restore_clipboard_text(app, previous_clipboard, probe_set);
-
-    captured
-}
-
-fn normalized_clipboard_text(raw: Option<String>) -> Option<String> {
-    raw.map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn restore_clipboard_text(app: &AppHandle, previous_clipboard: Option<String>, probe_set: bool) {
-    if let Some(previous_text) = previous_clipboard {
-        let _ = app.clipboard_manager().write_text(previous_text);
-    } else if probe_set {
-        // We temporarily set a probe value; clear it back to empty when clipboard had no text before.
-        let _ = app.clipboard_manager().write_text(String::new());
-    }
-}
-
-fn build_selection_probe_value() -> String {
-    let suffix: String = rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(12)
-        .map(char::from)
-        .collect();
-    format!("__voicereader_selection_probe_{suffix}__")
-}
-
-async fn wait_for_hotkey_modifiers_release() {
-    let started = Instant::now();
-    while started.elapsed() < Duration::from_millis(HOTKEY_MODIFIER_RELEASE_TIMEOUT_MS) {
-        if !hotkey_modifiers_pressed() {
-            return;
-        }
-        sleep(Duration::from_millis(HOTKEY_MODIFIER_RELEASE_POLL_MS)).await;
-    }
-}
-
-fn hotkey_modifiers_pressed() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        return hotkey_modifiers_pressed_windows();
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        return hotkey_modifiers_pressed_macos();
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        false
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn hotkey_modifiers_pressed_windows() -> bool {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
-    };
-
-    fn is_pressed(vk: i32) -> bool {
-        unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
-    }
-
-    is_pressed(VK_CONTROL as i32)
-        || is_pressed(VK_SHIFT as i32)
-        || is_pressed(VK_MENU as i32)
-        || is_pressed(VK_LWIN as i32)
-        || is_pressed(VK_RWIN as i32)
-}
-
-fn trigger_system_copy_shortcut() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        return trigger_copy_shortcut_windows();
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        return trigger_copy_shortcut_macos();
-    }
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        false
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn trigger_copy_shortcut_windows() -> bool {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
-    };
-
-    const KEY_C: u16 = 0x43;
-
-    fn keyboard_input(vk: u16, flags: u32) -> INPUT {
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        }
-    }
-
-    let inputs = [
-        keyboard_input(VK_CONTROL as u16, 0),
-        keyboard_input(KEY_C, 0),
-        keyboard_input(KEY_C, KEYEVENTF_KEYUP),
-        keyboard_input(VK_CONTROL as u16, KEYEVENTF_KEYUP),
-    ];
-
-    let sent = unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        )
-    };
-
-    sent == inputs.len() as u32
-}
-
-#[cfg(target_os = "macos")]
-fn hotkey_modifiers_pressed_macos() -> bool {
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-    use core_graphics::event::CGEventFlags;
-
-    let source_state = CGEventSourceStateID::CombinedSessionState;
-    let flags = CGEventSource::flags_state(source_state);
-
-    flags.contains(CGEventFlags::CGEventFlagCommand)
-        || flags.contains(CGEventFlags::CGEventFlagShift)
-        || flags.contains(CGEventFlags::CGEventFlagControl)
-        || flags.contains(CGEventFlags::CGEventFlagAlternate)
-}
-
-#[cfg(target_os = "macos")]
-fn trigger_copy_shortcut_macos() -> bool {
-    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, CGKeyCode};
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-
-    // Virtual key code for 'C' on macOS.
-    const VK_C: CGKeyCode = 0x08;
-
-    let source = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
-        Ok(src) => src,
-        Err(_) => return false,
-    };
-
-    let key_down = match CGEvent::new_keyboard_event(source.clone(), VK_C, true) {
-        Ok(evt) => evt,
-        Err(_) => return false,
-    };
-    let key_up = match CGEvent::new_keyboard_event(source, VK_C, false) {
-        Ok(evt) => evt,
-        Err(_) => return false,
-    };
-
-    // Hold Cmd while pressing C (simulates Cmd+C).
-    key_down.set_flags(CGEventFlags::CGEventFlagCommand);
-    key_up.set_flags(CGEventFlags::CGEventFlagCommand);
-
-    key_down.post(CGEventTapLocation::HID);
-    key_up.post(CGEventTapLocation::HID);
-
-    true
-}
-
-#[cfg(target_os = "macos")]
-fn get_frontmost_app_name_macos() -> Option<String> {
-    use objc::{class, msg_send, sel, sel_impl};
-    use objc::runtime::Object;
-    use core_foundation::string::CFString;
-    use core_foundation::base::{CFType, TCFType};
-
-    unsafe {
-        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
-        if workspace.is_null() {
-            return None;
-        }
-        let app: *mut Object = msg_send![workspace, frontmostApplication];
-        if app.is_null() {
-            return None;
-        }
-        let name: *mut Object = msg_send![app, localizedName];
-        if name.is_null() {
-            return None;
-        }
-
-        // NSString -> CFString -> Rust String
-        let cf_str = CFString::wrap_under_get_rule(name as *const _);
-        let result = cf_str.to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn get_foreground_window_title() -> Option<String> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-    };
-
-    let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_null() {
-        return None;
-    }
-
-    let title_len = unsafe { GetWindowTextLengthW(hwnd) };
-    if title_len <= 0 {
-        return None;
-    }
-
-    let mut title_buf = vec![0u16; title_len as usize + 1];
-    let written = unsafe { GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32) };
-    if written <= 0 {
-        return None;
-    }
-
-    let title = String::from_utf16_lossy(&title_buf[..written as usize])
-        .trim()
-        .to_string();
-    if title.is_empty() {
-        return None;
-    }
-    Some(title)
-}
-
-#[cfg(target_os = "macos")]
-fn get_foreground_window_title() -> Option<String> {
-    get_frontmost_app_name_macos()
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn get_foreground_window_title() -> Option<String> {
-    None
-}
-
 async fn speak_and_stream(
     app: &AppHandle,
     state: &Arc<Mutex<EngineState>>,
@@ -1852,7 +1972,7 @@ async fn speak_and_stream(
         (guard.selected_voice_id.clone(), guard.selected_model.clone(), guard.speak_settings.clone())
     };
 
-    if selected_model != MODEL_CUSTOM && selected_model != MODEL_KYUTAI {
+    if selected_model != MODEL_CUSTOM && selected_model != MODEL_KYUTAI && selected_model != MODEL_AUDIO8 {
         return Err(anyhow!(
             "Current model mode ({selected_model}) is not enabled for read-aloud yet. Switch to qwen_custom_voice or kyutai_pocket_tts."
         ));
@@ -1860,19 +1980,18 @@ async fn speak_and_stream(
 
     #[cfg(feature = "build-base")]
     {
-        if selected_model != MODEL_KYUTAI {
+        if selected_model != MODEL_KYUTAI && selected_model != MODEL_AUDIO8 {
             return Err(anyhow!(
-                "Base build supports Kyutai Pocket TTS only. Switch model to kyutai_pocket_tts."
+                "Base build supports Kyutai Pocket TTS and Audio8 TTS only. Switch model to one of those."
             ));
         }
 
-        let local_runtime = {
-            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-            guard
-                .local_kyutai
-                .clone()
-                .ok_or_else(|| anyhow!("Kyutai Rust runtime is not initialized"))?
+        let audio8_runtime = if selected_model == MODEL_AUDIO8 {
+            Some(ensure_audio8_loaded(state).await?)
+        } else {
+            None
         };
+        let local_runtime = local_kyutai_runtime(state)?;
         let selected_preset = {
             let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
             guard.selected_kyutai_voice.clone()
@@ -1916,51 +2035,74 @@ async fn speak_and_stream(
         let job_id_clone = job_id.clone();
         tauri::async_runtime::spawn(async move {
             let stream_result: Result<()> = (|| {
-                let mut runtime = local_runtime
-                    .lock()
-                    .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?;
-                let _ = app_clone.emit_all(
-                    "voicereader:ws-event",
-                    json!({
-                        "type": "JOB_STARTED",
-                        "job_id": job_id_clone.clone(),
-                    }),
-                );
-
-                // had_audio is now returned from stream_synthesize rather than
-                // captured via &mut in the closure, so the closure is Fn + Send + 'static.
-                // The 'static bound requires the closure to own its captures, so we move
-                // dedicated clones in rather than borrowing the outer locals.
+                // had_audio is returned from stream_synthesize rather than captured via
+                // &mut in the closure, so the closure is Fn + Send + 'static. The 'static
+                // bound requires the closure to own its captures, so we move dedicated
+                // clones in rather than borrowing the outer locals.
                 let app_for_chunk = app_clone.clone();
                 let job_id_for_chunk = job_id_clone.clone();
-                let (stream_end, had_audio) = runtime.stream_synthesize(
-                    &voice_id,
-                    &selected_preset,
-                    &trimmed,
-                    settings.chunk_max_chars,
-                    settings.volume,
-                    &cancel_flag,
-                    &active_rate_steps,
-                    move |chunk_index, pcm, sample_rate| {
-                        let mut bytes = Vec::with_capacity(pcm.len() * 2);
-                        for sample in pcm {
-                            bytes.extend_from_slice(&sample.to_le_bytes());
+                let on_chunk = move |chunk_index: usize, pcm: &[i16], sample_rate: u32| -> Result<()> {
+                    let mut bytes = Vec::with_capacity(pcm.len() * 2);
+                    for sample in pcm {
+                        bytes.extend_from_slice(&sample.to_le_bytes());
+                    }
+                    let payload = json!({
+                        "type": "AUDIO_CHUNK",
+                        "job_id": job_id_for_chunk.clone(),
+                        "chunk_index": chunk_index,
+                        "audio": {
+                            "format": "pcm_s16le",
+                            "sample_rate": sample_rate,
+                            "channels": 1,
+                            "data_base64": BASE64_STANDARD.encode(&bytes),
                         }
-                        let payload = json!({
-                            "type": "AUDIO_CHUNK",
-                            "job_id": job_id_for_chunk.clone(),
-                            "chunk_index": chunk_index,
-                            "audio": {
-                                "format": "pcm_s16le",
-                                "sample_rate": sample_rate,
-                                "channels": 1,
-                                "data_base64": BASE64_STANDARD.encode(&bytes),
-                            }
-                        });
-                        let _ = app_for_chunk.emit_all("voicereader:ws-event", payload);
-                        Ok(())
-                    },
-                )?;
+                    });
+                    let _ = app_for_chunk.emit_all("voicereader:ws-event", payload);
+                    Ok(())
+                };
+                let emit_job_started = || {
+                    let _ = app_clone.emit_all(
+                        "voicereader:ws-event",
+                        json!({
+                            "type": "JOB_STARTED",
+                            "job_id": job_id_clone.clone(),
+                        }),
+                    );
+                };
+
+                let (stream_end, had_audio) = match audio8_runtime {
+                    Some(audio8) => {
+                        let mut runtime = audio8
+                            .lock()
+                            .map_err(|_| anyhow!("Audio8 runtime lock poisoned"))?;
+                        emit_job_started();
+                        runtime.stream_synthesize(
+                            &voice_id,
+                            &trimmed,
+                            settings.chunk_max_chars,
+                            settings.volume,
+                            &cancel_flag,
+                            &active_rate_steps,
+                            on_chunk,
+                        )?
+                    }
+                    None => {
+                        let mut runtime = local_runtime
+                            .lock()
+                            .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?;
+                        emit_job_started();
+                        runtime.stream_synthesize(
+                            &voice_id,
+                            &selected_preset,
+                            &trimmed,
+                            settings.chunk_max_chars,
+                            settings.volume,
+                            &cancel_flag,
+                            &active_rate_steps,
+                            on_chunk,
+                        )?
+                    }
+                };
 
                 let terminal = match stream_end {
                     LocalJobEndState::Done => "JOB_DONE",
@@ -1987,7 +2129,7 @@ async fn speak_and_stream(
                         "error": err.to_string(),
                     }),
                 );
-                emit_error(&app_clone, &format!("Local Kyutai stream failed: {err:#}"));
+                emit_error(&app_clone, &format!("Local speech stream failed: {err:#}"));
             }
 
             if let Ok(mut guard) = state_clone.lock() {
@@ -2004,10 +2146,7 @@ async fn speak_and_stream(
     }
 
     #[cfg(feature = "build-full")]
-    let (base_url, token) = {
-        let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(state)?;
 
     #[cfg(feature = "build-full")]
     {
@@ -2066,11 +2205,6 @@ async fn speak_and_stream(
     });
 
     Ok(speak_response.job_id)
-    }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err(anyhow!("Unsupported build variant for speak and stream"))
     }
 }
 
@@ -2190,9 +2324,8 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
         {
             let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
             guard.local_kyutai = Some(Arc::new(Mutex::new(runtime)));
-            guard.base_url = "local://kyutai".to_string();
+            guard.base_url = "local://runtime".to_string();
             guard.token.clear();
-            guard.port = 0;
             guard.data_dir = data_dir.to_string_lossy().to_string();
             guard.models_dir = models_dir.to_string_lossy().to_string();
             guard.hf_cache_dir = hf_cache_dir.to_string_lossy().to_string();
@@ -2262,7 +2395,6 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
         let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
         guard.child = Some(child);
         guard.token = token;
-        guard.port = port;
         guard.base_url = base_url;
         guard.data_dir = data_dir.to_string_lossy().to_string();
         guard.models_dir = models_dir.to_string_lossy().to_string();
@@ -2290,11 +2422,6 @@ async fn initialize_engine_if_needed(app: &AppHandle, state: &Arc<Mutex<EngineSt
 
     Ok(())
     }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err(anyhow!("Unsupported build variant for engine initialization"))
-    }
 }
 
 async fn shutdown_engine(state: &Arc<Mutex<EngineState>>) {
@@ -2310,6 +2437,8 @@ async fn shutdown_engine(state: &Arc<Mutex<EngineState>>) {
         guard.active_cancel_flag = None;
         guard.active_rate_steps = None;
         guard.local_kyutai = None;
+        guard.local_audio8 = None;
+        guard.audio8_device = None;
         guard.last_job_id = None;
         guard.suppressed_job_ids.clear();
         return;
@@ -2317,12 +2446,8 @@ async fn shutdown_engine(state: &Arc<Mutex<EngineState>>) {
 
     #[cfg(feature = "build-full")]
     {
-    let (base_url, token) = {
-        let guard = match state.lock() {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        (guard.base_url.clone(), guard.token.clone())
+    let Ok((base_url, token)) = engine_endpoint(state) else {
+        return;
     };
 
     if !base_url.is_empty() && !token.is_empty() {
@@ -2449,23 +2574,29 @@ async fn apply_kyutai_model_activation(state: &Arc<Mutex<EngineState>>) -> Resul
     )
     .await
     }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err(anyhow!("Unsupported build variant for Kyutai model activation"))
-    }
 }
 
 async fn engine_health_inner(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
     #[cfg(feature = "build-base")]
     {
-        let (runtime, selected_preset) = {
+        let (runtime, selected_preset, audio8_runtime) = {
             let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
             (
                 guard.local_kyutai.clone().ok_or_else(|| anyhow!("Kyutai Rust runtime is not initialized"))?,
                 guard.selected_kyutai_voice.clone(),
+                if guard.selected_model == MODEL_AUDIO8 {
+                    guard.local_audio8.clone()
+                } else {
+                    None
+                },
             )
         };
+        if let Some(audio8) = audio8_runtime {
+            let audio8_guard = audio8
+                .lock()
+                .map_err(|_| anyhow!("Audio8 runtime lock poisoned"))?;
+            return Ok(audio8_guard.health_payload());
+        }
         let runtime_guard = runtime
             .lock()
             .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?;
@@ -2474,30 +2605,16 @@ async fn engine_health_inner(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
 
     #[cfg(feature = "build-full")]
     {
-    let (base_url, token) = {
-        let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(state)?;
 
     request_json(Method::GET, &format!("{base_url}/v1/health"), &token, None).await
-    }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err(anyhow!("Unsupported build variant for engine health"))
     }
 }
 
 async fn engine_list_voices_inner(state: &Arc<Mutex<EngineState>>) -> Result<Value> {
     #[cfg(feature = "build-base")]
     {
-        let runtime = {
-            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-            guard
-                .local_kyutai
-                .clone()
-                .ok_or_else(|| anyhow!("Kyutai Rust runtime is not initialized"))?
-        };
+        let runtime = local_kyutai_runtime(state)?;
         let runtime_guard = runtime
             .lock()
             .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?;
@@ -2506,17 +2623,9 @@ async fn engine_list_voices_inner(state: &Arc<Mutex<EngineState>>) -> Result<Val
 
     #[cfg(feature = "build-full")]
     {
-    let (base_url, token) = {
-        let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
-        (guard.base_url.clone(), guard.token.clone())
-    };
+    let (base_url, token) = engine_endpoint(state)?;
 
     request_json(Method::GET, &format!("{base_url}/v1/voices"), &token, None).await
-    }
-
-    #[cfg(not(any(feature = "build-base", feature = "build-full")))]
-    {
-        Err(anyhow!("Unsupported build variant for voice list"))
     }
 }
 
@@ -2572,21 +2681,76 @@ async fn request_json(method: Method, url: &str, token: &str, body: Option<Value
         .with_context(|| format!("Failed to decode JSON response for {url}"))
 }
 
-fn build_variant_name() -> &'static str {
-    BUILD_VARIANT
-}
-
 fn qwen_modes_enabled() -> bool {
     cfg!(feature = "build-full")
 }
 
-fn model_options() -> Vec<ModelOption> {
+fn model_label(model: &str) -> &'static str {
+    match model {
+        MODEL_KYUTAI => "Kyutai Pocket TTS",
+        MODEL_AUDIO8 => "Audio8 TTS",
+        MODEL_CUSTOM => "Qwen CustomVoice",
+        MODEL_BASE => "Qwen Base",
+        _ => "Unknown model",
+    }
+}
+
+/// What the selected model is running on. Kyutai is CPU-only; Audio8 can put its decoder
+/// on a GPU; the sidecar build does not report it.
+fn device_label(state: &EngineState) -> String {
+    #[cfg(feature = "build-base")]
+    {
+        if state.selected_model == MODEL_AUDIO8 {
+            if let Some((device, _)) = state.audio8_device.as_ref() {
+                if device != "cpu" {
+                    return "GPU + CPU".to_string();
+                }
+            }
+        }
+        return "CPU".to_string();
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = state;
+        String::new()
+    }
+}
+
+fn audio8_supported() -> bool {
+    cfg!(feature = "build-base")
+}
+
+fn audio8_downloaded(state: &EngineState) -> bool {
+    #[cfg(feature = "build-base")]
+    {
+        return !state.models_dir.is_empty()
+            && is_audio8_model_dir(&audio8_model_dir(Path::new(&state.models_dir)));
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = state;
+        false
+    }
+}
+
+fn model_options(audio8_downloaded: bool) -> Vec<ModelOption> {
     let mut options = vec![ModelOption {
         id: MODEL_KYUTAI.to_string(),
         label: "Kyutai Pocket TTS".to_string(),
         status: "ready".to_string(),
         notes: format!("Main read-aloud path ({KYUTAI_REPO})"),
     }];
+
+    if audio8_supported() {
+        options.push(ModelOption {
+            id: MODEL_AUDIO8.to_string(),
+            label: "Audio8 TTS 0.1B (English/Chinese)".to_string(),
+            status: if audio8_downloaded { "ready" } else { "download required" }.to_string(),
+            notes: "Optional download with voice cloning (Edge0/audio8-TTS-0.1B-ONNX-INT8)".to_string(),
+        });
+    }
 
     if qwen_modes_enabled() {
         options.push(ModelOption {
@@ -2609,6 +2773,7 @@ fn model_options() -> Vec<ModelOption> {
 fn speaker_presets(model: &str) -> Vec<SpeakerPreset> {
     let presets: &[SpeakerPresetRow] = match model {
         MODEL_KYUTAI => &KYUTAI_VOICE_PRESETS,
+        MODEL_AUDIO8 => &AUDIO8_VOICE_PRESETS,
         _ if qwen_modes_enabled() => &QWEN_SPEAKER_PRESETS,
         _ => &KYUTAI_VOICE_PRESETS,
     };
@@ -2626,22 +2791,8 @@ fn speaker_presets(model: &str) -> Vec<SpeakerPreset> {
 fn active_speaker_for_model(state: &EngineState) -> String {
     match state.selected_model.as_str() {
         MODEL_KYUTAI => state.selected_kyutai_voice.clone(),
+        MODEL_AUDIO8 => AUDIO8_DEFAULT_SPEAKER.to_string(),
         _ => state.selected_qwen_speaker.clone(),
-    }
-}
-
-fn default_hotkey() -> String {
-    #[cfg(target_os = "macos")]
-    {
-        return "Option+S".to_string();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return "Alt+S".to_string();
-    }
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        "Ctrl+Shift+S".to_string()
     }
 }
 
@@ -2656,14 +2807,6 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
     })
 }
 
-fn normalize_hotkey(value: &str) -> Result<String> {
-    let normalized = value.trim().replace(' ', "");
-    if normalized.is_empty() {
-        return Err(anyhow!("Hotkey cannot be empty"));
-    }
-    Ok(normalized)
-}
-
 fn clamp_speak_rate(rate: f32) -> f32 {
     rate.clamp(0.25, 4.0)
 }
@@ -2671,49 +2814,6 @@ fn clamp_speak_rate(rate: f32) -> f32 {
 #[cfg(feature = "build-base")]
 fn rate_to_steps(rate: f32) -> u32 {
     (clamp_speak_rate(rate) * 4.0).round().clamp(1.0, 16.0) as u32
-}
-
-fn is_hotkey_os_reserved(hotkey: &str) -> bool {
-    let normalized = hotkey.trim().to_lowercase().replace(' ', "");
-    matches!(
-        normalized.as_str(),
-        "alt+space" | "cmd+space" | "command+space" | "meta+space" | "super+space"
-    )
-}
-
-fn load_saved_hotkey(app: &AppHandle) -> Option<String> {
-    let path = app_settings_path(app)?;
-    let body = std::fs::read_to_string(path).ok()?;
-    let parsed: AppSettingsFile = serde_json::from_str(&body).ok()?;
-    let candidate = parsed.hotkey?;
-    let normalized = normalize_hotkey(&candidate).ok()?;
-    if is_hotkey_os_reserved(&normalized) {
-        return None;
-    }
-    Some(normalized)
-}
-
-fn persist_hotkey(app: &AppHandle, hotkey: &str) -> Result<()> {
-    let path = app_settings_path(app).ok_or_else(|| anyhow!("Unable to resolve app settings path"))?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!("Failed to create app settings directory {}", parent.display())
-        })?;
-    }
-
-    let settings = AppSettingsFile {
-        hotkey: Some(hotkey.to_string()),
-    };
-    let serialized = serde_json::to_string_pretty(&settings)?;
-    std::fs::write(&path, serialized)
-        .with_context(|| format!("Failed to write app settings file {}", path.display()))?;
-    Ok(())
-}
-
-fn app_settings_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path_resolver()
-        .app_config_dir()
-        .map(|path| path.join(SETTINGS_FILE_NAME))
 }
 
 fn runtime_snapshot(state: &mut EngineState) -> (bool, Option<u32>) {
@@ -2867,17 +2967,8 @@ fn build_engine_launch_command(
     Ok((command, python_executable))
 }
 
-fn resolve_bundled_kyutai_model_dir(app: &AppHandle) -> Option<PathBuf> {
-    if let Ok(raw_override) = std::env::var("VOICEREADER_BUNDLED_KYUTAI_MODEL_DIR") {
-        let trimmed = raw_override.trim();
-        if !trimmed.is_empty() {
-            let override_path = PathBuf::from(trimmed);
-            if is_kyutai_model_dir(&override_path) {
-                return Some(normalize_windows_extended_path(override_path));
-            }
-        }
-    }
-
+/// The directories searched for files that ship with the app, most likely first.
+fn bundled_search_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -2901,6 +2992,22 @@ fn resolve_bundled_kyutai_model_dir(app: &AppHandle) -> Option<PathBuf> {
             }
         }
     }
+
+    dirs
+}
+
+fn resolve_bundled_kyutai_model_dir(app: &AppHandle) -> Option<PathBuf> {
+    if let Ok(raw_override) = std::env::var("VOICEREADER_BUNDLED_KYUTAI_MODEL_DIR") {
+        let trimmed = raw_override.trim();
+        if !trimmed.is_empty() {
+            let override_path = PathBuf::from(trimmed);
+            if is_kyutai_model_dir(&override_path) {
+                return Some(normalize_windows_extended_path(override_path));
+            }
+        }
+    }
+
+    let dirs = bundled_search_dirs(app);
 
     for dir in dirs {
         let candidate = dir
@@ -2935,29 +3042,7 @@ fn resolve_bundled_engine_executable(app: &AppHandle) -> Option<PathBuf> {
         }
     }
 
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for candidate in [
-                exe_dir.to_path_buf(),
-                exe_dir.join("binaries"),
-                exe_dir.join("resources"),
-                exe_dir.join("resources").join("binaries"),
-            ] {
-                if seen.insert(candidate.clone()) {
-                    dirs.push(candidate);
-                }
-            }
-        }
-    }
-    if let Some(resource_dir) = app.path_resolver().resource_dir() {
-        for candidate in [resource_dir.clone(), resource_dir.join("binaries")] {
-            if seen.insert(candidate.clone()) {
-                dirs.push(candidate);
-            }
-        }
-    }
+    let dirs = bundled_search_dirs(app);
 
     let sidecar_exe = sidecar_executable_filename();
     let sidecar_triple_dir = format!("tts-engine-{}", current_target_triple());
@@ -3123,6 +3208,22 @@ fn generate_token() -> String {
         .take(48)
         .map(char::from)
         .collect()
+}
+
+/// Where the sidecar listens and the token it expects.
+fn engine_endpoint(state: &Arc<Mutex<EngineState>>) -> Result<(String, String)> {
+    let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+    Ok((guard.base_url.clone(), guard.token.clone()))
+}
+
+/// The in-process Kyutai runtime, which also owns the saved voices.
+#[cfg(feature = "build-base")]
+fn local_kyutai_runtime(state: &Arc<Mutex<EngineState>>) -> Result<Arc<Mutex<LocalKyutaiRuntime>>> {
+    let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+    guard
+        .local_kyutai
+        .clone()
+        .ok_or_else(|| anyhow!("Kyutai Rust runtime is not initialized"))
 }
 
 fn emit_error(app: &AppHandle, message: &str) {

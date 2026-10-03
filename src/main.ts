@@ -1,135 +1,58 @@
 import { invoke } from "@tauri-apps/api/tauri";
 import { emit, listen } from "@tauri-apps/api/event";
+import {
+  decodePcm16Base64ToFloat32,
+  minPrebufferSeconds,
+  prependSilence,
+  rebufferSeconds,
+} from "./playback";
+import {
+  RATE_UPDATED_EVENT,
+  TOOLBAR_ACTION_EVENT,
+  TOOLBAR_HIDE_EVENT,
+  TOOLBAR_PAUSED_EVENT,
+  TOOLBAR_SHOW_EVENT,
+  TOOLBAR_SKIP_BACK_NOOP_EVENT,
+  clampRate,
+  formatRateNumber,
+  rateFromPayload,
+} from "./shared";
 import "./styles.css";
+import type {
+  Audio8DownloadResult,
+  Audio8ModelStatus,
+  BootstrapPayload,
+  CloneVoiceResult,
+  ComputeDevicePayload,
+  EngineStoragePathsPayload,
+  HotkeyResult,
+  JobCancelRequestedPayload,
+  JobStartedPayload,
+  JsonValue,
+  ModelDownloadProgressPayload,
+  ModelOption,
+  ModelUpdatePayload,
+  PrefetchModelsResult,
+  QueuedPlayback,
+  RuntimeStatusPayload,
+  SpeakerPreset,
+  StoredVoice,
+  ThemeMode,
+  ToolbarActionPayload,
+  ToolbarPausePayload,
+  ToolbarShowPayload,
+  UnifiedVoiceOption,
+} from "./types";
 
-type JsonValue = Record<string, unknown>;
-
-type SpeakerPreset = {
-  id: string;
-  description: string;
-  native_language: string;
-};
-
-type ModelOption = {
-  id: string;
-  label: string;
-  status: string;
-  notes: string;
-};
-
-type BootstrapPayload = {
-  hotkey: string;
-  selected_voice_id: string;
-  selected_model: string;
-  selected_speaker: string;
-  startup_error?: string | null;
-  build_variant: string;
-  qwen_enabled: boolean;
-  models: ModelOption[];
-  preset_speakers: SpeakerPreset[];
-  health: JsonValue;
-  voices: JsonValue;
-};
-
-type RuntimeStatusPayload = {
-  running: boolean;
-  pid: number | null;
-  base_url: string;
-  selected_voice_id: string;
-  selected_model: string;
-  selected_speaker: string;
-};
-
-type ModelUpdatePayload = {
-  selected_model: string;
-  selected_speaker: string;
-  preset_speakers: SpeakerPreset[];
-  applied: boolean;
-  message: string;
-  health: JsonValue;
-};
-
-type JobCancelRequestedPayload = {
-  job_id: string;
-};
-
-type JobStartedPayload = {
-  job_id: string;
-  ws_url: string;
-  source: string;
-  source_window?: string;
-  rate?: number;
-};
-
-type ToolbarActionPayload = {
-  action: "pause-toggle" | "skip-back" | "skip-forward" | "stop";
-};
-
-type ToolbarShowPayload = {
-  job_id: string;
-  source_window: string;
-  rate: number;
-};
-
-type ToolbarPausePayload = {
-  paused: boolean;
-};
-
-type CloneVoiceResult = {
-  ok: boolean;
-  message: string;
-  voice_id: string;
-};
-
-type HotkeyResult = {
-  ok: boolean;
-  message: string;
-  hotkey: string;
-};
-
-type StoredVoice = {
-  voice_id: string;
-  display_name: string;
-  created_at?: string;
-  tts_model_id?: string;
-  language_hint?: string | null;
-  description?: string | null;
-};
-
-type UnifiedVoiceOption = {
-  value: string;
-  label: string;
-  kind: "preset" | "stored";
-  id: string;
-};
-
-type EngineStoragePathsPayload = {
-  data_dir: string;
-  models_dir: string;
-  hf_cache_dir: string;
-};
-
-type PrefetchModelsResult = {
-  ok: boolean;
-  message: string;
-  mode: string;
-  downloaded: string[];
-  data_dir: string;
-  models_dir: string;
-  hf_cache_dir: string;
-};
-
-type QueuedPlayback = {
-  buffers: AudioBuffer[];
-  bufferedSeconds: number;
-  started: boolean;
-  terminal: boolean;
-};
+const AUDIO8_MODEL_ID = "audio8_tts_0_1b";
+const CLONE_REF_TEXT_PLACEHOLDER_DEFAULT = "Optional transcript of the uploaded sample";
+const CLONE_REF_TEXT_PLACEHOLDER_AUDIO8 = "Exact transcript of the uploaded sample (required for Audio8)";
+const CLONE_HINT_DEFAULT = "Upload a short, clean reference clip to create and save a cloned voice profile.";
+const CLONE_HINT_AUDIO8 =
+  "Audio8 needs a 0.5 to 30 second clean reference clip plus its exact transcript to create and save a cloned voice profile.";
 
 const VOICE_ORDINAL_STORAGE_KEY = "voicereader.saved_voice_ordinals.v1";
 const THEME_STORAGE_KEY = "voicereader.theme.v1";
-
-type ThemeMode = "dark" | "light";
 
 function readThemePreference(): ThemeMode {
   try {
@@ -150,7 +73,7 @@ if (!app) {
 
 app.innerHTML = `
   <main class="shell">
-    <header class="hero compact">
+    <header class="hero">
       <div class="hero-left">
         <h1>VOICEREADER DESKTOP</h1>
         <button class="runtime runtime-btn" id="runtime-pill" type="button" title="Open engine diagnostics">Engine: checking...</button>
@@ -227,8 +150,8 @@ app.innerHTML = `
     <section class="panel" id="voices-panel">
       <div class="grid single">
         <article class="card">
-          <h2>Clone Voice (Kyutai)</h2>
-          <p class="hint">Upload a short, clean reference clip to create and save a cloned voice profile.</p>
+          <h2>Clone Voice</h2>
+          <p class="hint" id="clone-hint">Upload a short, clean reference clip to create and save a cloned voice profile.</p>
           <div class="clone-grid">
             <label>
               Voice Name
@@ -239,7 +162,7 @@ app.innerHTML = `
               <input id="clone-language" placeholder="en" value="en" />
             </label>
             <label class="span-2">
-              Reference Text (optional)
+              Reference Text (optional for Kyutai, required for Audio8)
               <textarea id="clone-ref-text" rows="2" placeholder="Optional transcript of the uploaded sample"></textarea>
             </label>
             <label class="span-2">
@@ -285,6 +208,26 @@ app.innerHTML = `
             <button id="download-qwen-all-btn" class="accent">Download Both Qwen Models</button>
           </div>
           <p class="hint" id="model-download-status">No download in progress.</p>
+        </article>
+        <article class="card is-hidden" id="audio8-card">
+          <h2>Audio8 TTS (optional download)</h2>
+          <p class="hint">Multilingual model with voice cloning, about 860 MB. Runs on the CPU, and uses a GPU for audio decoding when one helps. English and Chinese are the primary languages.</p>
+          <div class="button-row engine-actions">
+            <button id="download-audio8-btn" class="accent">Download Audio8 model</button>
+          </div>
+          <p class="hint" id="audio8-status">Checking Audio8 model status...</p>
+          <progress id="audio8-progress" class="download-progress is-hidden" max="100" value="0"></progress>
+          <p class="hint mono is-hidden" id="audio8-progress-text"></p>
+        </article>
+        <article class="card is-hidden" id="compute-card">
+          <h2>Compute Device</h2>
+          <p class="hint">Where the heavy part of a model runs. Auto uses the GPU when one is available and faster than the CPU. Choose CPU to keep the GPU free for other work.</p>
+          <div class="button-row engine-actions">
+            <button class="compute-btn" data-compute="auto">Auto</button>
+            <button class="compute-btn" data-compute="gpu">GPU</button>
+            <button class="compute-btn" data-compute="cpu">CPU</button>
+          </div>
+          <p class="hint" id="compute-status"></p>
         </article>
         <article class="card">
           <h2>Engine Health</h2>
@@ -333,6 +276,15 @@ const modelDownloadStatus = document.querySelector<HTMLParagraphElement>("#model
 const downloadQwenCustomBtn = document.querySelector<HTMLButtonElement>("#download-qwen-custom-btn")!;
 const downloadQwenBaseBtn = document.querySelector<HTMLButtonElement>("#download-qwen-base-btn")!;
 const downloadQwenAllBtn = document.querySelector<HTMLButtonElement>("#download-qwen-all-btn")!;
+const computeCard = document.querySelector<HTMLElement>("#compute-card")!;
+const computeStatus = document.querySelector<HTMLParagraphElement>("#compute-status")!;
+const computeButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".compute-btn"));
+const audio8Card = document.querySelector<HTMLElement>("#audio8-card")!;
+const audio8Status = document.querySelector<HTMLParagraphElement>("#audio8-status")!;
+const audio8Progress = document.querySelector<HTMLProgressElement>("#audio8-progress")!;
+const audio8ProgressText = document.querySelector<HTMLParagraphElement>("#audio8-progress-text")!;
+const downloadAudio8Btn = document.querySelector<HTMLButtonElement>("#download-audio8-btn")!;
+const cloneHint = document.querySelector<HTMLParagraphElement>("#clone-hint")!;
 
 const rateInput = document.querySelector<HTMLInputElement>("#rate")!;
 const volumeInput = document.querySelector<HTMLInputElement>("#volume")!;
@@ -354,17 +306,19 @@ const queuedPlaybackByJob = new Map<string, QueuedPlayback>();
 let hasOutputPrimed = false;
 let hasStartupSilenceInjected = false;
 let currentPresetSpeakers: SpeakerPreset[] = [];
-let currentSelectedSpeaker = "";
 let currentSelectedModel = "";
 let latestVoicesPayload: JsonValue = {};
 let voiceOptionMap = new Map<string, UnifiedVoiceOption>();
 const presetDescriptionOverrides = new Map<string, string>();
 let savedVoiceOrdinals = loadSavedVoiceOrdinals();
 let qwenEnabled = true;
+let audio8Supported = false;
+let audio8Downloaded = false;
+let audio8Downloading = false;
+let modelSwitchInFlight = false;
 let pendingHotkeyCapture = "";
 let cloneStatusTimeoutId: number | null = null;
 let toolbarPaused = false;
-let activeJobSourceWindow = "";
 let activeToolbarJobId = "";
 
 applyTheme(currentTheme, false);
@@ -391,6 +345,17 @@ function showCloneStatus(message: string, level: "info" | "success" | "error", a
     cloneStatus.classList.add("is-hidden");
     cloneStatusTimeoutId = null;
   }, autoHideMs);
+}
+
+function applyCloneFormForModel(modelId: string): void {
+  const isAudio8 = modelId === AUDIO8_MODEL_ID;
+  cloneRefTextInput.placeholder = isAudio8 ? CLONE_REF_TEXT_PLACEHOLDER_AUDIO8 : CLONE_REF_TEXT_PLACEHOLDER_DEFAULT;
+  cloneHint.textContent = isAudio8 ? CLONE_HINT_AUDIO8 : CLONE_HINT_DEFAULT;
+}
+
+function setActiveModel(modelId: string): void {
+  currentSelectedModel = modelId;
+  applyCloneFormForModel(modelId);
 }
 
 function themeToggleAriaLabel(theme: ThemeMode): string {
@@ -597,7 +562,16 @@ function encodeJson(value: unknown): string {
 function renderRuntimeStatus(status: RuntimeStatusPayload): void {
   if (status.running) {
     runtimePill.className = "runtime ok";
-    runtimePill.textContent = `Engine: running (pid=${String(status.pid ?? "n/a")}) @ ${status.base_url}`;
+    // A local (in-process) runtime has no process id or address worth showing; say which
+    // model is active and what it runs on instead.
+    const parts = [status.pid != null ? `Engine: running (pid=${status.pid}) @ ${status.base_url}` : "Engine: running"];
+    if (status.model_label) {
+      parts.push(status.model_label);
+    }
+    if (status.device_label) {
+      parts.push(status.device_label);
+    }
+    runtimePill.textContent = parts.join(" · ");
     runtimeWasDown = false;
     return;
   }
@@ -621,12 +595,16 @@ function parseStoredVoices(voicesPayload: JsonValue): StoredVoice[] {
     .map((raw) => ({
       voice_id: String((raw as Record<string, unknown>).voice_id ?? ""),
       display_name: String((raw as Record<string, unknown>).display_name ?? "Unknown"),
-      created_at: String((raw as Record<string, unknown>).created_at ?? ""),
-      tts_model_id: String((raw as Record<string, unknown>).tts_model_id ?? ""),
       language_hint: String((raw as Record<string, unknown>).language_hint ?? ""),
       description: String((raw as Record<string, unknown>).description ?? ""),
     }))
     .filter((item) => item.voice_id.length > 0);
+}
+
+function orderedSavedVoices(): StoredVoice[] {
+  const storedVoices = parseStoredVoices(latestVoicesPayload).filter((voice) => voice.voice_id !== "0");
+  syncSavedVoiceOrdinals(storedVoices);
+  return [...storedVoices].sort((a, b) => savedVoiceOrdinal(a.voice_id) - savedVoiceOrdinal(b.voice_id));
 }
 
 function buildUnifiedVoiceOptions(): UnifiedVoiceOption[] {
@@ -641,14 +619,9 @@ function buildUnifiedVoiceOptions(): UnifiedVoiceOption[] {
     });
   }
 
-  const storedVoices = parseStoredVoices(latestVoicesPayload).filter((voice) => voice.voice_id !== "0");
-  syncSavedVoiceOrdinals(storedVoices);
-  const orderedSavedVoices = [...storedVoices].sort(
-    (a, b) => savedVoiceOrdinal(a.voice_id) - savedVoiceOrdinal(b.voice_id),
-  );
-
-  for (let idx = 0; idx < orderedSavedVoices.length; idx += 1) {
-    const voice = orderedSavedVoices[idx];
+  const savedVoices = orderedSavedVoices();
+  for (let idx = 0; idx < savedVoices.length; idx += 1) {
+    const voice = savedVoices[idx];
     const ordinal = savedVoiceOrdinal(voice.voice_id) || idx + 1;
     const language = voice.language_hint ? ` [${voice.language_hint}]` : "";
     options.push({
@@ -715,7 +688,7 @@ function selectedRateSetting(): number {
   if (!Number.isFinite(parsed)) {
     return 1;
   }
-  return Math.min(4, Math.max(0.25, parsed));
+  return clampRate(parsed);
 }
 
 function sourceLabelFromWindowTitle(sourceWindow: string): string {
@@ -731,22 +704,20 @@ function sourceLabelFromWindowTitle(sourceWindow: string): string {
 }
 
 function showToolbar(sourceWindow: string, rate: number): void {
-  activeJobSourceWindow = sourceWindow.trim();
   toolbarPaused = false;
   const payload: ToolbarShowPayload = {
     job_id: activeToolbarJobId,
-    source_window: sourceLabelFromWindowTitle(activeJobSourceWindow),
+    source_window: sourceLabelFromWindowTitle(sourceWindow),
     rate,
   };
-  void emit("voicereader:toolbar-show", payload);
-  void emit("voicereader:toolbar-paused", { paused: false } satisfies ToolbarPausePayload);
+  void emit(TOOLBAR_SHOW_EVENT, payload);
+  void emit(TOOLBAR_PAUSED_EVENT, { paused: false } satisfies ToolbarPausePayload);
 }
 
 function hideToolbar(): void {
   toolbarPaused = false;
-  activeJobSourceWindow = "";
   activeToolbarJobId = "";
-  void emit("voicereader:toolbar-hide", {});
+  void emit(TOOLBAR_HIDE_EVENT, {});
 }
 
 async function togglePlaybackPause(): Promise<void> {
@@ -762,22 +733,17 @@ async function togglePlaybackPause(): Promise<void> {
     }
     toolbarPaused = true;
   }
-  void emit("voicereader:toolbar-paused", { paused: toolbarPaused } satisfies ToolbarPausePayload);
+  void emit(TOOLBAR_PAUSED_EVENT, { paused: toolbarPaused } satisfies ToolbarPausePayload);
 }
 
-function minPrebufferSecondsForRate(): number {
-  // Faster playback drains buffered audio sooner; hold more before starting.
-  const rate = selectedRateSetting();
-  const base = 0.24;
-  if (rate <= 1) {
-    return base;
-  }
-  if (rate <= 2) {
-    const scaled = base + (rate - 1) * 0.45;
-    return Math.min(0.85, Math.max(base, scaled));
-  }
-  const highRateScaled = 0.85 + (rate - 2) * 1.0;
-  return Math.min(2.0, Math.max(0.85, highRateScaled));
+function playbackIsIdle(): boolean {
+  return activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0;
+}
+
+function playbackHasRunDry(): boolean {
+  // Everything scheduled so far has already finished playing. While paused the audio
+  // clock is frozen, so a pause is never mistaken for running dry.
+  return audioContext !== null && playbackCursor <= audioContext.currentTime;
 }
 
 function ensureQueuedPlayback(jobId: string): QueuedPlayback {
@@ -790,6 +756,7 @@ function ensureQueuedPlayback(jobId: string): QueuedPlayback {
     bufferedSeconds: 0,
     started: false,
     terminal: false,
+    rebufferCount: 0,
   };
   queuedPlaybackByJob.set(jobId, created);
   return created;
@@ -831,7 +798,7 @@ function scheduleAudioBuffer(jobId: string, buffer: AudioBuffer): void {
     if (jobId !== activeToolbarJobId) {
       return;
     }
-    if (activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0) {
+    if (playbackIsIdle()) {
       resetPlaybackCursor();
       hideToolbar();
     }
@@ -850,9 +817,21 @@ function flushQueuedPlayback(jobId: string, forceStart: boolean): void {
     return;
   }
 
+  if (queued.started && !forceStart && !queued.terminal && queued.buffers.length > 0 && playbackHasRunDry()) {
+    // Audio ran out before this chunk arrived. Playing each late chunk as it lands
+    // sounds choppy, so hold playback and refill the buffer first.
+    queued.started = false;
+    queued.rebufferCount += 1;
+    log(
+      `playback_rebuffer job_id=${jobId} count=${queued.rebufferCount} wait_for=${rebufferSeconds(selectedRateSetting(), queued.rebufferCount).toFixed(2)}s`,
+    );
+  }
+
   if (!queued.started) {
-    const minPrebufferSeconds = minPrebufferSecondsForRate();
-    if (!forceStart && queued.bufferedSeconds < minPrebufferSeconds) {
+    const rate = selectedRateSetting();
+    const requiredSeconds =
+      queued.rebufferCount > 0 ? rebufferSeconds(rate, queued.rebufferCount) : minPrebufferSeconds(rate);
+    if (!forceStart && queued.bufferedSeconds < requiredSeconds) {
       return;
     }
     queued.started = true;
@@ -870,33 +849,6 @@ function flushQueuedPlayback(jobId: string, forceStart: boolean): void {
   if (queued.terminal && queued.buffers.length === 0) {
     queuedPlaybackByJob.delete(jobId);
   }
-}
-
-function prependSilence(samples: Float32Array, sampleRate: number, ms: number): Float32Array {
-  const silenceFrames = Math.max(0, Math.round((sampleRate * ms) / 1000));
-  if (silenceFrames === 0) {
-    return samples;
-  }
-  const withSilence = new Float32Array(silenceFrames + samples.length);
-  withSilence.set(samples, silenceFrames);
-  return withSilence;
-}
-
-function decodePcm16Base64ToFloat32(base64Data: string): Float32Array {
-  const binary = atob(base64Data);
-  const bytes = new Uint8Array(binary.length);
-  for (let idx = 0; idx < binary.length; idx += 1) {
-    bytes[idx] = binary.charCodeAt(idx);
-  }
-
-  const view = new DataView(bytes.buffer);
-  const sampleCount = Math.floor(bytes.byteLength / 2);
-  const output = new Float32Array(sampleCount);
-  for (let idx = 0; idx < sampleCount; idx += 1) {
-    const value = view.getInt16(idx * 2, true);
-    output[idx] = value / 32768;
-  }
-  return output;
 }
 
 async function fileToBase64(file: File): Promise<string> {
@@ -991,7 +943,7 @@ function skipPlaybackForward(): void {
   stopActiveSources();
   resetPlaybackCursor();
   flushQueuedPlayback(activeToolbarJobId, true);
-  if (activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0) {
+  if (playbackIsIdle()) {
     hideToolbar();
   }
 }
@@ -1011,8 +963,7 @@ async function refreshHealthAndVoices(): Promise<void> {
 
   healthJson.textContent = encodeJson(health);
   latestVoicesPayload = voices;
-  currentSelectedSpeaker = runtime.selected_speaker;
-  currentSelectedModel = runtime.selected_model;
+  setActiveModel(runtime.selected_model);
   if (Array.from(modelSelect.options).some((option) => option.value === runtime.selected_model)) {
     modelSelect.value = runtime.selected_model;
   }
@@ -1020,10 +971,13 @@ async function refreshHealthAndVoices(): Promise<void> {
   renderVoicesTable();
 }
 
+function renderStoragePaths(paths: EngineStoragePathsPayload): void {
+  modelStoragePaths.textContent = `Data: ${paths.data_dir} | Models: ${paths.models_dir} | HF cache: ${paths.hf_cache_dir}`;
+}
+
 async function refreshEngineStoragePaths(): Promise<void> {
   try {
-    const paths = await invoke<EngineStoragePathsPayload>("engine_storage_paths");
-    modelStoragePaths.textContent = `Data: ${paths.data_dir} | Models: ${paths.models_dir} | HF cache: ${paths.hf_cache_dir}`;
+    renderStoragePaths(await invoke<EngineStoragePathsPayload>("engine_storage_paths"));
   } catch (error) {
     modelStoragePaths.textContent = `Storage: unavailable (${String(error)})`;
   }
@@ -1038,6 +992,117 @@ function applyBuildCapabilities(payload: BootstrapPayload): void {
   if (!qwenEnabled) {
     modelDownloadStatus.textContent = "Qwen downloads are disabled in Base build.";
   }
+
+  audio8Supported = payload.audio8_supported === true;
+  audio8Downloaded = audio8Supported && payload.audio8_downloaded === true;
+  audio8Card.classList.toggle("is-hidden", !audio8Supported);
+  renderAudio8Card();
+}
+
+function renderAudio8Card(): void {
+  if (!audio8Supported) {
+    return;
+  }
+  if (audio8Downloading) {
+    downloadAudio8Btn.disabled = true;
+    return;
+  }
+  if (audio8Downloaded) {
+    downloadAudio8Btn.disabled = true;
+    downloadAudio8Btn.textContent = "Downloaded";
+    audio8Status.textContent = "Audio8 TTS is downloaded and ready. Select it from Model Mode on the Reader tab.";
+    audio8Progress.classList.add("is-hidden");
+    audio8ProgressText.classList.add("is-hidden");
+    return;
+  }
+  downloadAudio8Btn.disabled = false;
+  downloadAudio8Btn.textContent = "Download Audio8 model";
+  if (!audio8Status.textContent || audio8Status.textContent.startsWith("Checking")) {
+    audio8Status.textContent = "Not downloaded yet.";
+  }
+}
+
+function formatMegabytes(bytes: number): number {
+  return Math.round(bytes / (1024 * 1024));
+}
+
+function renderAudio8DownloadProgress(payload: ModelDownloadProgressPayload): void {
+  const total = Number(payload.total_bytes) || 0;
+  const done = Number(payload.downloaded_bytes) || 0;
+  const percent = total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0;
+  audio8Progress.classList.remove("is-hidden");
+  audio8ProgressText.classList.remove("is-hidden");
+  audio8Progress.value = percent;
+  const fileInfo = payload.file ? ` \u2014 ${payload.file} (${payload.file_index}/${payload.file_count})` : "";
+  audio8ProgressText.textContent = `${percent}% (${formatMegabytes(done)} / ${formatMegabytes(total)} MB)${fileInfo}`;
+}
+
+async function refreshAudio8Status(): Promise<void> {
+  if (!audio8Supported) {
+    return;
+  }
+  try {
+    const status = await invoke<Audio8ModelStatus>("audio8_model_status");
+    audio8Supported = status.supported;
+    audio8Downloaded = status.supported && status.downloaded;
+    audio8Card.classList.toggle("is-hidden", !audio8Supported);
+    if (!audio8Downloaded && !audio8Downloading) {
+      const sizeMb = formatMegabytes(status.download_size_bytes);
+      audio8Status.textContent = sizeMb > 0 ? `Not downloaded yet (about ${sizeMb} MB).` : "Not downloaded yet.";
+    }
+    renderAudio8Card();
+  } catch (error) {
+    log(`Audio8 status check failed: ${String(error)}`, "error");
+  }
+}
+
+function renderComputeDevice(payload: ComputeDevicePayload): void {
+  computeCard.classList.toggle("is-hidden", !payload.gpu_supported);
+  for (const button of computeButtons) {
+    button.classList.toggle("accent", button.dataset.compute === payload.preference);
+  }
+  if (!payload.model_loaded || !payload.active_device) {
+    computeStatus.textContent =
+      "Takes effect when Audio8 TTS is loaded. Kyutai Pocket TTS always runs on the CPU.";
+    return;
+  }
+  const where = payload.active_device === "cpu" ? "the CPU" : `the GPU (${payload.active_device})`;
+  computeStatus.textContent = `Audio8 is decoding audio on ${where}${payload.note ? ` — ${payload.note}` : ""}.`;
+}
+
+async function refreshComputeDevice(): Promise<void> {
+  try {
+    renderComputeDevice(await invoke<ComputeDevicePayload>("get_compute_device"));
+  } catch (error) {
+    log(`Compute device status check failed: ${String(error)}`, "error");
+  }
+}
+
+async function chooseComputeDevice(preference: string): Promise<void> {
+  for (const button of computeButtons) {
+    button.disabled = true;
+  }
+  computeStatus.textContent = "Applying... a loaded model is reloaded, which takes a few seconds.";
+  try {
+    const payload = await invoke<ComputeDevicePayload>("set_compute_device", { preference });
+    renderComputeDevice(payload);
+    log(`Compute device set to ${payload.preference}${payload.active_device ? ` (now using ${payload.active_device})` : ""}`);
+    await refreshHealthAndVoices();
+  } catch (error) {
+    computeStatus.textContent = `Could not change compute device: ${String(error)}`;
+    log(`Failed to set compute device: ${String(error)}`, "error");
+    await refreshComputeDevice();
+  } finally {
+    for (const button of computeButtons) {
+      button.disabled = false;
+    }
+  }
+}
+
+async function refreshModelOptionsFromBootstrap(): Promise<void> {
+  const payload = await invoke<BootstrapPayload>("app_bootstrap");
+  applyBuildCapabilities(payload);
+  renderModelOptions(payload.models, currentSelectedModel || payload.selected_model);
 }
 
 function setModelDownloadBusy(isBusy: boolean): void {
@@ -1059,13 +1124,9 @@ function renderModelOptions(models: ModelOption[], selectedModel: string): void 
 
 function renderVoicesTable(): void {
   voicesTable.innerHTML = "";
-  const storedVoices = parseStoredVoices(latestVoicesPayload).filter((voice) => voice.voice_id !== "0");
-  syncSavedVoiceOrdinals(storedVoices);
-  const orderedSavedVoices = [...storedVoices].sort(
-    (a, b) => savedVoiceOrdinal(a.voice_id) - savedVoiceOrdinal(b.voice_id),
-  );
+  const savedVoices = orderedSavedVoices();
 
-  const hasRows = currentPresetSpeakers.length > 0 || storedVoices.length > 0;
+  const hasRows = currentPresetSpeakers.length > 0 || savedVoices.length > 0;
   if (!hasRows) {
     const row = document.createElement("tr");
     row.innerHTML = `<td colspan="6" class="hint">No voices available.</td>`;
@@ -1113,8 +1174,8 @@ function renderVoicesTable(): void {
     voicesTable.append(row);
   }
 
-  for (let idx = 0; idx < orderedSavedVoices.length; idx += 1) {
-    const voice = orderedSavedVoices[idx];
+  for (let idx = 0; idx < savedVoices.length; idx += 1) {
+    const voice = savedVoices[idx];
     const ordinal = savedVoiceOrdinal(voice.voice_id) || idx + 1;
     const row = document.createElement("tr");
 
@@ -1221,8 +1282,7 @@ async function bootstrap(): Promise<void> {
   setHotkeyEditMode(false);
   renderModelOptions(payload.models, payload.selected_model);
   currentPresetSpeakers = payload.preset_speakers;
-  currentSelectedSpeaker = payload.selected_speaker;
-  currentSelectedModel = payload.selected_model;
+  setActiveModel(payload.selected_model);
 
   healthJson.textContent = encodeJson(payload.health);
   latestVoicesPayload = payload.voices;
@@ -1240,10 +1300,29 @@ async function bootstrap(): Promise<void> {
       log("Engine sidecar started and handshake completed");
     }
   }
-  log(`Build variant: ${payload.build_variant}${payload.qwen_enabled ? " (Qwen enabled)" : " (Kyutai only)"}`);
+  const buildSuffix = payload.qwen_enabled
+    ? " (Qwen enabled)"
+    : payload.audio8_supported
+      ? " (Kyutai + optional Audio8)"
+      : " (Kyutai only)";
+  log(`Build variant: ${payload.build_variant}${buildSuffix}`);
 
   await pollRuntimeStatus();
   await refreshEngineStoragePaths();
+  await refreshAudio8Status();
+  await refreshComputeDevice();
+}
+
+async function applyModelUpdate(result: ModelUpdatePayload): Promise<void> {
+  currentPresetSpeakers = result.preset_speakers;
+  setActiveModel(result.selected_model);
+  await invoke("set_selected_voice", { voiceId: "0" });
+  await refreshHealthAndVoices();
+}
+
+async function invokeAndLog(command: string, fallbackMessage: string, args?: Record<string, unknown>): Promise<void> {
+  const response = await invoke<Record<string, unknown>>(command, args);
+  log(String(response.message ?? fallbackMessage));
 }
 
 async function bindActions(): Promise<void> {
@@ -1257,13 +1336,31 @@ async function bindActions(): Promise<void> {
   });
 
   modelSelect.addEventListener("change", async () => {
-    const result = await invoke<ModelUpdatePayload>("select_model", { model: modelSelect.value });
-    currentPresetSpeakers = result.preset_speakers;
-    currentSelectedSpeaker = result.selected_speaker;
-    currentSelectedModel = result.selected_model;
-    await invoke("set_selected_voice", { voiceId: "0" });
-    await refreshHealthAndVoices();
-    log(result.message ?? "Model updated");
+    if (modelSwitchInFlight) {
+      return;
+    }
+    const requestedModel = modelSelect.value;
+    const previousModel = currentSelectedModel;
+    modelSwitchInFlight = true;
+    modelSelect.disabled = true;
+    if (requestedModel === AUDIO8_MODEL_ID) {
+      log("Loading Audio8 TTS... the first load can take several seconds.");
+    }
+    try {
+      const result = await invoke<ModelUpdatePayload>("select_model", { model: requestedModel });
+      await applyModelUpdate(result);
+      await refreshComputeDevice();
+      log(result.message ?? "Model updated");
+    } catch (error) {
+      log(`Failed to select model: ${String(error)}`, "error");
+      if (previousModel && Array.from(modelSelect.options).some((option) => option.value === previousModel)) {
+        modelSelect.value = previousModel;
+      }
+      applyCloneFormForModel(currentSelectedModel);
+    } finally {
+      modelSwitchInFlight = false;
+      modelSelect.disabled = false;
+    }
   });
 
   hotkeyEditBtn.addEventListener("click", () => {
@@ -1317,11 +1414,7 @@ async function bindActions(): Promise<void> {
       const result = await invoke<ModelUpdatePayload>("set_preset_speaker", {
         speakerId: selected.id,
       });
-      currentPresetSpeakers = result.preset_speakers;
-      currentSelectedSpeaker = result.selected_speaker;
-      currentSelectedModel = result.selected_model;
-      await invoke("set_selected_voice", { voiceId: "0" });
-      await refreshHealthAndVoices();
+      await applyModelUpdate(result);
       log(`Selected built-in voice ${selected.id}`);
       return;
     }
@@ -1369,6 +1462,11 @@ async function bindActions(): Promise<void> {
     const displayName = cloneDisplayNameInput.value.trim() || selectedFile.name.replace(/\.[^/.]+$/, "");
     const language = cloneLanguageInput.value.trim();
     const refText = cloneRefTextInput.value.trim();
+    if (currentSelectedModel === AUDIO8_MODEL_ID && !refText) {
+      showCloneStatus("Audio8 needs the exact transcript of the reference clip. Fill in Reference Text first.", "error");
+      log("Audio8 voice cloning requires the exact reference transcript", "error");
+      return;
+    }
 
     cloneVoiceBtn.disabled = true;
     showCloneStatus("Cloning voice... this can take a few seconds.", "info", 0);
@@ -1400,6 +1498,7 @@ async function bindActions(): Promise<void> {
   restartBtn.addEventListener("click", async () => {
     const response = await invoke<Record<string, unknown>>("restart_engine");
     await refreshHealthAndVoices();
+    await refreshComputeDevice();
     await refreshEngineStoragePaths();
     await pollRuntimeStatus();
     log(String(response.message ?? "Engine restarted"));
@@ -1416,7 +1515,7 @@ async function bindActions(): Promise<void> {
     try {
       const result = await invoke<PrefetchModelsResult>("prefetch_models", { mode });
       modelDownloadStatus.textContent = `Download complete: ${result.downloaded.join(", ")}`;
-      modelStoragePaths.textContent = `Data: ${result.data_dir} | Models: ${result.models_dir} | HF cache: ${result.hf_cache_dir}`;
+      renderStoragePaths(result);
       log(result.message || `Model prefetch complete (${mode})`);
     } catch (error) {
       modelDownloadStatus.textContent = `Download failed: ${String(error)}`;
@@ -1436,28 +1535,64 @@ async function bindActions(): Promise<void> {
     await runModelPrefetch("qwen_all");
   });
 
+  for (const button of computeButtons) {
+    button.addEventListener("click", async () => {
+      await chooseComputeDevice(button.dataset.compute ?? "auto");
+    });
+  }
+
+  downloadAudio8Btn.addEventListener("click", async () => {
+    if (!audio8Supported || audio8Downloading || audio8Downloaded) {
+      return;
+    }
+    audio8Downloading = true;
+    downloadAudio8Btn.disabled = true;
+    audio8Status.textContent = "Downloading Audio8 model... this can take several minutes.";
+    audio8Progress.value = 0;
+    audio8Progress.classList.remove("is-hidden");
+    audio8ProgressText.classList.remove("is-hidden");
+    audio8ProgressText.textContent = "Starting download...";
+    log("Audio8 model download started");
+    try {
+      const result = await invoke<Audio8DownloadResult>("download_audio8_model");
+      audio8Downloading = false;
+      audio8Downloaded = true;
+      log(result.message || "Audio8 model download finished");
+      try {
+        await refreshModelOptionsFromBootstrap();
+      } catch (refreshError) {
+        log(`Failed to refresh model list: ${String(refreshError)}`, "error");
+      }
+      renderAudio8Card();
+      if (result.message) {
+        audio8Status.textContent = result.message;
+      }
+    } catch (error) {
+      audio8Downloading = false;
+      audio8Status.textContent = `Download failed: ${String(error)}. Click the button to retry; partial downloads resume.`;
+      downloadAudio8Btn.disabled = false;
+      log(`Audio8 model download failed: ${String(error)}`, "error");
+    }
+  });
+
   readBtn.addEventListener("click", async () => {
     await applySpeakSettings();
-    const response = await invoke<Record<string, unknown>>("trigger_read_selection");
-    log(String(response.message ?? "Triggered read-selection"));
+    await invokeAndLog("trigger_read_selection", "Triggered read-selection");
   });
 
   cancelBtn.addEventListener("click", async () => {
     stopAllPlayback();
-    const response = await invoke<Record<string, unknown>>("cancel_active_job");
-    log(String(response.message ?? "Cancel requested"));
+    await invokeAndLog("cancel_active_job", "Cancel requested");
   });
 
   speakBtn.addEventListener("click", async () => {
     await applySpeakSettings();
-    const text = speakText.value;
-    const response = await invoke<Record<string, unknown>>("speak_text", { text });
-    log(String(response.message ?? "Speak requested"));
+    await invokeAndLog("speak_text", "Speak requested", { text: speakText.value });
   });
 }
 
 async function bindEvents(): Promise<void> {
-  await listen<ToolbarActionPayload>("voicereader:toolbar-action", async ({ payload }) => {
+  await listen<ToolbarActionPayload>(TOOLBAR_ACTION_EVENT, async ({ payload }) => {
     const action = payload.action;
     if (action === "pause-toggle") {
       try {
@@ -1472,7 +1607,7 @@ async function bindEvents(): Promise<void> {
       return;
     }
     if (action === "skip-back") {
-      void emit("voicereader:toolbar-skip-back-noop", {});
+      void emit(TOOLBAR_SKIP_BACK_NOOP_EVENT, {});
       return;
     }
     if (action === "stop") {
@@ -1485,13 +1620,12 @@ async function bindEvents(): Promise<void> {
     }
   });
 
-  await listen<Record<string, unknown>>("voicereader:rate-updated", ({ payload }) => {
-    const parsed = Number(payload.rate ?? NaN);
-    if (!Number.isFinite(parsed)) {
+  await listen<Record<string, unknown>>(RATE_UPDATED_EVENT, ({ payload }) => {
+    const parsed = rateFromPayload(payload);
+    if (parsed === null) {
       return;
     }
-    const normalized = Math.min(4, Math.max(0.25, parsed));
-    rateInput.value = normalized.toFixed(2).replace(/\.?0+$/, "");
+    rateInput.value = formatRateNumber(clampRate(parsed));
   });
 
   await listen<JsonValue>("voicereader:ws-event", async ({ payload }) => {
@@ -1532,7 +1666,7 @@ async function bindEvents(): Promise<void> {
           flushQueuedPlayback(jobId, true);
         }
       }
-      if (activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0) {
+      if (playbackIsIdle()) {
         resetPlaybackCursor();
         if (!jobId || jobId === activeToolbarJobId) {
           hideToolbar();
@@ -1545,9 +1679,7 @@ async function bindEvents(): Promise<void> {
     const jobId = String(payload.job_id ?? "unknown");
     const sourceWindow = String(payload.source_window ?? "");
     const playbackRate = Number(payload.rate ?? selectedRateSetting());
-    const toolbarRate = Number.isFinite(playbackRate)
-      ? Math.min(4, Math.max(0.25, playbackRate))
-      : selectedRateSetting();
+    const toolbarRate = Number.isFinite(playbackRate) ? clampRate(playbackRate) : selectedRateSetting();
     if (jobId !== "unknown") {
       suppressedJobIds.delete(jobId);
       playbackChunkCounts.set(jobId, 0);
@@ -1590,6 +1722,22 @@ async function bindEvents(): Promise<void> {
 
   await listen<Record<string, unknown>>("voicereader:error", ({ payload }) => {
     log(String(payload.message ?? "Unknown engine/app error"), "error");
+  });
+
+  await listen<ModelDownloadProgressPayload>("voicereader:model-download", ({ payload }) => {
+    if (payload.model !== AUDIO8_MODEL_ID) {
+      return;
+    }
+    if (payload.state === "progress") {
+      renderAudio8DownloadProgress(payload);
+    } else if (payload.state === "done") {
+      renderAudio8DownloadProgress({
+        ...payload,
+        downloaded_bytes: payload.total_bytes,
+      });
+    } else if (payload.state === "error") {
+      log(`Audio8 download error: ${payload.message}`, "error");
+    }
   });
 
   await listen<JsonValue>("voicereader:engine-ready", () => {

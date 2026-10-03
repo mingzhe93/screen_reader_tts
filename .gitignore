@@ -16,6 +16,8 @@ __pycache__/
 Thumbs.db
 src-tauri/binaries/tts-engine-*
 src-tauri/binaries/models/
+src-tauri/binaries/onnxruntime/
+src-tauri/binaries/kyutai-voices/
 tts-engine/build/
 tts-engine/dist/
 tts-engine/*.spec

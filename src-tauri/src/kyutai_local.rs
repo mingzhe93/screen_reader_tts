@@ -1,9 +1,5 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Read, Write};
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::OnceLock;
-use std::sync::mpsc::{self, Receiver};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -15,15 +11,27 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::audio_pipeline::{resolve_sox_path_cached, write_normalized_reference_wav, RateEmitter};
+use crate::bundled_paths::{find_bundled_file, search_roots};
+use crate::text_chunking::{chunk_text, normalize_for_speech, text_units, SOFT_OVERFLOW};
+
 const DEFAULT_VOICE_ID: &str = "0";
-const META_FILE_NAME: &str = "meta.json";
-const REF_AUDIO_FILE_NAME: &str = "reference.wav";
+pub(crate) const META_FILE_NAME: &str = "meta.json";
+pub(crate) const REF_AUDIO_FILE_NAME: &str = "reference.wav";
 const LOCAL_CONFIG_VARIANT: &str = "voicereader-pocket-tts-local";
 const RUNTIME_CONFIG_DIR_NAME: &str = "pocket-tts-runtime";
-const MAX_SENTENCES_PER_CHUNK: usize = 1;
-const FIRST_CHUNK_MAX_SENTENCES: usize = 1;
-const FIRST_CHUNK_MAX_CHARS: usize = 200;
-const RATE_CONTROL_POLL_SAMPLES: usize = 960;
+/// Bundled reference clips for presets that have no precomputed embedding
+/// (see scripts/fetch-kyutai-voices.js).
+const PRESET_CLIPS_DIR_NAME: &str = "kyutai-voices";
+/// Preset clips normalized to the model's input format are kept here, under the data dir.
+const PRESET_CLIP_CACHE_DIR_NAME: &str = "preset-voices";
+/// Pocket TTS is trained on short prompts; its own splitter caps chunks at 50 tokens.
+const MAX_TOKENS_PER_CHUNK: usize = 50;
+/// Range of the user's chunk size setting that this model can use (about 50 tokens at most).
+const MIN_CHUNK_CHARS: f32 = 100.0;
+const MAX_CHUNK_CHARS: f32 = 200.0;
+/// The first chunk is kept shorter because nothing plays until it is fully generated.
+const FIRST_CHUNK_BUDGET: f32 = 100.0;
 
 #[derive(Clone)]
 pub enum LocalJobEndState {
@@ -42,171 +50,11 @@ pub struct SavedVoiceMeta {
     pub ref_text: Option<String>,
 }
 
-struct SoxTempoStream {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    stdout_rx: Receiver<Vec<u8>>,
-    stdout_join: Option<JoinHandle<()>>,
-    pending: Vec<u8>,
-    frame_samples: usize,
-}
-
-impl SoxTempoStream {
-    fn new(rate: f32, sample_rate: u32) -> Option<Self> {
-        if sample_rate == 0 {
-            return None;
-        }
-        let sox_path = resolve_sox_path_cached()?;
-        let factors = decompose_tempo_factors(rate);
-        if factors.is_empty() {
-            return None;
-        }
-
-        let mut command = Command::new(sox_path);
-        command
-            .arg("-q")
-            .arg("-t")
-            .arg("raw")
-            .arg("-r")
-            .arg(sample_rate.to_string())
-            .arg("-e")
-            .arg("signed-integer")
-            .arg("-b")
-            .arg("16")
-            .arg("-c")
-            .arg("1")
-            .arg("-L")
-            .arg("-")
-            .arg("-t")
-            .arg("raw")
-            .arg("-e")
-            .arg("signed-integer")
-            .arg("-b")
-            .arg("16")
-            .arg("-c")
-            .arg("1")
-            .arg("-L")
-            .arg("-");
-
-        for factor in factors {
-            command.arg("tempo").arg(format!("{factor:.6}"));
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-
-        let stdin = child.stdin.take()?;
-        let mut stdout = child.stdout.take()?;
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        let join = std::thread::spawn(move || {
-            let mut buffer = [0u8; 8192];
-            loop {
-                match stdout.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.send(buffer[..n].to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let frame_samples = if rate >= 3.0 {
-            24_576
-        } else if rate >= 2.0 {
-            16_384
-        } else {
-            8_192
-        };
-
-        Some(Self {
-            child,
-            stdin: Some(stdin),
-            stdout_rx: rx,
-            stdout_join: Some(join),
-            pending: Vec::new(),
-            frame_samples,
-        })
-    }
-
-    fn push_samples(&mut self, samples: &[i16]) -> Result<()> {
-        if samples.is_empty() {
-            return Ok(());
-        }
-        let stdin = self.stdin.as_mut().ok_or_else(|| anyhow!("SoX stdin closed"))?;
-        stdin
-            .write_all(&pcm_i16_to_le_bytes(samples))
-            .context("Failed writing PCM data to SoX stdin")?;
-        let _ = stdin.flush();
-        Ok(())
-    }
-
-    fn drain_available_frames(&mut self) -> Vec<Vec<i16>> {
-        while let Ok(bytes) = self.stdout_rx.try_recv() {
-            self.pending.extend_from_slice(&bytes);
-        }
-        self.take_ready_frames()
-    }
-
-    fn finish_and_drain(&mut self) -> Vec<Vec<i16>> {
-        self.stdin.take();
-        let _ = self.child.wait();
-        if let Some(join) = self.stdout_join.take() {
-            let _ = join.join();
-        }
-        while let Ok(bytes) = self.stdout_rx.try_recv() {
-            self.pending.extend_from_slice(&bytes);
-        }
-
-        let mut frames = self.take_ready_frames();
-        let trailing = bytes_to_pcm_i16_drain_all(&mut self.pending);
-        if !trailing.is_empty() {
-            frames.push(trailing);
-        }
-        frames
-    }
-
-    fn abort(&mut self) {
-        self.stdin.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(join) = self.stdout_join.take() {
-            let _ = join.join();
-        }
-        self.pending.clear();
-    }
-
-    fn take_ready_frames(&mut self) -> Vec<Vec<i16>> {
-        let frame_bytes = self.frame_samples * 2;
-        let mut frames: Vec<Vec<i16>> = Vec::new();
-        while self.pending.len() >= frame_bytes {
-            let raw: Vec<u8> = self.pending.drain(..frame_bytes).collect();
-            let pcm = bytes_to_pcm_i16(&raw);
-            if !pcm.is_empty() {
-                frames.push(pcm);
-            }
-        }
-        frames
-    }
-}
-
 pub struct LocalKyutaiRuntime {
     model: Arc<TTSModel>,
     sample_rate: u32,
     voices_dir: PathBuf,
+    preset_clip_cache_dir: PathBuf,
     model_dir: PathBuf,
     model_id: String,
     state_cache: HashMap<String, ModelState>,
@@ -241,6 +89,7 @@ impl LocalKyutaiRuntime {
             model: Arc::new(model),
             sample_rate,
             voices_dir,
+            preset_clip_cache_dir: data_dir.join(PRESET_CLIP_CACHE_DIR_NAME),
             model_dir: model_dir.to_path_buf(),
             model_id: model_id.to_string(),
             state_cache: HashMap::new(),
@@ -395,7 +244,7 @@ impl LocalKyutaiRuntime {
     /// to broadcast a "had_audio" flag in the terminal event.
     ///
     /// # Parallelism
-    /// Multiple CPU cores are used concurrently for the `rate != 1.0` path:
+    /// Multiple CPU cores are used concurrently:
     ///   • Main thread  — SoX push/drain + emit for the current chunk
     ///   • Up to N background threads — pre-generating upcoming chunks
     ///   • SoX subprocess — tempo-stretches PCM in the background
@@ -426,95 +275,103 @@ impl LocalKyutaiRuntime {
     where
         F: Fn(usize, &[i16], u32) -> Result<()> + Send + 'static,
     {
-        let mut chunk_index: usize = 0;
-        let mut had_audio = false;
-        let mut rate_clamped = (active_rate_steps.load(Ordering::SeqCst).clamp(1, 16) as f32) / 4.0;
-        // Always use the chunk-based pipeline so live rate changes can be applied
-        // during a running stream, including transitions from 1.0 -> != 1.0.
-        let rate_active = true;
-        let mut sox_stream = if (rate_clamped - 1.0).abs() > f32::EPSILON {
-            SoxTempoStream::new(rate_clamped, self.sample_rate)
-        } else {
-            None
-        };
-        let chunk_size = usize::min(usize::max(chunk_max_chars as usize, 100), FIRST_CHUNK_MAX_CHARS);
-        let split = self.model.split_into_best_sentences(text);
-        let text_chunks: Vec<String> =
-            cap_chunks_by_chars(split, text, chunk_size, MAX_SENTENCES_PER_CHUNK);
-
-        // Inline helper to track had_audio and forward to on_chunk.
-        macro_rules! emit {
-            ($idx:expr, $pcm:expr, $sr:expr) => {{
-                had_audio = true;
-                on_chunk($idx, $pcm, $sr)?;
-            }};
-        }
+        let text_chunks = self.plan_chunks(text, chunk_max_chars);
 
         // Resolve the voice state once (cached after first call).
         let voice_state = self.resolve_voice_state(voice_id, selected_preset)?;
         let gain: f32 = volume.clamp(0.0, 2.0);
 
-        if rate_active {
-            // ------------------------------------------------------------------
-            // rate != 1.0  — parallel look-ahead generation
-            // ------------------------------------------------------------------
-            // We use model.generate() (full batch) so SoX receives a contiguous
-            // PCM batch.  Feeding SoX tiny per-token buffers via generate_stream
-            // causes output starvation at the frontend (see docs/learnings.md §1).
-            //
-            // TTSModel::generate() takes &self (shared ref) and ModelState is
-            // Clone, so we can run the *next* chunk's generation on a background
-            // thread while the main thread pushes the current chunk to SoX,
-            // drains, and emits.  This overlaps T_gen(N+1) with SoX(N) + emit(N),
-            // eliminating most of the inter-chunk gap.
-            //
-            //   Main thread:   [gen C0] [sox+emit C0 | join C1] [sox+emit C1 | join C2] …
-            //   Look-ahead:              [gen C1]                [gen C2]
-            // ------------------------------------------------------------------
+        // The emitter reads the live rate on every push, so rate changes (including
+        // 1.0 -> != 1.0) apply from the next chunk without restarting the stream.
+        let mut emitter = RateEmitter::new(self.sample_rate, active_rate_steps, on_chunk);
 
-            type GenResult = Result<Vec<i16>>;
-            type LookAhead = JoinHandle<GenResult>;
+        // ------------------------------------------------------------------
+        // Parallel look-ahead generation
+        // ------------------------------------------------------------------
+        // We use model.generate() (full batch) so SoX receives a contiguous
+        // PCM batch.  Feeding SoX tiny per-token buffers via generate_stream
+        // causes output starvation at the frontend (see docs/learnings.md §1).
+        //
+        // TTSModel::generate() takes &self (shared ref) and ModelState is
+        // Clone, so we can run the *next* chunk's generation on a background
+        // thread while the main thread pushes the current chunk to SoX,
+        // drains, and emits.  This overlaps T_gen(N+1) with SoX(N) + emit(N),
+        // eliminating most of the inter-chunk gap.
+        //
+        //   Main thread:   [gen C0] [sox+emit C0 | join C1] [sox+emit C1 | join C2] …
+        //   Look-ahead:              [gen C1]                [gen C2]
+        // ------------------------------------------------------------------
 
-            /// Spawn a thread that runs model.generate() and returns PCM i16.
-            fn spawn_generate(
-                model: &Arc<TTSModel>,
-                text: String,
-                voice_state: ModelState,
-                gain: f32,
-            ) -> LookAhead {
-                let model = Arc::clone(model);
-                std::thread::spawn(move || -> GenResult {
-                    let tensor = model
-                        .generate(&text, &voice_state)
-                        .context("Pocket-TTS generation failed (look-ahead)")?;
-                    let values = tensor
-                        .flatten_all()
-                        .context("Failed to flatten look-ahead tensor")?
-                        .to_vec1::<f32>()
-                        .context("Failed to convert look-ahead tensor to f32")?;
-                    let mut pcm = Vec::with_capacity(values.len());
-                    for sample in values {
-                        let scaled = (sample * gain).clamp(-1.0, 1.0);
-                        pcm.push((scaled * 32767.0) as i16);
-                    }
-                    Ok(pcm)
-                })
+        type GenResult = Result<Vec<i16>>;
+        type LookAhead = JoinHandle<GenResult>;
+
+        /// Spawn a thread that runs model.generate() and returns PCM i16.
+        fn spawn_generate(
+            model: &Arc<TTSModel>,
+            text: String,
+            voice_state: ModelState,
+            gain: f32,
+        ) -> LookAhead {
+            let model = Arc::clone(model);
+            std::thread::spawn(move || -> GenResult {
+                let tensor = model
+                    .generate(&text, &voice_state)
+                    .context("Pocket-TTS generation failed (look-ahead)")?;
+                let values = tensor
+                    .flatten_all()
+                    .context("Failed to flatten look-ahead tensor")?
+                    .to_vec1::<f32>()
+                    .context("Failed to convert look-ahead tensor to f32")?;
+                let mut pcm = Vec::with_capacity(values.len());
+                for sample in values {
+                    let scaled = (sample * gain).clamp(-1.0, 1.0);
+                    pcm.push((scaled * 32767.0) as i16);
+                }
+                Ok(pcm)
+            })
+        }
+
+        // Determine how many chunks to generate concurrently.
+        // Each generate() call uses MKL/BLAS internally (multi-threaded),
+        // so we cap concurrency to avoid thread contention.  Reserve 1
+        // core for the main thread (SoX + emit) and split the rest among
+        // concurrent generate() calls, with a ceiling of 4.
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let look_ahead_depth = cores.saturating_sub(1).max(1).min(4);
+
+        // Pre-submit up to `look_ahead_depth` chunks.
+        let mut queue: VecDeque<LookAhead> = VecDeque::new();
+        let mut next_to_submit = 0usize;
+        while next_to_submit < text_chunks.len() && queue.len() < look_ahead_depth {
+            queue.push_back(spawn_generate(
+                &self.model,
+                text_chunks[next_to_submit].clone(),
+                voice_state.clone(),
+                gain,
+            ));
+            next_to_submit += 1;
+        }
+
+        for _i in 0..text_chunks.len() {
+            if cancel.load(Ordering::SeqCst) {
+                drop(queue);
+                emitter.abort();
+                return Ok((LocalJobEndState::Canceled, emitter.had_audio()));
             }
 
-            // Determine how many chunks to generate concurrently.
-            // Each generate() call uses MKL/BLAS internally (multi-threaded),
-            // so we cap concurrency to avoid thread contention.  Reserve 1
-            // core for the main thread (SoX + emit) and split the rest among
-            // concurrent generate() calls, with a ceiling of 4.
-            let cores = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            let look_ahead_depth = cores.saturating_sub(1).max(1).min(4);
+            // Await the PCM from the earliest queued generation thread.
+            let pcm = match queue.pop_front() {
+                Some(handle) => handle
+                    .join()
+                    .map_err(|_| anyhow!("Look-ahead generation thread panicked"))??,
+                None => Vec::new(),
+            };
 
-            // Pre-submit up to `look_ahead_depth` chunks.
-            let mut queue: VecDeque<LookAhead> = VecDeque::new();
-            let mut next_to_submit = 0usize;
-            while next_to_submit < text_chunks.len() && queue.len() < look_ahead_depth {
+            // Refill the queue: submit the next unstarted chunk so
+            // look_ahead_depth threads stay in flight.
+            if next_to_submit < text_chunks.len() {
                 queue.push_back(spawn_generate(
                     &self.model,
                     text_chunks[next_to_submit].clone(),
@@ -524,157 +381,58 @@ impl LocalKyutaiRuntime {
                 next_to_submit += 1;
             }
 
-            for _i in 0..text_chunks.len() {
-                if cancel.load(Ordering::SeqCst) {
-                    drop(queue);
-                    if let Some(stream) = sox_stream.as_mut() {
-                        stream.abort();
-                    }
-                    return Ok((LocalJobEndState::Canceled, had_audio));
-                }
-
-                // Await the PCM from the earliest queued generation thread.
-                let pcm = match queue.pop_front() {
-                    Some(handle) => handle
-                        .join()
-                        .map_err(|_| anyhow!("Look-ahead generation thread panicked"))??,
-                    None => Vec::new(),
-                };
-
-                // Refill the queue: submit the next unstarted chunk so
-                // look_ahead_depth threads stay in flight.
-                if next_to_submit < text_chunks.len() {
-                    queue.push_back(spawn_generate(
-                        &self.model,
-                        text_chunks[next_to_submit].clone(),
-                        voice_state.clone(),
-                        gain,
-                    ));
-                    next_to_submit += 1;
-                }
-
-                if cancel.load(Ordering::SeqCst) {
-                    drop(queue);
-                    if let Some(stream) = sox_stream.as_mut() {
-                        stream.abort();
-                    }
-                    return Ok((LocalJobEndState::Canceled, had_audio));
-                }
-
-                if pcm.is_empty() {
-                    continue;
-                }
-
-                let mut cursor = 0usize;
-                let mut segment_start = 0usize;
-                let mut segment_rate = rate_clamped;
-
-                while cursor < pcm.len() {
-                    if cancel.load(Ordering::SeqCst) {
-                        drop(queue);
-                        if let Some(stream) = sox_stream.as_mut() {
-                            stream.abort();
-                        }
-                        return Ok((LocalJobEndState::Canceled, had_audio));
-                    }
-
-                    let next_cursor = usize::min(cursor + RATE_CONTROL_POLL_SAMPLES, pcm.len());
-                    let desired_rate = (active_rate_steps.load(Ordering::SeqCst).clamp(1, 16) as f32) / 4.0;
-                    if (desired_rate - segment_rate).abs() > f32::EPSILON {
-                        if cursor > segment_start {
-                            let segment = &pcm[segment_start..cursor];
-                            if let Some(rate_stream) = sox_stream.as_mut() {
-                                rate_stream.push_samples(segment)?;
-                                let mut combined: Vec<i16> = Vec::new();
-                                for adjusted in rate_stream.drain_available_frames() {
-                                    if !adjusted.is_empty() {
-                                        combined.extend_from_slice(&adjusted);
-                                    }
-                                }
-                                if !combined.is_empty() {
-                                    emit!(chunk_index, &combined, self.sample_rate);
-                                    chunk_index += 1;
-                                }
-                            } else if (segment_rate - 1.0).abs() <= f32::EPSILON {
-                                emit!(chunk_index, segment, self.sample_rate);
-                                chunk_index += 1;
-                            } else {
-                                let resampled = resample_pcm_by_rate(segment, segment_rate);
-                                if !resampled.is_empty() {
-                                    emit!(chunk_index, &resampled, self.sample_rate);
-                                    chunk_index += 1;
-                                }
-                            }
-                        }
-
-                        if let Some(rate_stream) = sox_stream.as_mut() {
-                            let mut combined: Vec<i16> = Vec::new();
-                            for adjusted in rate_stream.finish_and_drain() {
-                                if !adjusted.is_empty() {
-                                    combined.extend_from_slice(&adjusted);
-                                }
-                            }
-                            if !combined.is_empty() {
-                                emit!(chunk_index, &combined, self.sample_rate);
-                                chunk_index += 1;
-                            }
-                        }
-
-                        rate_clamped = desired_rate;
-                        segment_rate = desired_rate;
-                        sox_stream = if (rate_clamped - 1.0).abs() > f32::EPSILON {
-                            SoxTempoStream::new(rate_clamped, self.sample_rate)
-                        } else {
-                            None
-                        };
-                        segment_start = cursor;
-                    }
-
-                    cursor = next_cursor;
-                }
-
-                if cursor > segment_start {
-                    let segment = &pcm[segment_start..cursor];
-                    if let Some(rate_stream) = sox_stream.as_mut() {
-                        rate_stream.push_samples(segment)?;
-                        let mut combined: Vec<i16> = Vec::new();
-                        for adjusted in rate_stream.drain_available_frames() {
-                            if !adjusted.is_empty() {
-                                combined.extend_from_slice(&adjusted);
-                            }
-                        }
-                        if !combined.is_empty() {
-                            emit!(chunk_index, &combined, self.sample_rate);
-                            chunk_index += 1;
-                        }
-                    } else if (segment_rate - 1.0).abs() <= f32::EPSILON {
-                        emit!(chunk_index, segment, self.sample_rate);
-                        chunk_index += 1;
-                    } else {
-                        let resampled = resample_pcm_by_rate(segment, segment_rate);
-                        if !resampled.is_empty() {
-                            emit!(chunk_index, &resampled, self.sample_rate);
-                            chunk_index += 1;
-                        }
-                    }
-                }
+            if cancel.load(Ordering::SeqCst) {
+                drop(queue);
+                emitter.abort();
+                return Ok((LocalJobEndState::Canceled, emitter.had_audio()));
             }
 
-            // Flush remaining SoX output for the last chunk.
-            if let Some(rate_stream) = sox_stream.as_mut() {
-                let mut combined: Vec<i16> = Vec::new();
-                for adjusted in rate_stream.finish_and_drain() {
-                    if !adjusted.is_empty() {
-                        combined.extend_from_slice(&adjusted);
-                    }
-                }
-                if !combined.is_empty() {
-                    emit!(chunk_index, &combined, self.sample_rate);
-                }
+            if pcm.is_empty() {
+                continue;
+            }
+
+            if let Err(err) = emitter.push(&pcm) {
+                emitter.abort();
+                return Err(err);
             }
         }
 
-        Ok((LocalJobEndState::Done, had_audio))
+        // Flush remaining SoX output for the last chunk.
+        emitter.finish()?;
+        Ok((LocalJobEndState::Done, emitter.had_audio()))
+    }
+
+    /// Splits text into the chunks that are generated one at a time. The crate's own
+    /// `split_into_best_sentences` is not used: it cuts at every full stop and colon, which
+    /// turns "3.50" into "3. 50" and "10:30" into "10: 30".
+    fn plan_chunks(&self, text: &str, chunk_max_chars: u32) -> Vec<String> {
+        // chunk_text may run SOFT_OVERFLOW past a budget to finish a sentence, so the
+        // budget is set below the hard limit by that factor.
+        let budget = (chunk_max_chars as f32).clamp(MIN_CHUNK_CHARS, MAX_CHUNK_CHARS) / SOFT_OVERFLOW;
+        let budgets = [f32::min(FIRST_CHUNK_BUDGET, budget), budget];
+        let mut chunks = Vec::new();
+        for chunk in chunk_text(&normalize_for_speech(text), &budgets) {
+            self.push_within_token_limit(chunk, &mut chunks);
+        }
+        chunks
+    }
+
+    /// Characters are only a proxy for tokens (digits and non-English text tokenize far
+    /// less compactly), so a chunk that still exceeds the token limit is halved again.
+    fn push_within_token_limit(&self, chunk: String, output: &mut Vec<String>) {
+        let tokens = self.model.conditioner.count_tokens(&chunk).unwrap_or(0);
+        if tokens <= MAX_TOKENS_PER_CHUNK {
+            output.push(chunk);
+            return;
+        }
+        let pieces = chunk_text(&chunk, &[text_units(&chunk) / 2.0]);
+        if pieces.len() < 2 {
+            output.push(chunk);
+            return;
+        }
+        for piece in pieces {
+            self.push_within_token_limit(piece, output);
+        }
     }
 
     fn resolve_voice_state(&mut self, voice_id: &str, selected_preset: &str) -> Result<ModelState> {
@@ -715,15 +473,32 @@ impl LocalKyutaiRuntime {
             .model_dir
             .join("embeddings")
             .join(format!("{selected_preset}.safetensors"));
-        if !preset_path.exists() {
+        if preset_path.exists() {
+            return self
+                .model
+                .get_voice_state_from_prompt_file(&preset_path)
+                .with_context(|| format!("Failed to load Kyutai preset prompt {}", preset_path.display()));
+        }
+
+        // Presets added upstream after the bundled weights were released only exist as
+        // reference clips; clone them the same way a user's voice is cloned.
+        let Some(clip_path) = find_bundled_preset_clip(selected_preset) else {
             return Err(anyhow!(
-                "Unsupported Kyutai preset voice: {selected_preset} (missing {})",
+                "Unsupported Kyutai preset voice: {selected_preset} (missing {} and no bundled reference clip; run `npm run assets:fetch`)",
                 preset_path.display()
             ));
+        };
+        let normalized_path = self.preset_clip_cache_dir.join(format!("{selected_preset}.wav"));
+        if !normalized_path.exists() {
+            std::fs::create_dir_all(&self.preset_clip_cache_dir)
+                .with_context(|| format!("Failed to create {}", self.preset_clip_cache_dir.display()))?;
+            let clip_bytes =
+                std::fs::read(&clip_path).with_context(|| format!("Failed to read {}", clip_path.display()))?;
+            write_normalized_reference_wav(&normalized_path, &clip_bytes)?;
         }
         self.model
-            .get_voice_state_from_prompt_file(&preset_path)
-            .with_context(|| format!("Failed to load Kyutai preset prompt {}", preset_path.display()))
+            .get_voice_state(&normalized_path)
+            .with_context(|| format!("Failed to load Kyutai preset voice from {}", clip_path.display()))
     }
 
     fn list_saved_voices(&self) -> Result<Vec<SavedVoiceMeta>> {
@@ -781,422 +556,8 @@ impl LocalKyutaiRuntime {
     }
 }
 
-fn cap_chunks_by_chars(
-    split: Vec<String>,
-    original_text: &str,
-    max_chars: usize,
-    max_sentences_per_chunk: usize,
-) -> Vec<String> {
-    let mut output: Vec<String> = Vec::new();
-    let source = if split.is_empty() {
-        vec![original_text.to_string()]
-    } else {
-        split
-    };
-    let sentence_limit = usize::max(1, max_sentences_per_chunk);
-    let first_sentence_limit = usize::max(1, usize::min(sentence_limit, FIRST_CHUNK_MAX_SENTENCES));
-    let first_chunk_char_limit = usize::max(100, usize::min(max_chars, FIRST_CHUNK_MAX_CHARS));
-    let mut grouped = String::new();
-    let mut grouped_sentences = 0usize;
-
-    let flush_group = |output: &mut Vec<String>, grouped: &mut String, grouped_sentences: &mut usize| {
-        if grouped.trim().is_empty() {
-            grouped.clear();
-            *grouped_sentences = 0;
-            return;
-        }
-        output.push(grouped.trim().to_string());
-        grouped.clear();
-        *grouped_sentences = 0;
-    };
-
-    for sentence in source {
-        let trimmed = sentence.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let building_first_chunk = output.is_empty();
-        let active_sentence_limit = if building_first_chunk {
-            first_sentence_limit
-        } else {
-            sentence_limit
-        };
-        let active_char_limit = if building_first_chunk {
-            first_chunk_char_limit
-        } else {
-            max_chars
-        };
-
-        let sentence_chars = trimmed.chars().count();
-        if sentence_chars > active_char_limit {
-            flush_group(&mut output, &mut grouped, &mut grouped_sentences);
-            output.extend(split_long_segment_by_words(trimmed, active_char_limit));
-            continue;
-        }
-
-        let next_len = if grouped.is_empty() {
-            sentence_chars
-        } else {
-            grouped.chars().count() + 1 + sentence_chars
-        };
-        let reached_sentence_limit = grouped_sentences >= active_sentence_limit;
-        let would_exceed_chars = !grouped.is_empty() && next_len > active_char_limit;
-        if reached_sentence_limit || would_exceed_chars {
-            flush_group(&mut output, &mut grouped, &mut grouped_sentences);
-        }
-
-        if !grouped.is_empty() {
-            grouped.push(' ');
-        }
-        grouped.push_str(trimmed);
-        grouped_sentences += 1;
-    }
-
-    if !grouped.is_empty() {
-        output.push(grouped.trim().to_string());
-    }
-
-    if output.is_empty() {
-        vec![original_text.trim().to_string()]
-    } else {
-        output
-    }
-}
-
-fn split_long_segment_by_words(input: &str, max_chars: usize) -> Vec<String> {
-    let mut output: Vec<String> = Vec::new();
-    let mut current = String::new();
-
-    for word in input.split_whitespace() {
-        let word_chars = word.chars().count();
-
-        if word_chars > max_chars {
-            if !current.is_empty() {
-                output.push(current);
-                current = String::new();
-            }
-            let mut token = String::new();
-            let mut token_chars = 0usize;
-            for ch in word.chars() {
-                if token_chars >= max_chars {
-                    output.push(token);
-                    token = String::new();
-                    token_chars = 0;
-                }
-                token.push(ch);
-                token_chars += 1;
-            }
-            if !token.is_empty() {
-                output.push(token);
-            }
-            continue;
-        }
-
-        let next_len = if current.is_empty() {
-            word_chars
-        } else {
-            current.chars().count() + 1 + word_chars
-        };
-        if !current.is_empty() && next_len > max_chars {
-            output.push(current);
-            current = word.to_string();
-        } else {
-            if !current.is_empty() {
-                current.push(' ');
-            }
-            current.push_str(word);
-        }
-    }
-
-    if !current.is_empty() {
-        output.push(current);
-    }
-    output
-}
-
-fn resample_pcm_by_rate(input: &[i16], rate: f32) -> Vec<i16> {
-    if input.is_empty() {
-        return Vec::new();
-    }
-    if (rate - 1.0).abs() <= f32::EPSILON {
-        return input.to_vec();
-    }
-
-    let input_len = input.len();
-    let output_len = usize::max(1, ((input_len as f32) / rate).round() as usize);
-    let mut output = Vec::with_capacity(output_len);
-
-    for out_index in 0..output_len {
-        let src_pos = (out_index as f32) * rate;
-        let left_idx = usize::min(src_pos.floor() as usize, input_len.saturating_sub(1));
-        let right_idx = usize::min(left_idx + 1, input_len.saturating_sub(1));
-        let frac = (src_pos - (left_idx as f32)).clamp(0.0, 1.0);
-
-        let left = input[left_idx] as f32;
-        let right = input[right_idx] as f32;
-        let interpolated = left + (right - left) * frac;
-        output.push(interpolated.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16);
-    }
-
-    output
-}
-
-fn decompose_tempo_factors(rate: f32) -> Vec<f32> {
-    if rate <= 0.0 {
-        return Vec::new();
-    }
-    if (rate - 1.0).abs() <= f32::EPSILON {
-        return vec![1.0];
-    }
-
-    // Prefer several smaller tempo steps over one large step; this
-    // generally preserves speech timbre better at high speedups.
-    let max_step = 1.35_f32;
-    if rate > 1.0 {
-        let mut steps = (rate.ln() / max_step.ln()).ceil() as usize;
-        if steps == 0 {
-            steps = 1;
-        }
-        let factor = rate.powf(1.0 / steps as f32);
-        return vec![factor.clamp(0.5, 2.0); steps];
-    }
-
-    let mut steps = ((1.0 / rate).ln() / max_step.ln()).ceil() as usize;
-    if steps == 0 {
-        steps = 1;
-    }
-    let factor = rate.powf(1.0 / steps as f32);
-    vec![factor.clamp(0.5, 2.0); steps]
-}
-
-fn write_normalized_reference_wav(ref_wav_path: &Path, wav_bytes: &[u8]) -> Result<()> {
-    if wav_bytes.is_empty() {
-        return Err(anyhow!("Reference audio payload is empty"));
-    }
-
-    if let Some(sox_path) = resolve_sox_path_cached() {
-        let mut command = Command::new(sox_path);
-        command
-            .arg("-q")
-            .arg("-t")
-            .arg("wav")
-            .arg("-")
-            .arg("-r")
-            .arg("24000")
-            .arg("-e")
-            .arg("signed-integer")
-            .arg("-b")
-            .arg("16")
-            .arg("-c")
-            .arg("1")
-            .arg("-L")
-            .arg(ref_wav_path);
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        command.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("Failed to start SoX for reference-audio normalization: {}", ref_wav_path.display()))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(wav_bytes)
-                .context("Failed writing clone reference audio to SoX stdin")?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .context("Failed while waiting for SoX reference-audio normalization")?;
-        if output.status.success() && ref_wav_path.exists() {
-            return Ok(());
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(anyhow!(
-            "Failed to normalize clone reference audio with SoX: {}",
-            if stderr.is_empty() {
-                "unknown SoX error".to_string()
-            } else {
-                stderr
-            }
-        ));
-    }
-
-    std::fs::write(ref_wav_path, wav_bytes)
-        .with_context(|| format!("Failed to write {}", ref_wav_path.display()))?;
-    Ok(())
-}
-
-fn resolve_sox_path_cached() -> Option<PathBuf> {
-    static SOX_PATH_CACHE: OnceLock<Option<PathBuf>> = OnceLock::new();
-    SOX_PATH_CACHE.get_or_init(resolve_sox_path).clone()
-}
-
-fn resolve_sox_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("VOICEREADER_SOX_PATH").map(PathBuf::from) {
-        if path.exists() {
-            return Some(path);
-        }
-    }
-    if let Some(path) = find_bundled_sox_near_current_executable() {
-        return Some(path);
-    }
-    if command_exists("sox") {
-        return Some(PathBuf::from("sox"));
-    }
-    find_sox_in_windows_winget_location()
-}
-
-fn find_bundled_sox_near_current_executable() -> Option<PathBuf> {
-    let sox_name = if cfg!(target_os = "windows") {
-        "sox.exe"
-    } else {
-        "sox"
-    };
-
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            roots.push(parent.to_path_buf());
-            if let Some(grand_parent) = parent.parent() {
-                roots.push(grand_parent.to_path_buf());
-                if let Some(great_grand_parent) = grand_parent.parent() {
-                    roots.push(great_grand_parent.to_path_buf());
-                }
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd);
-    }
-
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    for root in roots {
-        if !seen.insert(root.clone()) {
-            continue;
-        }
-        let candidates = [
-            root.join("binaries").join("sox").join(sox_name),
-            root.join("resources").join("binaries").join("sox").join(sox_name),
-            root.join("binaries").join(sox_name),
-            root.join("resources").join("binaries").join(sox_name),
-            root.join("sox").join(sox_name),
-            root.join("resources").join("sox").join(sox_name),
-            root.join(sox_name),
-        ];
-        for candidate in candidates {
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn command_exists(command: &str) -> bool {
-    Command::new(command)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-}
-
-fn find_sox_in_windows_winget_location() -> Option<PathBuf> {
-    if !cfg!(target_os = "windows") {
-        return None;
-    }
-
-    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
-    let root = PathBuf::from(local_app_data)
-        .join("Microsoft")
-        .join("WinGet")
-        .join("Packages");
-    if !root.exists() {
-        return None;
-    }
-
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&root)
-        .ok()?
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if !path.is_dir() {
-                return None;
-            }
-            let name = path.file_name()?.to_string_lossy().to_string();
-            if name.starts_with("ChrisBagwell.SoX_") {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .collect();
-    candidates.sort();
-
-    for candidate in candidates {
-        if let Ok(entries) = std::fs::read_dir(&candidate) {
-            let mut nested_bins: Vec<PathBuf> = entries
-                .filter_map(|entry| {
-                    let path = entry.ok()?.path();
-                    if !path.is_dir() {
-                        return None;
-                    }
-                    let name = path.file_name()?.to_string_lossy().to_string();
-                    if name.starts_with("sox-") {
-                        let binary = path.join("sox.exe");
-                        if binary.exists() {
-                            return Some(binary);
-                        }
-                    }
-                    None
-                })
-                .collect();
-            nested_bins.sort();
-            if let Some(binary) = nested_bins.into_iter().next() {
-                return Some(binary);
-            }
-        }
-
-        let direct_binary = candidate.join("sox.exe");
-        if direct_binary.exists() {
-            return Some(direct_binary);
-        }
-    }
-
-    None
-}
-
-fn pcm_i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(samples.len() * 2);
-    for sample in samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
-    }
-    bytes
-}
-
-fn bytes_to_pcm_i16(bytes: &[u8]) -> Vec<i16> {
-    let even_len = bytes.len() - (bytes.len() % 2);
-    let mut output = Vec::with_capacity(even_len / 2);
-    for chunk in bytes[..even_len].chunks_exact(2) {
-        output.push(i16::from_le_bytes([chunk[0], chunk[1]]));
-    }
-    output
-}
-
-fn bytes_to_pcm_i16_drain_all(buffer: &mut Vec<u8>) -> Vec<i16> {
-    let even_len = buffer.len() - (buffer.len() % 2);
-    if even_len == 0 {
-        return Vec::new();
-    }
-    let drained: Vec<u8> = buffer.drain(..even_len).collect();
-    bytes_to_pcm_i16(&drained)
+fn find_bundled_preset_clip(preset: &str) -> Option<PathBuf> {
+    find_bundled_file(&search_roots(), PRESET_CLIPS_DIR_NAME, &format!("{preset}.wav"), &[])
 }
 
 fn now_unix_timestamp_string() -> String {
@@ -1294,4 +655,125 @@ fn normalize_yaml_path(path: &Path) -> String {
 fn yaml_quote_path(path: &str) -> String {
     let escaped = path.replace('\'', "''");
     format!("'{escaped}'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio_pipeline::pcm_i16_to_le_bytes;
+    use std::sync::Mutex;
+
+    /// Speaks one sentence with every preset and writes the audio as raw 16-bit PCM, so
+    /// the voices can be checked by ear or by pitch. Run with:
+    /// `KYUTAI_TEST_MODEL_DIR=<model dir> KYUTAI_TEST_OUT_DIR=<dir> cargo test --features build-base -- --ignored presets`
+    #[test]
+    #[ignore = "needs the bundled Kyutai model and the fetched preset clips"]
+    fn every_preset_voice_speaks() {
+        let model_dir = PathBuf::from(std::env::var("KYUTAI_TEST_MODEL_DIR").expect("set KYUTAI_TEST_MODEL_DIR"));
+        let out_dir = PathBuf::from(std::env::var("KYUTAI_TEST_OUT_DIR").expect("set KYUTAI_TEST_OUT_DIR"));
+        let mut runtime = LocalKyutaiRuntime::new(&model_dir, &out_dir.join("data"), "test", "alba").unwrap();
+        let presets = [
+            "alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma", "anna", "vera", "mary",
+            "jane", "eve", "caro_davy", "charles", "paul", "george", "michael", "bill_boerst", "peter_yearsley",
+            "stuart_bell",
+        ];
+        for preset in presets {
+            let collected: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = collected.clone();
+            let cancel = AtomicBool::new(false);
+            let rate = AtomicU32::new(4);
+            let started = std::time::Instant::now();
+            let (_, had_audio) = runtime
+                .stream_synthesize(
+                    DEFAULT_VOICE_ID,
+                    preset,
+                    "The quick brown fox jumps over the lazy dog, and then it sleeps in the warm afternoon sun.",
+                    200,
+                    1.0,
+                    &cancel,
+                    &rate,
+                    move |_, pcm, _| {
+                        sink.lock().unwrap().extend_from_slice(pcm);
+                        Ok(())
+                    },
+                )
+                .unwrap_or_else(|err| panic!("preset {preset} failed: {err:#}"));
+            assert!(had_audio, "preset {preset} produced no audio");
+            let pcm = collected.lock().unwrap();
+            let seconds = pcm.len() as f32 / runtime.sample_rate as f32;
+            assert!(seconds > 2.0 && seconds < 20.0, "preset {preset} produced {seconds:.1}s");
+            std::fs::write(out_dir.join(format!("{preset}.raw")), pcm_i16_to_le_bytes(&pcm)).unwrap();
+            println!("{preset}: {seconds:.1}s of audio in {:.1}s", started.elapsed().as_secs_f32());
+        }
+        assert!(runtime.load_preset_voice_state("not-a-voice").is_err());
+    }
+
+    /// Checks that the playback rate shortens the audio. Run with:
+    /// `KYUTAI_TEST_MODEL_DIR=<model dir> cargo test --features build-base -- --ignored --nocapture rate`
+    #[test]
+    #[ignore = "needs the bundled Kyutai model and SoX"]
+    fn faster_rate_gives_shorter_audio() {
+        let model_dir = PathBuf::from(std::env::var("KYUTAI_TEST_MODEL_DIR").expect("set KYUTAI_TEST_MODEL_DIR"));
+        let data_dir = std::env::temp_dir().join(format!("voicereader-kyutai-rate-{}", std::process::id()));
+        let mut runtime = LocalKyutaiRuntime::new(&model_dir, &data_dir, "test", "alba").unwrap();
+        let text = "The quick brown fox jumps over the lazy dog, and then it sleeps in the warm afternoon sun.";
+
+        let mut speak = |rate_steps: u32| {
+            let collected: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = collected.clone();
+            let cancel = AtomicBool::new(false);
+            let rate = AtomicU32::new(rate_steps);
+            let started = std::time::Instant::now();
+            let (end, had_audio) = runtime
+                .stream_synthesize(DEFAULT_VOICE_ID, "alba", text, 200, 1.0, &cancel, &rate, move |_, pcm, _| {
+                    sink.lock().unwrap().extend_from_slice(pcm);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(matches!(end, LocalJobEndState::Done));
+            assert!(had_audio);
+            let pcm = collected.lock().unwrap();
+            let peak = pcm.iter().map(|sample| sample.unsigned_abs()).max().unwrap_or(0);
+            let seconds = pcm.len() as f32 / runtime.sample_rate as f32;
+            println!(
+                "rate={:.2}: {seconds:.2}s of audio, peak {peak}, took {:.1}s",
+                rate_steps as f32 / 4.0,
+                started.elapsed().as_secs_f32()
+            );
+            assert!(peak > 1000, "output is silent at {rate_steps}");
+            seconds
+        };
+
+        let normal = speak(4);
+        let fast = speak(6);
+        assert!(fast < normal * 0.85, "tempo was not applied: {fast:.2}s vs {normal:.2}s");
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    /// Run with: `KYUTAI_TEST_MODEL_DIR=<model dir> cargo test --features build-base -- --ignored plans`
+    #[test]
+    #[ignore = "needs the bundled Kyutai model"]
+    fn plans_keep_numbers_intact_and_stay_within_the_token_limit() {
+        let model_dir = PathBuf::from(std::env::var("KYUTAI_TEST_MODEL_DIR").expect("set KYUTAI_TEST_MODEL_DIR"));
+        let data_dir = std::env::temp_dir().join(format!("voicereader-kyutai-plan-{}", std::process::id()));
+        let runtime = LocalKyutaiRuntime::new(&model_dir, &data_dir, "test", "alba").unwrap();
+
+        let text = "Dr. Smith paid $3.50 at 10:30 a.m. on Jan. 5, e.g. for coffee. The U.S. economy grew 2.5% in Q3.                     Visit example.com/docs for details. When the committee finally met after several months of delays                     caused by scheduling conflicts and a series of unexpected resignations, it decided that the                     proposal, which had been revised four times and reviewed by three separate working groups, should                     be sent back once more for a detailed cost analysis before any vote could be taken.";
+        let chunks = runtime.plan_chunks(text, 200);
+        let squash = |value: &str| value.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+        assert_eq!(squash(&chunks.concat()), squash(text));
+        assert_eq!(chunks[0], "Dr. Smith paid $3.50 at 10:30 a.m. on Jan. 5, e.g. for coffee.");
+        for chunk in &chunks {
+            let tokens = runtime.model.conditioner.count_tokens(chunk).unwrap();
+            assert!(tokens <= MAX_TOKENS_PER_CHUNK, "{tokens} tokens: {chunk}");
+        }
+
+        // The chunk size setting is clamped to what the model can take.
+        for setting in [100, 200, 2000] {
+            for chunk in runtime.plan_chunks(text, setting) {
+                assert!(chunk.chars().count() as f32 <= MAX_CHUNK_CHARS + 1.0, "setting {setting}: {chunk}");
+            }
+        }
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
 }

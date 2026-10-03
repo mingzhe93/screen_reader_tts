@@ -1,367 +1,199 @@
-﻿# VoiceReader (Speak Selection Workflow)
+# VoiceReader
 
-VoiceReader is a lightweight, offline-first desktop app that reads aloud the text you highlight in any application.
+VoiceReader reads highlighted text aloud. Highlight text in any app, press a hotkey, and listen. The speech comes from open-weight text-to-speech models that run on your own machine. Nothing is sent to a cloud service while you use it.
 
-It's designed to improve readability and accessibility (especially for people with dyslexia) by turning selected text into natural-sounding speech using local, open-weight TTS models - with **no cloud dependency**.
+It is a Tauri 1.x desktop app: a Vite/TypeScript frontend and a Rust backend.
 
-## What it does (Phase 1 completed)
-Status: Phase 1 core goals are complete.
+## What it can do
 
-- Runs in the background (tray/menu bar)
-- Reads out **highlighted text** from the active application via a hotkey
-- Uses clipboard copy-and-restore selection capture in the current app flow
-- Shows a floating toolbar in a separate window while audio is playing:
-  - always-on-top
-  - draggable
-  - semi-transparent pill UI
-  - persistent position across app restarts
-- Supports **voice cloning**:
-  - Clone a voice once from a short audio sample
-  - Save the cloned voice locally
-  - Reuse it for all future speech generation
-- Supports live playback-rate updates (`0.25x` to `4.0x`) from both main UI and toolbar
-- Works fully offline by default:
-  - Base build bundles **Kyutai Pocket TTS** with Rust-native runtime
-  - Full build supports optional Qwen models (download on demand)
+- Read the text selected in the active app when you press a global hotkey. The app copies the selection through the clipboard and restores your previous clipboard text afterwards.
+- Show a small always-on-top toolbar in its own window while audio plays. It has rate, pause, stop and skip-forward controls, shows the source app, and remembers where you dragged it.
+- Change the playback rate from `0.25x` to `4.0x` while audio is playing. Pitch is preserved when SoX is available.
+- Clone a voice from a WAV clip, save it, and reuse it. Saved voices can be renamed, annotated and deleted in the Voices & Clone tab.
+- Choose from 21 preset voices with Kyutai Pocket TTS.
+- Run a model on the CPU, and move part of Audio8 to a GPU when that is faster (see Compute Device below).
 
-## Platform status (current)
-- **Windows**: full implementation (hotkey selection via SendInput Ctrl+C, source-window title via Win32)
-- **macOS**: full parity
-  - hotkey selection capture via CGEvent Cmd+C simulation
-  - source-window title via NSWorkspace frontmostApplication
-  - modifier-release detection via CGEventSource flags
-  - floating toolbar window and playback controls work
+## Models
 
-## Why this exists
-Browser TTS extensions are often slow, inconsistent, and limited in voice quality. Meanwhile, modern TTS models can produce far more natural speech. VoiceReader brings that quality to a simple "highlight -> hotkey -> listen" workflow, locally and privately.
+| Model | Where it comes from | Languages | Notes |
+|---|---|---|---|
+| Kyutai Pocket TTS | Bundled with the app (`Verylicious/pocket-tts-ungated`) | English | Default. CPU. 21 preset voices: 8 are built in and 13 are cloned on first use from reference clips fetched by `scripts/fetch-kyutai-voices.js`. Voice cloning needs only an audio clip. |
+| Audio8 TTS 0.1B | Optional in-app download from the Engine tab (`Edge0/audio8-TTS-0.1B-ONNX-INT8`, about 860 MB, of which about 400 MB is the encoder used for cloning) | English, Chinese | ONNX Runtime. Built-in voice plus cloning. Cloning needs the clip and its exact transcript; the clip must be 0.5 to 30 seconds. |
+| Qwen3-TTS 0.6B (CustomVoice, Base) | Download in the Full build only | Several | Not part of the Base build. See Full build below. |
 
-## Core principles
-- **Offline-first & private**: everything runs on-device
-- **Fast control feedback**: playback controls update active jobs while streaming
-- **Model-swappable**: clean backend interface so we can add/replace models over time
-- **Fast perceived latency**: chunked generation + immediate playback
+Speed, memory and measurements for Audio8 are in `docs/learnings.md` section 7. Kyutai is much faster than Audio8 for English. Audio8 is usable up to about 1.5x playback on the machine it was measured on.
 
-## Chunking & Playback Findings
-- We observed audible breakup at high playback rates when chunks were too small, especially with pitch-preserving tempo processing.
-- Root cause was real-time pressure mismatch: generation and post-processing produced bursty small packets, while playback drained continuously, causing underflow gaps.
-- Current default policy in app/runtime is:
-  - `chunk_max_chars = 200`
-  - group up to **1 sentence per chunk**
-  - apply playback prebuffering before first audible output
-- Why this works better:
-  - shorter first-output path reduces perceived startup delay
-  - single-sentence chunks reduce long waits before the next audible chunk
-  - with queue + prebuffer, this keeps playback smooth while preserving responsiveness
+## Builds
 
----
+Two builds exist. They are chosen by Cargo feature.
 
-## Current implementation (Phase 1)
-This is what is wired right now:
+- **Base** (`build-base`) is the product and the default. Everything runs inside the Rust process. There is no Python at run time.
+- **Full** (`build-full`) starts a Python sidecar (`tts-engine/`) and adds the Qwen models. It is kept for future heavier models and is not actively used.
 
-### Desktop app (Tauri)
-- Windowed app with a simple "Reader" page
-- Global hotkey: user-configurable (default: Windows `Alt+Shift+Space`, macOS `Cmd+Shift+Space`)
-- End-to-end flow: hotkey/manual speak -> local runtime (Base) or `/v1/speak` + WS stream (Full) -> local playback
-- Floating toolbar runs as its own Tauri window:
-  - frameless, transparent, always-on-top, skip-taskbar
-  - rate/pause/stop/skip controls
-  - source label from active window title when available
-  - defaults to bottom-left and restores last dragged position
-- Full build sidecar lifecycle from app:
-  - launch on startup
-  - health handshake
-  - restart/cancel controls
-  - shutdown on app exit
-- UI for:
-  - model mode selection (`kyutai_pocket_tts`, `qwen_custom_voice`, `qwen_base_clone`)
-  - unified voice selection (preset + saved cloned voices)
-  - clone/upload, voice edit/delete, and engine health/activity pages
-  - model download actions for Qwen variants
+## Platform status
 
-### Engine runtime profiles
-- **Base build (`build-base`)**:
-  - Rust-native Pocket TTS runtime (no Python sidecar)
-  - Kyutai bundled by default
-  - Supports read + clone + saved voice reuse
-  - English-only synthesis in current app flow
-  - Live playback-rate changes are applied during running streams via shared atomic rate state
-- **Full build (`build-full`)**:
-  - Python sidecar daemon (kept warm)
-  - Loads Kyutai/Qwen model(s) from local engine data dir
-  - Optional Qwen runtime path: CUDA + `torch.bfloat16` with `attn_implementation="flash_attention_2"` when available
-  - Windows Qwen fallback path: CUDA + BF16 + `attn_implementation="sdpa"` if FlashAttention 2 is unavailable
-  - Provides IPC API endpoints for `speak`, `cancel`, `/jobs/{job_id}/playback`, and voice cloning/listing/deletion
-  - Includes warmup support and model activation endpoint
+| Platform | Status |
+|---|---|
+| Windows | Primary platform. Selection capture sends Ctrl+C with `SendInput`. The source label comes from the foreground window title. Audio8 can decode on any DirectX 12 GPU through DirectML. |
+| macOS | Implemented in code: selection capture sends Cmd+C through CGEvent, and the source label is the frontmost application's name. Core ML decoding for Audio8 is wired in but untested, so it is opt-in. |
+| Linux | The hotkey cannot read a selection: simulated copy and source-window lookup are not implemented. `scripts/fetch-onnxruntime.js` has a Linux x64 download, and SoX is looked up on `PATH`, but nothing else about Linux is covered. |
 
-### Known limitations in this slice
-- Selection capture is currently clipboard-based; Windows copy injection is implemented, non-Windows parity is incomplete
-- Source window title capture for toolbar label is currently Windows-only
-- Qwen base/custom flows are Full build only and not bundled by default (download on demand)
-- `qwen_base_clone` mode is exposed but not currently enabled for read-aloud job start
-- Base build Kyutai runtime is English-only
-- Portable mode still depends on system WebView2 runtime on Windows
+## Known limitations
 
----
+- Kyutai is English only. Use Audio8 for Chinese.
+- Audio8 runs generation on the CPU and is close to real time. Playback above about 1.5x can stutter.
+- Without SoX, rate changes use plain resampling, which also changes pitch. Windows builds bundle SoX under `src-tauri/binaries/sox`.
+- Rate changes are applied to the next piece of audio the runtime produces, not to audio that is already queued in the player.
+- The skip-back button does nothing yet.
+- The hotkey is ignored while the VoiceReader window itself is focused. Use Read Selection Now there.
+- Closing the main window quits the app. There is no tray icon.
+- Text is spoken as written. URLs, markdown symbols, citation markers and emoji are not cleaned up.
+- `qwen_base_clone` appears in the Full build model list, but read-aloud with it is not enabled.
 
-## Default model sources
-- Hugging Face model: [Verylicious/pocket-tts-ungated Meant for developers with no huggingface account](https://huggingface.co/Verylicious/pocket-tts-ungated)
-- Hugging Face model: [Qwen/Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base)
-- Full build optional no-clone runtime path: [Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice)
-- GitHub repo: [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
-- GitHub repo: [kyutai-labs/pocket-tts](https://github.com/kyutai-labs/pocket-tts)
-- GitHub repo (Rust-native Pocket TTS used by Base build): [babybirdprd/pocket-tts](https://github.com/babybirdprd/pocket-tts)
+## Quick start (Base build)
 
-## Qwen runtime baseline (from upstream `pyproject.toml`)
-- Recommended environment: isolated Python 3.12 env
-- Version pins:
-  - `transformers==4.57.3`
-  - `accelerate==1.12.0`
-- Additional runtime deps:
-  - `gradio`, `librosa`, `torchaudio`, `soundfile`, `sox`, `onnxruntime`, `einops`
+### Prerequisites
 
-## Developer setup (Base vs Full)
+- Node.js and npm.
+- Rust (`cargo` and `rustc` on `PATH`).
+- CMake, to build native Rust dependencies.
+- Python 3.10 or newer on `PATH`, only for the helper behind `npm run models:bundle:kyutai`. It copies the bundled Kyutai model into `src-tauri/binaries/models`, and downloads the model first if it is missing. The download needs `huggingface_hub`; the helper uses `tts-engine/.venv` if that exists, otherwise the Python on `PATH`.
+- Internet access the first time you run a Base dev or build script. `npm run assets:fetch` runs automatically and downloads the ONNX Runtime library and the 13 extra Kyutai voice clips. It skips files that are already present.
 
-Use project-local dependencies only.
-
-- Node packages: install into `./node_modules` with `npm install`
-- Rust toolchain is required for Tauri (`cargo` + `rustc` on PATH)
-- Avoid global installs like `npm install -g ...` or `pip install ...` outside project envs
-
-### 0) Windows prerequisites (winget)
-
-Install machine-level tools once:
+On Windows:
 
 ```powershell
 winget install --id Rustlang.Rustup -e
 winget install --id Kitware.CMake -e
 ```
 
-Verify:
-
-```powershell
-cargo --version
-rustc --version
-cmake --version
-```
-
-If `cmake` is installed but not found in PATH:
-
-```powershell
-$cmakeBin = "C:\Program Files\CMake\bin"
-$env:Path = "$cmakeBin;$env:Path"
-[Environment]::SetEnvironmentVariable("Path", "$cmakeBin;" + [Environment]::GetEnvironmentVariable("Path","User"), "User")
-cmake --version
-```
-
-### 1) Base build dependencies and commands (`build-base`)
-
-Base build uses Rust-native Pocket TTS only (no Python sidecar, no Qwen/GPU path).
-
-Required:
-- Node.js + npm
-- Rust (`cargo`, `rustc`)
-- CMake (required to build native Rust dependencies for Pocket TTS)
-
-Install project deps:
+### Run
 
 ```powershell
 npm install
+npm run models:bundle:kyutai   # once: puts the Kyutai model under src-tauri/binaries/models
+npm run desktop:dev
 ```
 
-Run in dev mode:
+A debug build (`tauri dev`) keeps its data in `tts-engine/.data`, so the `tts-engine/` folder must exist even though the Base build does not run it. Release builds keep data under the app's local data directory instead. Set `VOICEREADER_DATA_DIR` to put it somewhere else.
 
-```powershell
-npm run desktop:dev:base
-```
+To check that it works:
 
-Build:
+1. Open the Engine tab and confirm the Activity panel reports that the engine is ready.
+2. On the Reader tab, press Speak Text and listen.
+3. Highlight text in another app and press the hotkey shown on the Reader tab.
 
-```powershell
-npm run desktop:build:base
-```
+If there is no audio, check the OS output device, then use Refresh Health and Restart Engine on the Engine tab. The Activity panel lists the events the app received.
 
-Portable build:
+### Build
 
-```powershell
-npm run desktop:build:base:portable
-```
+| Command | Result |
+|---|---|
+| `npm run desktop:dev` | Run the Base build in dev mode. Same as `desktop:dev:base`. |
+| `npm run desktop:build` | Release executable without an installer. Same as `desktop:build:base`. |
+| `npm run desktop:build:standalone` | Installer from the Tauri bundler. Same as `desktop:build:base:installer`. |
+| `npm run desktop:build:portable` | Portable zip: `src-tauri/target/release/bundle/portable/VoiceReader_<version>_x64_portable.zip`. Same as `desktop:build:base:portable`. |
+| `npm run assets:fetch` | Fetch the ONNX Runtime library and the extra Kyutai voice clips. Hooked into the Base dev and build scripts. |
+| `npm run onnxruntime:fetch`, `npm run kyutai-voices:fetch` | The two halves of `assets:fetch`. |
+| `npm run models:bundle:kyutai` | Ensure the Kyutai model (and SoX, if found on the build machine) is under `src-tauri/binaries`. Runs inside every Base build. |
 
-Notes:
-- Base runtime is English-only in current app flow.
-- `desktop:build:base:portable` calls `models:bundle:kyutai`, which runs a Python helper to ensure bundled Kyutai model files exist.
-- If that helper needs to prefetch missing model files, set up `tts-engine/.venv` (see Full build setup below).
+The Base scripts also run `scripts/sync-version.js`, which copies the version from `package.json` into `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
 
-### 2) Full build dependencies and commands (`build-full`)
+What belongs under `src-tauri/binaries` for each build is described in `src-tauri/binaries/README.txt`.
 
-Full build uses Python sidecar + Kyutai + optional Qwen model paths.
+## Settings and environment variables
 
-Required:
-- Everything from Base build
-- Python (recommended 3.11 or 3.12)
-- Project Python venv under `tts-engine/.venv`
-- `pyinstaller` for sidecar packaging
+### In the app
 
-Set up Python env:
+| Setting | Where | Default | Saved |
+|---|---|---|---|
+| Hotkey | Reader tab | `Alt+S` on Windows, `Ctrl+Shift+S` on macOS and elsewhere | Yes, in `settings.json` in the app config directory |
+| Compute Device (Auto, GPU, CPU) | Engine tab | Auto | Yes, in `settings.json` |
+| Model mode and voice | Reader tab | Kyutai, built-in voice with the `alba` preset | No. Kyutai is selected on every start. |
+| Rate | Reader tab, toolbar | 1.5, range 0.25 to 4.0 | No. The toolbar rate button steps by 0.25 and wraps from 4.0 to 0.25. |
+| Volume | Reader tab | 1.0, range 0 to 2 | No. Applied when a job starts. |
+| Chunk Max Chars | Reader tab | 200, range 100 to 200 in the UI | No |
+| Theme, toolbar position | App and toolbar windows | Dark/light toggle; bottom-left of the monitor | Yes, in each window's local storage |
+
+If the saved hotkey cannot be registered, the app falls back to the platform default above and saves that. `Alt+Space` and `Cmd+Space` are refused as OS-reserved.
+
+Compute Device controls where Audio8's audio decoder runs. Auto uses the GPU only when a one-time benchmark shows it is at least 1.5 times faster than the CPU. GPU uses it whenever the provider loads. CPU never touches the GPU. Details are in `docs/learnings.md` section 11.
+
+### Environment variables
+
+All optional. The Base build reads these:
+
+| Variable | Effect |
+|---|---|
+| `VOICEREADER_DATA_DIR` | Data directory for models, voices and caches. |
+| `VOICEREADER_BUNDLED_KYUTAI_MODEL_DIR` | Use this folder as the bundled Kyutai model. It must contain the files listed in `src-tauri/binaries/README.txt`. |
+| `VOICEREADER_SOX_PATH` | Path to the SoX executable. Otherwise SoX is looked up next to the app, then on `PATH`, then in the Windows winget packages folder. |
+| `VOICEREADER_ONNXRUNTIME_PATH` | Path to the ONNX Runtime library file. Otherwise it is looked up under `binaries/onnxruntime` next to the app. There is no fallback to the system library. |
+| `VOICEREADER_AUDIO8_DECODER_DEVICE` | `auto`, `gpu` or `cpu`. Overrides the Compute Device setting. |
+| `VOICEREADER_AUDIO8_PARALLEL_CHUNKS` | Audio8 chunks generated at once, 1 to 8. Default 2 (1 on machines with fewer than 4 cores). |
+| `VOICEREADER_AUDIO8_DECODERS` | Audio8 decoder sessions, 1 to 4. Default 1. |
+| `VOICEREADER_AUDIO8_DECODER_THREADS` | Threads for the CPU decoder, 1 up to the core count. Default is half the cores, between 1 and 8. |
+| `VOICEREADER_ENGINE_ROOT` | Location of the `tts-engine` folder. Debug builds use `<root>/.data` as the data directory. |
+| `VOICEREADER_AUDIO8_TEST_MODEL_DIR`, `KYUTAI_TEST_MODEL_DIR`, `KYUTAI_TEST_OUT_DIR` | Used only by the ignored Rust tests. |
+
+The Full build also reads `VOICEREADER_ENGINE_EXECUTABLE` (release builds: path to the sidecar executable) and sets the sidecar's own variables, which are listed in `tts-engine/README.md`.
+
+## Full build
+
+Use this only to work on the Python sidecar or the Qwen models.
+
+- Needs everything from the Base prerequisites, plus Python 3.10 or newer, a virtual environment in `tts-engine/.venv`, and `pyinstaller` for packaging.
+- Models are Kyutai plus Qwen3-TTS 0.6B CustomVoice and Base. Qwen models are downloaded from the Engine tab and run through PyTorch.
+- The app starts the sidecar as a child process on a loopback port with a bearer token, talks to it over HTTP and a WebSocket, and stops it on exit. The protocol is in `docs/IPC_API.md`.
 
 ```powershell
 cd tts-engine
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install -e .
 python -m pip install pyinstaller
 cd ..
-```
-
-If `pocket-tts` is unavailable on your package index:
-
-```powershell
-cd tts-engine
-python -m pip install "git+https://github.com/kyutai-labs/pocket-tts.git"
-cd ..
-```
-
-Optional Full/Qwen extras:
-
-```powershell
-winget install --id ChrisBagwell.SoX -e
-```
-
-Optional FlashAttention path (may fail depending on platform/toolchain):
-
-```powershell
-cd tts-engine
-.\.venv\Scripts\Activate.ps1
-python -m pip install -U flash-attn --no-build-isolation
-cd ..
-```
-
-Run in dev mode:
-
-```powershell
 npm run desktop:dev:full
 ```
 
-Build:
+| Command | Result |
+|---|---|
+| `npm run desktop:dev:full` | Dev mode with the sidecar. |
+| `npm run desktop:build:full` | Release build; builds the sidecar first. |
+| `npm run desktop:build:full:portable` | Portable zip that includes the sidecar. |
+| `npm run sidecar:build` | Rebuild only the sidecar. |
 
-```powershell
-npm run desktop:build:full
-```
+To test the sidecar alone, see `tts-engine/README.md`.
 
-Portable build:
+## Project layout and docs
 
-```powershell
-npm run desktop:build:full:portable
-```
+| Path | Contents |
+|---|---|
+| `src/` | Frontend: main window (`main.ts`), floating toolbar (`toolbar.ts`) and shared helpers. |
+| `src-tauri/src/` | Rust backend. `voicereader_core.rs` has the Tauri commands, engine lifecycle and job streaming. The Base runtimes are `kyutai_local.rs` and `audio8_local.rs` (with `audio8_model.rs` for ONNX inference), sharing `text_chunking.rs` and `audio_pipeline.rs`. |
+| `src-tauri/binaries/` | Files bundled with the app. See `src-tauri/binaries/README.txt`. |
+| `tts-engine/` | Python sidecar for the Full build. |
+| `scripts/` | Version sync, asset fetch scripts and portable packaging. |
 
-### 3) Build command matrix
-
-- Default dev (Full): `npm run desktop:dev`
-- Base dev: `npm run desktop:dev:base`
-- Full build: `npm run desktop:build:full`
-- Base build: `npm run desktop:build:base`
-- Full portable: `npm run desktop:build:full:portable`
-- Base portable: `npm run desktop:build:base:portable`
-- Full sidecar-only rebuild: `npm run sidecar:build`
-- Bundle Kyutai models only: `npm run models:bundle:kyutai`
-
-### 4) Validate desktop app end-to-end
-
-After launching app dev mode:
-
-1. Confirm Activity shows engine/runtime ready.
-2. Keep model mode as `Kyutai Pocket TTS`.
-3. Pick a Kyutai preset voice (for example `alba`) or a saved cloned voice.
-4. Test **Speak Text**.
-5. Test hotkey path:
-   - highlight text in any app
-   - press configured hotkey
-6. Confirm events appear in Activity.
-
-If no audio:
-- Check OS output device and app volume.
-- Check `Engine Health` for active backend/runtime.
-- Use **Restart Engine** and retry.
-
-### 5) Validate Python engine independently (Full build)
-
-```powershell
-cd tts-engine
-.\.venv\Scripts\Activate.ps1
-$env:SPEAK_SELECTION_ENGINE_TOKEN = "dev-token"
-python -m tts_engine --server --port 8765
-```
-
-In another terminal:
-
-```powershell
-cd tts-engine
-python ./scripts/smoke_test.py --token dev-token
-```
-
-One-command variant:
-
-```powershell
-cd tts-engine
-python ./scripts/run_smoke_with_engine.py --token dev-token
-```
-
-### 6) Cleanup (local + optional machine tools)
-
-Project-local cleanup:
-
-```powershell
-deactivate 2>$null
-Remove-Item -Recurse -Force .\tts-engine\.venv, node_modules -ErrorAction SilentlyContinue
-```
-
-Optional machine-wide cleanup:
-
-```powershell
-winget uninstall --id ChrisBagwell.SoX -e
-winget uninstall --id Kitware.CMake -e
-winget uninstall --id Rustlang.Rustup -e
-```
-
-If Rustup was installed outside winget:
-
-```powershell
-rustup self uninstall -y
-```
-
----
+| Document | Contents |
+|---|---|
+| `docs/DESIGN_SPEC.md` | Architecture: builds, runtimes, event flow, chunking, playback, storage. |
+| `docs/DECISIONS.md` | Agreed direction, model choices, order of work. |
+| `docs/learnings.md` | Measurements and reasoning behind the playback pipeline, Audio8, chunking and GPU use. |
+| `docs/IPC_API.md` | The sidecar's HTTP and WebSocket API (Full build only). |
 
 ## Roadmap
 
-### Phase 2 - performance & quality
-- Better chunking (prosody-aware splitting)
-- Advanced seek controls beyond current toolbar skip/cancel behavior
-- Per-app capture improvements and fallbacks
-- Multi-voice quick switching
-- Optional model caching policies and cleanup UI
+Direction and order of work are in `docs/DECISIONS.md`. In short:
 
-### Phase 3 - portability & runtimes
-- Quantization support (optional)
-- Alternative runtimes (e.g., ONNX Runtime / other native backends)
-- Additional models (e.g., smaller CPU-first engines)
-- GPU acceleration improvements (Windows + macOS)
+1. Add an ASR tab (speech to text), including meetings with speaker labels. English only at first. This is next.
+2. Later: the Audio8 0.6B INT4 model as an on-demand multilingual download. Not scheduled yet.
 
-### Phase 4 - mobile support (future)
-- Android: Accessibility Service-based selection reading + offline TTS
-- iOS: likely via Share Sheet / clipboard / in-app reader modes (OS limitations)
-- Shared "Engine API" concepts across platforms
+Kyutai Pocket TTS stays the default model; Audio8 stays optional.
 
----
-
-## Project docs
-- `model_registry.json` - draft registry for bundled default + on-demand model metadata (source, distribution mode, runtime notes)
-- `docs/DESIGN_SPEC.md` - current architecture and UX/runtime behavior
-- `docs/IPC_API.md` - concrete sidecar API contract (HTTP/WS), schemas, errors, streaming events
-- `docs/learnings.md` - implementation learnings on chunking, SoX/rate control, and playback pipeline behavior
-
----
+Not planned right now: running Audio8's generation step on a GPU (it measured slower there) and other languages for Kyutai.
 
 ## License
-Project license: **MIT**.
-Third-party components/models retain their own licenses (Kyutai Pocket TTS and Qwen are Apache-2.0).
+
+Project license: MIT. Third-party components and models keep their own licenses. The extra Kyutai voice clips are credited in `src-tauri/binaries/kyutai-voices/ATTRIBUTION.txt`, which the fetch script writes.

@@ -20,11 +20,22 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 uuid = { version = "1", features = ["v4"], optional = true }
 pocket-tts = { version = "0.2.1", optional = true }
+# Audio8 TTS (ONNX Runtime). Loaded from a shared library at run time (`load-dynamic`):
+# linking it statically clashes with the protobuf copy inside sentencepiece (pocket-tts).
+# The library is fetched by scripts/fetch-onnxruntime.js into binaries/onnxruntime.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-22", "half"], optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
+hound = { version = "3.5", optional = true }
+half = { version = "2", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+# GPU providers for the Audio8 decoder: DirectML on Windows, Core ML on macOS.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"], optional = true }
+libloading = { version = "0.9", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"], optional = true }
 core-graphics = "0.24"
 core-foundation = "0.10"
 objc = "0.2"
@@ -33,4 +44,4 @@ objc = "0.2"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 build-full = []
-build-base = ["dep:uuid", "dep:pocket-tts"]
+build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading"]

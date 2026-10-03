@@ -195,7 +195,17 @@ def ensure_bundled_sox(root: Path) -> Path | None:
 
     if target_dir.exists():
         _remove_path_with_retry(target_dir)
-    shutil.copytree(source_dir, target_dir)
+    # The SoX distribution also ships wget, manuals and an example script. Only the
+    # program, its libraries and its licence/readme files belong in the app.
+    target_dir.mkdir(parents=True)
+    for entry in sorted(source_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name.lower()
+        is_runtime = name in ("sox.exe", "sox") or name.endswith((".dll", ".dylib", ".so"))
+        is_notice = name.startswith(("license", "readme", "copying"))
+        if is_runtime or is_notice:
+            shutil.copy2(entry, target_dir / entry.name)
     print(f"Bundled SoX runtime to: {target_dir}")
     return target_dir
 

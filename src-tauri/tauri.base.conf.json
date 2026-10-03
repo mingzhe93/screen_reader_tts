@@ -6,7 +6,9 @@
     "bundle": {
       "resources": [
         "binaries/models/**/*",
-        "binaries/sox/**/*"
+        "binaries/sox/**/*",
+        "binaries/onnxruntime/**/*",
+        "binaries/kyutai-voices/**/*"
       ]
     }
   }

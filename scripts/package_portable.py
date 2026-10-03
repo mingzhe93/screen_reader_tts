@@ -104,6 +104,22 @@ def main() -> int:
         print("Copying bundled models (base variant)...", flush=True)
         (portable_dir / "binaries").mkdir(parents=True, exist_ok=True)
         _copytree(source_models_dir, portable_dir / "binaries" / "models")
+        source_onnxruntime_dir = binaries_dir / "onnxruntime"
+        if source_onnxruntime_dir.exists():
+            _copytree(source_onnxruntime_dir, portable_dir / "binaries" / "onnxruntime")
+        else:
+            print(
+                "WARNING: ONNX Runtime library not found under src-tauri/binaries/onnxruntime. "
+                "Audio8 TTS will be unavailable in this package; run `npm run onnxruntime:fetch`."
+            )
+        source_kyutai_voices_dir = binaries_dir / "kyutai-voices"
+        if source_kyutai_voices_dir.exists():
+            _copytree(source_kyutai_voices_dir, portable_dir / "binaries" / "kyutai-voices")
+        else:
+            print(
+                "WARNING: extra Kyutai voice clips not found under src-tauri/binaries/kyutai-voices. "
+                "Only the eight built-in presets will work; run `npm run kyutai-voices:fetch`."
+            )
         source_sox_dir = binaries_dir / "sox"
         if source_sox_dir.exists():
             print("Copying bundled SoX runtime (base variant)...", flush=True)

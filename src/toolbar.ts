@@ -1,21 +1,18 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
 import { appWindow, currentMonitor, LogicalPosition, PhysicalPosition } from "@tauri-apps/api/window";
+import {
+  RATE_UPDATED_EVENT,
+  TOOLBAR_ACTION_EVENT,
+  TOOLBAR_HIDE_EVENT,
+  TOOLBAR_PAUSED_EVENT,
+  TOOLBAR_SHOW_EVENT,
+  TOOLBAR_SKIP_BACK_NOOP_EVENT,
+  formatRateNumber,
+  rateFromPayload,
+} from "./shared";
 import "./toolbar.css";
-
-type ToolbarActionPayload = {
-  action: "pause-toggle" | "skip-back" | "skip-forward" | "stop";
-};
-
-type ToolbarShowPayload = {
-  job_id: string;
-  source_window: string;
-  rate: number;
-};
-
-type ToolbarPausePayload = {
-  paused: boolean;
-};
+import type { ToolbarActionPayload, ToolbarPausePayload, ToolbarShowPayload } from "./types";
 
 type SpeakRateResult = {
   ok: boolean;
@@ -68,13 +65,11 @@ const skipForwardBtn = document.querySelector<HTMLButtonElement>("#toolbar-skip-
 const pauseIcon = document.querySelector<SVGElement>("#icon-pause")!;
 const playIcon = document.querySelector<SVGElement>("#icon-play")!;
 
-let toolbarPaused = false;
-
 function formatRate(rate: number): string {
   if (!Number.isFinite(rate)) {
     return "1x";
   }
-  return `${rate.toFixed(2).replace(/\.?0+$/, "")}x`;
+  return `${formatRateNumber(rate)}x`;
 }
 
 function setPauseVisual(paused: boolean): void {
@@ -95,7 +90,7 @@ function flashSkipBackNoop(): void {
 }
 
 function dispatchAction(action: ToolbarActionPayload["action"]): void {
-  void emit("voicereader:toolbar-action", { action } satisfies ToolbarActionPayload);
+  void emit(TOOLBAR_ACTION_EVENT, { action } satisfies ToolbarActionPayload);
 }
 
 function readSavedToolbarPosition(): ToolbarPosition | null {
@@ -186,34 +181,31 @@ skipBackBtn.addEventListener("click", () => {
   dispatchAction("skip-back");
 });
 
-void listen<ToolbarShowPayload>("voicereader:toolbar-show", async ({ payload }) => {
+void listen<ToolbarShowPayload>(TOOLBAR_SHOW_EVENT, async ({ payload }) => {
   sourceLabel.textContent = payload.source_window || "Reading aloud...";
   rateBtn.textContent = formatRate(payload.rate);
-  toolbarPaused = false;
   setPauseVisual(false);
   await appWindow.show();
 });
 
-void listen("voicereader:toolbar-hide", async () => {
-  toolbarPaused = false;
+void listen(TOOLBAR_HIDE_EVENT, async () => {
   setPauseVisual(false);
   await appWindow.hide();
 });
 
-void listen<ToolbarPausePayload>("voicereader:toolbar-paused", ({ payload }) => {
-  toolbarPaused = Boolean(payload.paused);
-  setPauseVisual(toolbarPaused);
+void listen<ToolbarPausePayload>(TOOLBAR_PAUSED_EVENT, ({ payload }) => {
+  setPauseVisual(Boolean(payload.paused));
 });
 
-void listen<Record<string, unknown>>("voicereader:rate-updated", ({ payload }) => {
-  const parsed = Number(payload.rate ?? NaN);
-  if (!Number.isFinite(parsed)) {
+void listen<Record<string, unknown>>(RATE_UPDATED_EVENT, ({ payload }) => {
+  const parsed = rateFromPayload(payload);
+  if (parsed === null) {
     return;
   }
   rateBtn.textContent = formatRate(parsed);
 });
 
-void listen("voicereader:toolbar-skip-back-noop", () => {
+void listen(TOOLBAR_SKIP_BACK_NOOP_EVENT, () => {
   flashSkipBackNoop();
 });
 
