@@ -1,8 +1,8 @@
 VoiceReader Engine API (Python sidecar, Full build only)
 
-> **This API applies to the Full build (`build-full`) only.** The Base build (`build-base`, the default) has no sidecar and no localhost API. Kyutai Pocket TTS and Audio8 TTS run inside the Rust process, and the Rust code sends audio to the frontend as Tauri events. That flow is described in `docs/DESIGN_SPEC.md`. The Full build is kept for future heavier models and is not actively used.
+> **This API applies to the Full build (`build-full`) only.** The Base build (`build-base`, the default) has no sidecar and no localhost API. Kyutai Pocket TTS, Audio8 TTS and transcription run inside the Rust process, and the Rust code talks to the frontend through Tauri commands and events. The Base build's interface is those commands and events, described in `docs/DESIGN_SPEC.md` (section 6, and section 15 for transcription). The sidecar has no transcription endpoint. The Full build is kept for future heavier models and is not actively used.
 >
-> This document was checked against `tts-engine/src/tts_engine/` (`app.py`, `schemas.py`, `jobs.py`, `auth.py`, `errors.py`, `chunking.py`).
+> This document was checked against `tts-engine/src/tts_engine/` (`app.py`, `schemas.py`, `jobs.py`, `auth.py`, `errors.py`, `chunking.py`, `config.py`) for engine version 0.2.0.
 
 ## 1. Overview
 The Python sidecar exposes an HTTP and WebSocket API. The desktop app starts it as a child process.
@@ -14,6 +14,9 @@ The Python sidecar exposes an HTTP and WebSocket API. The desktop app starts it 
   - Loopback only (`127.0.0.1` by default; the app passes a free port)
 - Auth:
   - Bearer token required for HTTP and WS
+- Start-up:
+  - `python -m tts_engine --server` (or the bundled `tts-engine` executable) with `--port` (default 8765), `--host` (default `127.0.0.1`), `--data-dir`, and the token from `--token`, the `SPEAK_SELECTION_ENGINE_TOKEN` environment variable (`--token-env` names another variable) or a JSON object on stdin with `--bootstrap-stdin` (`token`, `port`, `data_dir`)
+  - The desktop app passes `--server --port <free port> --data-dir <dir>` and sets the token in the environment
 
 ## 2. Auth Policy
 
@@ -89,7 +92,7 @@ Codes the sidecar returns:
 ## 4. HTTP API (`/v1`)
 
 ### 4.1 `GET /health`
-Returns runtime health and capabilities: `engine_version`, `active_model_id`, `device`, `capabilities` (`supports_voice_clone`, `supports_audio_chunk_stream`, `supports_true_streaming_inference`, `languages`) and `runtime` (`backend`, `model_loaded`, `fallback_active`, `detail`, `supports_default_voice`, `supports_cloned_voices`, `warmup`). The `warmup` object has `status`, `runs`, `last_reason`, `last_started_at`, `last_completed_at`, `last_duration_ms` and `last_error`.
+Returns runtime health and capabilities: `engine_version` (`"0.2.0"`), `active_model_id`, `device`, `capabilities` (`supports_voice_clone`, `supports_audio_chunk_stream`, `supports_true_streaming_inference`, `languages`) and `runtime` (`backend`, `model_loaded`, `fallback_active`, `detail`, `supports_default_voice`, `supports_cloned_voices`, `warmup`). The `warmup` object has `status`, `runs`, `last_reason`, `last_started_at`, `last_completed_at`, `last_duration_ms` and `last_error`.
 
 `backend` is one of `kyutai_pocket_tts`, `qwen_custom_voice` or `mock`.
 

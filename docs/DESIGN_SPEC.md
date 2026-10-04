@@ -15,31 +15,59 @@ A Cargo feature picks the build. Exactly one must be enabled; the crate refuses 
 | Status | The product and the default for `npm run desktop:dev` and `desktop:build` | Kept for future heavier models; not actively used |
 | Inference | In the Rust process | Python sidecar (`tts-engine/`) over loopback HTTP and WebSocket |
 | Models | Kyutai Pocket TTS (bundled), Audio8 TTS 0.1B (optional download) | Kyutai, Qwen3-TTS 0.6B CustomVoice and Base |
+| Speech to text | Multitalker Parakeet with the Nemotron-3 diarizer (optional download; section 15) | Not available |
 | Python at run time | No | Yes |
 
-Code shared by both builds (commands, state, hotkey, selection capture, toolbar) lives in `voicereader_core.rs`. Code that exists only in one build is behind `#[cfg(feature = ...)]`. In the Base build `qwen_modes_enabled()` is false, so Qwen modes are hidden and their commands return an error.
+Code shared by both builds (commands, state, hotkey, selection capture, toolbar) lives in `voicereader_core.rs`. Code that exists only in one build is behind `#[cfg(feature = ...)]`. In the Base build `qwen_modes_enabled()` is false, so Qwen modes are hidden and their commands return an error. Audio8 and transcription exist only in the Base build. In the Full build `download_audio8_model`, `download_asr_model`, `transcribe_audio_file`, `transcribe_microphone_input` and `cancel_transcription` return an error, `audio8_model_status` and `asr_model_status` report `supported: false`, and `list_audio_inputs` returns an empty list.
+
+The app version is 0.2.0. `package.json` is the source: `scripts/sync-version.js`, which runs before dev and build, copies it to `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`. The Base runtimes report it as `engine_version` in their health JSON (through `CARGO_PKG_VERSION`), and the model downloader sends it in its user agent. The sidecar has its own version, also 0.2.0, in `tts-engine/pyproject.toml`, `tts_engine/__init__.py` and `tts_engine/config.py`; the sync script does not change it.
 
 ## 3. Source layout
 
-Rust backend (`src-tauri/src/`):
+Rust backend (`src-tauri/src/`). `lib.rs` declares the modules; every module except `voicereader_core.rs`, `selection.rs` and `settings.rs` is compiled only in the Base build.
 
 | File | Role |
 |---|---|
-| `voicereader_core.rs` | Tauri commands, engine lifecycle, job streaming |
-| `settings.rs` | Settings file (hotkey, compute device) |
+| `main.rs` | Entry point; calls `run()` in `lib.rs`, which calls `run_app()` |
+| `voicereader_core.rs` | Tauri commands, hotkey, toolbar window, engine lifecycle, job streaming, transcription jobs |
+| `settings.rs` | Settings file (hotkey, compute device) and hotkey validation |
 | `selection.rs` | Capturing the selected text and the source window title, per platform |
 | `model_download.rs` | Resumable model download from Hugging Face |
-| `kyutai_local.rs`, `audio8_local.rs` | The two Base-build runtimes |
+| `kyutai_local.rs`, `audio8_local.rs` | The two Base-build TTS runtimes. `kyutai_local.rs` also stores the saved voices; `audio8_local.rs` also chooses the decoder device and loads the ONNX Runtime library (`ensure_onnxruntime`), which transcription uses too |
 | `audio8_model.rs` | Audio8 ONNX inference |
 | `audio_pipeline.rs` | SoX tempo stream and rate-controlled PCM emission, shared by both runtimes |
 | `bundled_paths.rs` | Locating files bundled next to the app |
 | `text_chunking.rs` | Text normalization and chunking |
+| `asr_local.rs` | Transcription: model files, the chunk loop, grouping text into speaker turns |
+| `audio_decode.rs` | Reading audio files as 16 kHz mono in blocks; the resampler (also used for Audio8 reference clips) |
+| `audio_capture.rs` | Recording an input device (microphone) as 16 kHz mono |
 
-Frontend (`src/`): `main.ts` is the main window and owns the playback queue. `toolbar.ts` is the floating toolbar window. The two HTML entry points are `index.html` and `toolbar.html`.
+`src-tauri/vendor/parakeet-rs` is a vendored copy of the `parakeet-rs` crate (0.3.8) with two changes to `src/multitalker.rs`, marked `VoiceReader patch`: the speaker hold and the transcription of speakers beyond the limit (section 15). `src-tauri/vendor/parakeet-rs/VOICEREADER_PATCH.md` lists them and says how to move to a newer upstream version. `src-tauri/Info.plist` holds the macOS microphone permission text.
+
+Frontend (`src/`):
+
+| File | Role |
+|---|---|
+| `main.ts` | The main window: the HTML template for all pages, the handlers, and the playback queue |
+| `transcribe.ts` | The Transcribe page and the transcription row on the Models page |
+| `toolbar.ts` | The floating toolbar window |
+| `playback.ts` | Prebuffer and rebuffer times, leading silence, PCM decoding |
+| `shared.ts` | Toolbar event names and rate helpers used by both windows |
+| `types.ts` | Payload types for the commands and events |
+| `icons.ts` | The inline SVG icons and the brand mark |
+| `styles.css`, `toolbar.css` | Styles of the main window and of the toolbar |
+
+The two HTML entry points are `index.html` and `toolbar.html`.
 
 ## 4. Windows
 
-- **Main window** (`index.html`), with three tabs: Reader (hotkey, model, voice, rate, volume, chunk size, Speak Text), Voices & Clone (clone form and voice library), Engine (model downloads, Compute Device, health, activity log).
+- **Main window** (`index.html`, label `main`): opens at 1240 by 980 (minimum 980 by 840). A fixed sidebar on the left lists the pages in three groups, Speak (Read aloud, Voices), Listen (Transcribe) and App (Models, Settings); one page at a time shows on the right.
+  - Read aloud: the hotkey with a Change button that captures a key combination, Model, Voice (the model's built-in voices, then saved voices), Speed (a slider from `0.25x` to `4x` in steps of `0.05`), and a text box with Speak, Read selection and Stop. Changing speed, volume or chunk size sends `set_speak_settings`; Speak and Read selection send it first.
+  - Voices: a clone form (voice name, language hint, reference audio, reference text) and the voice library table. The form takes WAV files only. Transcribe audio fills the reference text from the chosen clip with `transcribe_reference_clip` (section 15); when the transcription model is missing, the form offers the download in place, shows its progress, and transcribes the clip once it finishes. The reference text is optional for Kyutai and required for Audio8, and the form's hint changes with the selected model. The table lists the model's built-in voices and the saved voices; a saved voice's name, language and description can be edited and saved, and it can be deleted. The description of a built-in voice can be edited in the table, but the change is kept only in memory until the app closes.
+  - Transcribe: section 15.
+  - Models: Kyutai Pocket TTS (bundled, always ready), Audio8 TTS with its download button and progress (Base build only), Transcription with its download button and progress (shown when the build supports it), Qwen3 TTS with three download buttons (Full build only), and a line with the data, models and Hugging Face cache folders.
+  - Settings: Playback (volume `0` to `2`, chunk max chars `100` to `200`), Compute device (Auto, GPU or CPU; shown only where a GPU provider exists, which is Windows and macOS in the Base build), Appearance (dark or light theme, dark by default), and Diagnostics (engine health JSON, Refresh health, Restart engine, and the activity log).
+  - The bottom of the sidebar shows the engine status (model and device); clicking it opens Settings at Diagnostics.
 - **Toolbar window** (`toolbar.html`, label `toolbar`), created at startup: 360 by 108, frameless, transparent, always on top, hidden from the taskbar, hidden until a job starts.
   - Controls: rate button (steps by `0.25x` and wraps from `4.0x` to `0.25x`), skip back (shows a short flash only; seeking is not implemented), pause or resume, stop, skip forward.
   - Pause suspends the Web Audio context. Skip forward stops the audio already scheduled and plays what is queued next.
@@ -57,7 +85,7 @@ Frontend (`src/`): `main.ts` is the main window and owns the playback queue. `to
 6. **Events to the frontend.** Each PCM piece is sent as a `voicereader:ws-event` with `type: "AUDIO_CHUNK"`. The job ends with `JOB_DONE` or `JOB_CANCELED`, or `JOB_ERROR` on failure. In the Base build these are emitted directly from Rust. In the Full build the backend relays them from the sidecar's WebSocket.
 7. **Playback.** The frontend decodes each chunk and queues it (section 9). The toolbar is shown on `voicereader:job-started` and hidden when playback ends.
 
-The Reader tab's Read Selection Now button calls the same flow through `trigger_read_selection`. Speak Text uses `speak_text`, which skips steps 1 to 3.
+The Read aloud page's Read selection button calls the same flow through `trigger_read_selection`. Speak uses `speak_text`, which skips steps 1 to 3.
 
 ## 6. IPC surface
 
@@ -74,8 +102,13 @@ Registered in `run_app`:
 | Playback settings | `set_speak_settings` (rate, volume, chunk size), `cycle_speak_rate` |
 | Hotkey | `set_hotkey` |
 | Jobs | `speak_text`, `trigger_read_selection`, `cancel_active_job` |
+| Transcription | `asr_model_status`, `download_asr_model`, `transcribe_audio_file`, `transcribe_microphone_input`, `transcribe_reference_clip`, `list_audio_inputs`, `cancel_transcription`, `save_text_file` |
 
-`set_speak_settings` validates rate `0.25..4.0`, volume `0.0..2.0` and chunk size `100..2000`, and updates the running job's rate immediately.
+`set_speak_settings` validates rate `0.25..4.0`, volume `0.0..2.0` and chunk size `100..2000`, and updates the running job's rate immediately. The Settings page limits the chunk size to `100..200`.
+
+The transcription commands take these arguments: `transcribe_audio_file(path, max_speakers?)` and `transcribe_microphone_input(device?, max_speakers?)` return `{ job_id }`; `max_speakers` defaults to 8 and `device` is a name from `list_audio_inputs`, which returns `{ name, is_default }` entries with the default first. `asr_model_status` returns `supported`, `downloaded`, `model_dir`, `repo`, `diarizer_repo`, `download_size_bytes`, `default_max_speakers` and `max_speakers_limit`. `download_asr_model` and `download_audio8_model` return when the download has finished and report progress as events. `cancel_transcription` returns `ok: false` when nothing is running. `save_text_file(path, contents)` writes the text to the path the user chose in a save dialog.
+
+The Tauri allowlist in `tauri.conf.json` enables only `shell` open, `clipboard` read text, `globalShortcut` (all), `window` (all), and `dialog` open and save. The Transcribe page uses the two dialogs, to choose a recording and to choose where to export a transcript.
 
 ### 6.2 Events
 
@@ -85,17 +118,18 @@ Emitted by the backend to all windows:
 |---|---|---|
 | `voicereader:engine-ready` | health JSON | The runtime finished initializing |
 | `voicereader:job-started` | `job_id`, `ws_url`, `source` (`manual` or `hotkey_selection_capture`), `source_window`, `rate` | A job was accepted. In the Base build `ws_url` is `local://stream/<job_id>` and unused. |
-| `voicereader:ws-event` | `type` is `JOB_STARTED`, `AUDIO_CHUNK`, `JOB_DONE`, `JOB_CANCELED` or `JOB_ERROR` | During a job. Base `AUDIO_CHUNK` carries `chunk_index` and `audio` (`format: pcm_s16le`, `sample_rate`, `channels: 1`, `data_base64`). Terminal events carry `had_audio` (Base) or the sidecar's fields (Full). |
+| `voicereader:ws-event` | `type` is `JOB_STARTED`, `AUDIO_CHUNK`, `JOB_DONE`, `JOB_CANCELED` or `JOB_ERROR`; always `job_id` | During a job. Base `AUDIO_CHUNK` carries `chunk_index` and `audio` (`format: pcm_s16le`, `sample_rate`, `channels: 1`, `data_base64`). Base `JOB_DONE` and `JOB_CANCELED` carry `had_audio`; Base `JOB_ERROR` carries `error` as a string. In the Full build the sidecar's events are passed on unchanged (`docs/IPC_API.md`). |
 | `voicereader:job-cancel-requested` | `job_id` | `cancel_active_job` was called; the frontend stops playback at once |
 | `voicereader:rate-updated` | `rate` | The rate changed from the main window or the toolbar |
 | `voicereader:hotkey-updated` | `hotkey` | The hotkey was changed or fell back |
 | `voicereader:selection-empty` | `reason` | The hotkey found no selected text |
-| `voicereader:model-download` | `model`, `state` (`progress`, `done`, `error`), `file`, `file_index`, `file_count`, `downloaded_bytes`, `total_bytes`, `message` | During the Audio8 download |
+| `voicereader:model-download` | `model`, `state` (`progress`, `done`, `error`), `file`, `file_index`, `file_count`, `downloaded_bytes`, `total_bytes`, `message` | During a model download (Base build). `model` is `audio8_tts_0_1b` or `parakeet_multitalker`. The main window shows the first, `transcribe.ts` the second. |
+| `voicereader:transcript` | `job_id`, `kind` (`loading`, `started`, `turn`, `progress`, `level`, `done`, `cancelled`, `error`), `turn` (`id`, `speaker`, `unknown`, `start_secs`, `end_secs`, `text`; `null` except in `turn` events), `processed_secs`, `total_secs` (`null` when unknown), `level` (0 to 1, in `level` events), `message` | During a transcription (section 15) |
 | `voicereader:error` | `message` | Any backend error worth showing in the Activity log |
 
-Between the main window and the toolbar, over the same event bus: `voicereader:toolbar-show` (`job_id`, `source_window`, `rate`), `voicereader:toolbar-hide`, `voicereader:toolbar-paused` (`paused`), `voicereader:toolbar-action` (`pause-toggle`, `skip-back`, `skip-forward` or `stop`) and `voicereader:toolbar-skip-back-noop`. The main window owns the audio, so toolbar buttons only send actions to it.
+Between the main window and the toolbar, over the same event bus: `voicereader:toolbar-show` (`job_id`, `source_window`, `rate`), `voicereader:toolbar-hide`, `voicereader:toolbar-paused` (`paused`), `voicereader:toolbar-action` (`pause-toggle`, `skip-back`, `skip-forward` or `stop`) and `voicereader:toolbar-skip-back-noop`. The main window owns the audio, so toolbar buttons only send actions to it. The Transcribe page also listens to Tauri's own `tauri://file-drop` event (payload: a list of paths).
 
-The frontend also polls `engine_runtime_status` every 5 seconds to show the engine pill.
+The frontend also polls `engine_runtime_status` every 5 seconds to show the engine status in the sidebar.
 
 ## 7. Runtimes (Base build)
 
@@ -113,7 +147,7 @@ Both runtimes sit behind the same `stream_synthesize(...)` shape: voice, text, c
 - Three ONNX graphs run through ONNX Runtime, loaded at run time from a shared library (section 10): a slow autoregressive model, a fast autoregressive model, and a codec decoder. A codec encoder is used only to register a cloned voice.
 - Each voice has a prompt (reference transcript plus reference codes). Its state after the prompt is cached per voice, so chunks do not repeat that work. Only the few most recently used voices stay cached.
 - By default two chunks are generated at once (one on machines with fewer than four cores). One decode loop serves the chunk being played first, in small windows, and uses idle time for chunks generated ahead. The first chunks are short so playback can start early. See `docs/learnings.md` section 7.
-- Generation always runs on the CPU. The decoder can run on a GPU (section 11).
+- Generation always runs on the CPU. The decoder can run on a GPU (section 12).
 
 ### 7.3 Playback rate
 
@@ -147,7 +181,7 @@ Data directory: `VOICEREADER_DATA_DIR` if set. Otherwise debug builds use `tts-e
 
 | Path under the data directory | Contents |
 |---|---|
-| `models/<org>/<repo>/` | Downloaded models. Audio8 is in `models/Edge0/audio8-TTS-0.1B-ONNX-INT8`. |
+| `models/<org>/<repo>/` | Downloaded models. Audio8 is in `models/Edge0/audio8-TTS-0.1B-ONNX-INT8`. The transcription models are in `models/Recogment/parakeet-multitalker-int8-onnx` and `models/altunenes/parakeet-rs/nemotron-3-diarization`. |
 | `voices/<voice_id>/` | One folder per saved voice: `meta.json` (name, language hint, description, transcript, creation time), `reference.wav`, and `audio8_codes.npy` once the voice has been encoded for Audio8 |
 | `preset-voices/` | Normalized reference clips for the 13 clone-on-first-use Kyutai presets |
 | `pocket-tts-runtime/` | Kyutai runtime config, rewritten at start to point at the model files |
@@ -158,11 +192,11 @@ Voice ID `0` is the built-in voice: the selected Kyutai preset, or Audio8's own 
 
 App settings are in `settings.json` in the app config directory: `hotkey` and `compute_device`. Other state (theme, toolbar position, voice numbering) lives in webview local storage.
 
-ONNX Runtime is not linked statically, because its protobuf clashes with the one inside the Kyutai runtime's dependencies. `scripts/fetch-onnxruntime.js` downloads it into `src-tauri/binaries/onnxruntime`. The runtime loads it by absolute path (see `bundled_paths.rs` and `VOICEREADER_ONNXRUNTIME_PATH`) and never from the system library path. The same library is meant to serve the planned ASR work.
+ONNX Runtime is not linked statically, because its protobuf clashes with the one inside the Kyutai runtime's dependencies. `scripts/fetch-onnxruntime.js` downloads it into `src-tauri/binaries/onnxruntime` (version 1.24.4, or 1.23.2 on Intel macOS; on Windows the DirectML build with `DirectML.dll`). The runtime loads it by absolute path (see `bundled_paths.rs` and `VOICEREADER_ONNXRUNTIME_PATH`) and never from the system library path. Transcription uses the same library.
 
 ## 11. Model download
 
-The Audio8 download is a Tauri command and runs once at a time. It asks Hugging Face for the size of each of the model's files, then downloads them in order into `*.part` files. An interrupted download resumes with an HTTP range request; a file whose final size already matches is skipped. Finished files are renamed into place. Progress goes out as `voicereader:model-download`, at most every 250 ms. The model counts as downloaded when every required file is present.
+Each model download is a Tauri command and runs once at a time. The transcription download runs the same routine twice, once per repo, and reports progress against the combined size. It asks Hugging Face for the size of each of the model's files, then downloads them in order into `*.part` files. An interrupted download resumes with an HTTP range request; a file whose final size already matches is skipped. Finished files are renamed into place. Progress goes out as `voicereader:model-download`, at most every 250 ms. The model counts as downloaded when every required file is present.
 
 ## 12. Compute device
 
@@ -186,12 +220,33 @@ Measurements and the reasons for these choices are in `docs/learnings.md` sectio
 ## 14. Platform differences
 
 - Windows: copy is sent with `SendInput`; modifier state comes from `GetAsyncKeyState`; the source label is the foreground window title; the Audio8 decoder can use DirectML.
-- macOS: copy is sent with CGEvent; modifier state comes from the CGEvent source state; the source label is the frontmost application's name.
+- macOS: copy is sent with CGEvent; modifier state comes from the CGEvent source state; the source label is the frontmost application's name. `src-tauri/Info.plist` carries the microphone permission text (`NSMicrophoneUsageDescription`) for live transcription; recording has not been tried on a Mac.
 - Other platforms: no copy simulation and no source label, so the hotkey flow reports an empty selection.
 
-## 15. Known gaps
+## 15. Transcription
+
+English speech to text with speaker labels, Base build only. It works on a recording (a file) or live from a microphone. System audio (what the computer is playing) is not captured, word boosting does not exist, and neither transcripts nor recordings are saved between runs. Measurements are in `docs/learnings.md` section 12.
+
+- **Models.** The multitalker Parakeet model (int8 encoder and decoder, about 666 MB) and the Nemotron-3 diarizer (about 400 MB), both run by the `parakeet-rs` crate on the shared ONNX Runtime library (section 10). They run on the CPU on purpose: the GPU measured no faster, because the speech encoder is int8. The model uses half the hardware threads, between 1 and 8 (`VOICEREADER_ASR_THREADS` overrides it, from 1 to 64), and about 1.3 GB of memory while transcribing. The crate is vendored in `src-tauri/vendor/parakeet-rs` with two patches (speaker hold and unknown speaker, below). The diarizer says who is speaking in each chunk; the speech encoder then runs once per active speaker with that speaker's activity as an extra input, which is what lets it separate people talking at the same time.
+- **Speaker hold.** The model emits a word slightly after it was spoken, and the diarizer's activity is what switches each speaker's encoder input on and off. Used as is, the input is switched off the moment a speaker stops and the words still on their way out are lost. The patch keeps a speaker switched on for 0.8 s after their activity last reached 0.5, and keeps them visible to the other speakers as background for 0.6 s (`SPEAKER_HOLD_SECS`, `BACKGROUND_HOLD_SECS` in `asr_local.rs`). The hold carries over from one chunk to the next. Measurements are in `docs/learnings.md` section 12.6.
+- **Speaker limit and the unknown speaker.** The diarizer has eight speaker slots and gives each new voice the next free one. The Speakers setting on the Transcribe page (1 to 8, default 8; `max_speakers`) says how many slots get a label of their own. The slots beyond it are transcribed together by one extra model instance, which runs only on a chunk with at least 0.3 s of speech for it to hear. Their turns carry the speaker number 8 with `unknown: true`, and the page shows them as "Unknown speaker". With the default of 8 there are no slots beyond the limit, so this appears only when Speakers is set lower. When such speech adds up to 2 seconds or more, the final message says how much it was and suggests raising Speakers. Upstream skips those slots; this is the second change in the vendored crate.
+- **Lifecycle.** `transcribe_audio_file` and `transcribe_microphone_input` start one job at a time on a blocking task and return its `job_id`; starting another while one runs is refused. The job sends `loading` at once, loads the model (about 3 s), then sends `started`. The model is dropped when the job ends, so its memory is held only while transcribing. `cancel_transcription` sets a flag. For a file it is checked between chunks and abandons the rest of the file (`cancelled`). For the microphone it ends the recording: the audio already captured is transcribed, and the job finishes normally (`done`). A guard releases the job and sends `error` if the task ends without a result. The `done` message gives the audio length, the number of labelled speakers and, for a file, the time it took; the unknown speaker is not counted as a speaker.
+- **Audio input.** `audio_decode.rs` opens the file before the model loads, so an unreadable file fails at once. It decodes with `symphonia` packet by packet (a damaged packet is skipped), mixes to mono and resamples to 16 kHz in a streaming windowed-sinc resampler, so a long recording is never held in memory as a whole. The decoder is built for WAV, MP3, AAC in M4A or MP4, ALAC, FLAC, OGG Vorbis and MKV; Opus cannot be decoded. The file dialog offers `wav`, `mp3`, `m4a`, `mp4`, `aac`, `flac`, `ogg`, `oga`, `mkv` and `mov`, and a file the decoder cannot read fails with a message naming the supported formats. The total length is known only when the file states its frame count.
+- **Microphone input.** `audio_capture.rs` opens the chosen input device (or the system default) with `cpal` at the device's own format (`f32`, `i16`, `u16` or `i32` samples), mixes it to mono in the audio callback and sends it over a channel. The transcription thread resamples it to 16 kHz with the same resampler as files. The capture stream is created and dropped on that thread, after the model has loaded, so nothing is recorded while the model is still loading. A `level` event carries the loudest sample (0 to 1) of each piece of captured audio for the level meter, and the first one tells the frontend that audio is arriving. If a device delivers nothing for 10 seconds (`SILENT_DEVICE_TIMEOUT`; a Bluetooth headset can need over a second to start) the job fails with an explanation. A thread named `audio-host` touches the audio system first and never exits: on Windows the audio library's device enumerator belongs to the first thread that uses it, and the app's background threads end when idle, which crashed the next use from another thread.
+- **Reference clips.** `transcribe_reference_clip(wav_base64)` returns `{ text }` for the voice-cloning form. It decodes the WAV, adds 1.5 s of silence so the last words come out, and runs the speech model with every frame marked as one speaker: no diarizer gating, no turns, no events. It waits for the result instead of starting a job, but it takes the same single job slot, so it is refused while a transcription is running and the other way round.
+- **Chunk loop.** Audio goes to the model in 1.12-second chunks (the model's normal latency mode). Each chunk returns, per speaker, the new text and word times, and a `progress` event follows. After the file ends, the last partial chunk is padded with silence and three chunks of silence are fed so the model emits the words it was holding back.
+- **Turns.** `TurnBuilder` groups the text into turns. Text that starts with a space begins a new word and continues the speaker's open turn unless they paused for more than 1.5 s, another speaker started after they stopped (so a reply reads as a reply), or the turn already has 360 characters and ends with `.`, `?` or `!`. Text that does not start with a space (the rest of a word, or punctuation) joins the speaker's open turn unless that turn ended more than 5 s earlier, and a new turn never opens with leftover punctuation. Speech that overlaps another speaker does not split the turn.
+- **Events.** Every change goes out as `voicereader:transcript`: `turn` events carry the whole current text of one turn, identified by `id`, so the frontend replaces the row rather than appending. `started` carries `total_secs` for a file; progress carries `processed_secs` and `total_secs`.
+- **Frontend.** `transcribe.ts` builds the page. Until the models are downloaded it shows a setup card with a download button and progress bar; afterwards it shows the controls: Record, Choose recording, a Stop button (labelled "Stop recording" for the microphone) while a job runs, a record light with a level meter, the Microphone list (system default first; refreshed at start, when a job ends and when the window gains focus), the Speakers list, a progress bar for files and a status line. A file dropped on the window (`tauri://file-drop`) starts a transcription when the Transcribe page is open. Starting a job clears the previous transcript. Turns are kept in a map and shown ordered by start time, one row per turn with the time, a speaker label and the text. Speakers have eight label colours (the number is taken modulo 8); the unknown speaker has its own style. A field per speaker lets the user name them, and the names replace the labels in the rows, in Copy and in Export. Copy puts plain text (`[m:ss] Name: text`) on the clipboard. Export opens a save dialog (default name: the recording name without its extension, plus `.txt`; a microphone recording is named `recording-<date>-<time>`) and picks the format from the chosen extension: `.md` gives Markdown, `.srt` gives subtitles (each cue lasts at least 0.5 s), anything else gives plain text. The file is written through `save_text_file`.
+
+## 16. Known gaps
 
 - Skip back has no seek behind it.
 - Text is read as written; URLs, markdown symbols, citation markers and emoji are not cleaned up.
 - A chunk cut in the middle of a sentence is generated on its own, so intonation can dip at the cut.
 - Core ML decoding for Audio8 has not been tried on a Mac.
+- The clone form takes WAV files only. The description of a built-in voice, edited on the Voices page, is lost when the app closes.
+- Live transcription captures the microphone only. System audio is not captured, and the recorded audio is not kept. Recording on macOS has not been tried, and live accuracy has not been measured since the speaker hold was added.
+- Transcripts are not saved between runs (Export is the only way to keep one), and there is no word boosting.
+- Transcription is English only and runs on the CPU. More than eight speakers cannot be told apart. The first word or two of a new speaker is sometimes missing, and when one speaker takes over with no gap the previous speaker can be given the newcomer's first words (`docs/learnings.md` sections 12.6 and 12.8).
+- Opus audio cannot be decoded.

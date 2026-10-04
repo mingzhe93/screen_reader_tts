@@ -1,6 +1,6 @@
 [package]
 name = "voicereader-desktop"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 
 [build-dependencies]
@@ -15,7 +15,7 @@ rand = "0.8"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tauri = { version = "1.6", features = [ "global-shortcut-all", "clipboard-read-text", "global-shortcut", "shell-open", "window-all"] }
+tauri = { version = "1.6", features = [ "global-shortcut-all", "clipboard-read-text", "global-shortcut", "shell-open", "window-all", "dialog-open", "dialog-save"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 uuid = { version = "1", features = ["v4"], optional = true }
@@ -24,9 +24,17 @@ pocket-tts = { version = "0.2.1", optional = true }
 # linking it statically clashes with the protobuf copy inside sentencepiece (pocket-tts).
 # The library is fetched by scripts/fetch-onnxruntime.js into binaries/onnxruntime.
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-22", "half"], optional = true }
-tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
 hound = { version = "3.5", optional = true }
 half = { version = "2", optional = true }
+# Speech to text: multitalker Parakeet with the Nemotron-3 diarizer, on the same ONNX Runtime.
+# Vendored: vendor/parakeet-rs is version 0.3.8 with a patch that stops words being lost
+# when a speaker pauses (see vendor/parakeet-rs/VOICEREADER_PATCH.md).
+parakeet-rs = { path = "vendor/parakeet-rs", default-features = false, features = ["multitalker", "load-dynamic"], optional = true }
+# Microphone capture for live transcription.
+cpal = { version = "0.15", optional = true }
+# Decodes the audio files handed to the transcriber (WAV, MP3, M4A/MP4, FLAC, OGG).
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "aac", "alac", "isomp4", "flac", "ogg", "vorbis", "mkv"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
@@ -44,4 +52,4 @@ objc = "0.2"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 build-full = []
-build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading"]
+build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading", "dep:parakeet-rs", "dep:symphonia", "dep:cpal"]

@@ -24,6 +24,7 @@ use rand::{Rng, SeedableRng};
 use serde::Deserialize;
 use tokenizers::Tokenizer;
 
+use crate::audio_decode::resample;
 use crate::text_chunking::{is_cjk, is_invisible, text_units};
 
 const MIN_REFERENCE_SECONDS: f32 = 0.5;
@@ -1479,44 +1480,7 @@ pub fn load_wav_mono(wav_bytes: &[u8], target_rate: u32) -> Result<Vec<f32>> {
     if mono.is_empty() {
         bail!("WAV file contains no audio");
     }
-    Ok(resample_sinc(&mono, spec.sample_rate, target_rate))
-}
-
-/// Windowed-sinc resampler. Reference clips are at most 30 s, so quality matters more than speed.
-fn resample_sinc(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
-    if source_rate == target_rate || input.is_empty() || source_rate == 0 {
-        return input.to_vec();
-    }
-    const HALF_TAPS: isize = 24;
-    let ratio = target_rate as f64 / source_rate as f64;
-    // Low-pass at the lower of the two Nyquist frequencies to avoid aliasing when downsampling.
-    let cutoff = f64::min(1.0, ratio);
-    let output_len = ((input.len() as f64) * ratio).round() as usize;
-    let mut output = Vec::with_capacity(output_len);
-    for out_index in 0..output_len {
-        let position = out_index as f64 / ratio;
-        let center = position.floor() as isize;
-        let mut acc = 0.0f64;
-        let mut weight_sum = 0.0f64;
-        for tap in (center - HALF_TAPS + 1)..=(center + HALF_TAPS) {
-            if tap < 0 || tap as usize >= input.len() {
-                continue;
-            }
-            let distance = position - tap as f64;
-            let x = distance * cutoff;
-            let sinc = if x.abs() < 1e-9 {
-                1.0
-            } else {
-                (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
-            };
-            let window = 0.5 + 0.5 * (std::f64::consts::PI * distance / HALF_TAPS as f64).cos();
-            let weight = sinc * window;
-            acc += input[tap as usize] as f64 * weight;
-            weight_sum += weight;
-        }
-        output.push(if weight_sum.abs() > 1e-9 { (acc / weight_sum) as f32 } else { 0.0 });
-    }
-    output
+    Ok(resample(&mono, spec.sample_rate, target_rate))
 }
 
 #[cfg(test)]

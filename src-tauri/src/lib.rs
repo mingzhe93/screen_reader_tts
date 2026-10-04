@@ -6,6 +6,12 @@ mod voicereader_core;
 mod selection;
 mod settings;
 #[cfg(feature = "build-base")]
+mod asr_local;
+#[cfg(feature = "build-base")]
+mod audio_capture;
+#[cfg(feature = "build-base")]
+mod audio_decode;
+#[cfg(feature = "build-base")]
 mod audio8_local;
 #[cfg(feature = "build-base")]
 mod audio8_model;

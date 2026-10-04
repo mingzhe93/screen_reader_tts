@@ -1,13 +1,15 @@
-# VoiceReader TTS Pipeline Learnings
+# VoiceReader Pipeline Learnings
 
 This file captures implementation-level lessons from the Rust (`build-base`) and
 Python sidecar (`build-full`) playback pipelines. Sections 1 to 6 cover the shared
 playback pipeline. Sections 7 to 11 cover Audio8, Kyutai voices, buffering, chunking
-and GPU use, with measurements.
+and GPU use, with measurements. Section 12 covers transcription.
 
 Where the code lives: `kyutai_local.rs` and `audio8_local.rs` are the Base runtimes.
 `audio_pipeline.rs` holds the SoX tempo stream and the rate-controlled emitter that both
-runtimes share. Sidecar code is under `tts-engine/src/tts_engine/`.
+runtimes share. Transcription is in `asr_local.rs`, `audio_decode.rs` and
+`audio_capture.rs`, with the model code in `src-tauri/vendor/parakeet-rs`. Sidecar code
+is under `tts-engine/src/tts_engine/`.
 
 ## 1. SoX starvation with tiny streaming tokens
 
@@ -287,7 +289,7 @@ Both base-build runtimes now use `text_chunking.rs` instead of their own splitte
 - A chunk cut mid-sentence is still generated on its own, so intonation can dip at
   the cut. Kyutai also appends a full stop to such a piece.
 
-## 11. GPU acceleration for Audio8 (and later ASR)
+## 11. GPU acceleration for Audio8
 
 Measured on the 9950X with an RTX 5090 and the CPU's integrated Radeon graphics,
 through ONNX Runtime's DirectML provider.
@@ -313,7 +315,7 @@ through ONNX Runtime's DirectML provider.
   data directory for 7 days; deleting the file forces a new benchmark.
 - If a GPU session later fails to load, the model loads on the CPU and the cache is
   updated, so speech keeps working.
-- The Compute Device setting on the Engine tab (Auto, GPU, CPU) is saved in the app
+- The Compute device setting on the Settings page (Auto, GPU, CPU) is saved in the app
   settings file. Auto is the benchmark-based choice above. GPU skips the benchmark and
   uses the GPU provider if it loads. CPU never touches the GPU. Changing it reloads
   a loaded Audio8 model, which stops anything being spoken.
@@ -352,3 +354,114 @@ through ONNX Runtime's DirectML provider.
 - WebGPU inside the app window works at the engine level on Windows (the Edge 154
   engine found the RTX 5090), but it would mean a second inference stack in
   JavaScript, so the native route was taken.
+
+## 12. Transcription with speaker labels (2026-10-04)
+
+Multitalker Parakeet (int8) with the Nemotron-3 diarizer, run by the `parakeet-rs` crate (0.3.8, vendored and patched: see 12.6 and 12.9) on the app's ONNX Runtime library. The numbers in 12.1 to 12.3 were taken with the unpatched crate.
+
+### 12.1 Speed and memory
+
+Measured on a Ryzen 9 9950X with a 44.6-second, four-speaker recording, in 1.12-second chunks:
+
+| Setup | Speed | Slowest chunk |
+|---|---|---|
+| CPU, 1 thread | 3.2x real time | 540 ms |
+| CPU, 2 threads | 3.7x | 451 ms |
+| CPU, 4 threads | 5.1x | 319 ms |
+| CPU, 8 threads | 6.6x | 250 ms |
+| CPU, 16 threads | 5.7x | 297 ms |
+| DirectML (RTX 5090) | 4.7x | 2161 ms (first chunk) |
+
+- Loading takes about 3 seconds. Memory while transcribing is about 1.3 GB.
+- The GPU does not help: the speech encoder is int8, which DirectML does not accelerate. So transcription runs on the CPU, with half the hardware threads up to 8 (`VOICEREADER_ASR_THREADS` overrides it).
+- Cost grows with the number of people talking at once, because the encoder runs once per active speaker in each chunk.
+- Every chunk finished well inside its 1.12 seconds, so live transcription is feasible on this machine. A laptop CPU has not been measured.
+
+### 12.2 What the output looks like
+
+- Each chunk returns, per speaker, a piece of text and word times. The text carries its own spacing: a piece that starts with a space begins a new word, and one that does not continues the previous word or adds punctuation. Joining pieces as they are gives correct text; joining the separate words with spaces does not (it produces "first , the").
+- A word's reported end time is not reliable across long gaps, so turns are built from the pieces and their start times.
+- Speaker numbers follow the order in which people first speak and stay stable for the whole recording.
+
+### 12.3 Accuracy seen so far
+
+The first tests were synthetic: clips of four real speakers from the bundled voice samples, cut and joined into one recording. Two real recordings followed, a 24-second two-speaker clip (12.6) and a 4.4-minute news report with about ten speakers (12.8, 12.9).
+
+- Without overlap, all four speakers were labelled correctly and the text was near perfect, including a speaker returning after others had spoken.
+- With every segment overlapping the next by 1.5 seconds and all speakers reading the same sentence, whole segments were lost. Most of that turned out to be the bug described in 12.6; with the fix, every segment is transcribed, with some wrong words where voices overlap.
+- The diarizer is designed for windows of about 10 seconds, and the crate feeds it 1.12-second chunks and pads them. That may limit diarization quality. On the two real recordings the diarizer's speaker boundaries were accurate; what it does with a long meeting is still untested.
+
+### 12.4 Packaging
+
+- `parakeet-rs` needs `default-features = false`: its defaults pull in a statically linked ONNX Runtime, which brings back the protobuf clash from section 7.4. With `load-dynamic` it shares the app's library and compiles against the same `ort` release candidate.
+- The crate loads the diarizer from its own export (`nemotron3_diar_v3.onnx`, 400 MB). The smaller `onnx-community` files are a different export and are untested with it.
+- Audio files are decoded with `symphonia` (WAV, MP3, AAC in M4A/MP4, ALAC, FLAC, OGG Vorbis, MKV). It has no Opus decoder.
+
+### 12.5 Live microphone transcription
+
+- Capture runs through `cpal` on the transcription thread. The stream type cannot move between threads, so it is opened, read and dropped in one place.
+- A Bluetooth headset microphone took 0.9 to 1.2 seconds to deliver its first audio after the stream was opened. The page therefore says "Starting the microphone" until audio actually arrives, and only then "Listening".
+- The model is loaded before the stream is opened. Opening first would record three seconds of speech during the load and then transcribe it late.
+- Text trails the speaker by the 1.12-second chunk plus processing time (about 0.25 s per chunk on the 9950X).
+- The automated check runs in a silent room: capture, level updates, stop and the final flush work end to end. The user's first live test, before the fix in 12.6, dropped a few words here and there, the same symptom as with files. Live accuracy has not been measured since.
+
+### 12.6 Words lost at pauses and speaker changes (fixed by a speaker hold)
+
+Symptom: on a 24-second, two-speaker test clip the transcript was missing "or not?" where the first speaker stopped and "and after that" at the very end. The same model run without speaker labels (every frame marked as "this speaker is talking") heard both, so the speech recognizer was not the cause.
+
+Cause: each speaker's encoder input is gated by the diarizer's activity for that speaker, frame by frame. The diarizer was accurate (activity ended within about 50 ms of the speech). But the model emits a word a few hundred milliseconds after it was spoken. When the activity drops to zero right after the last word, the frames in which that word would have been emitted are already switched off, and the word never comes out. Lowering the activity threshold so that every speaker runs on every chunk did not help (the mask is still zero) and made speakers pick up each other's words.
+
+Fix: hold each speaker's activity at 1.0 for a short time after it ends. Tested on the clip above and on two synthetic four-speaker recordings (one with every segment overlapping the next by 1.5 s):
+
+| Speaker hold | Background hold | Result |
+|---|---|---|
+| none | none | Last words before each pause lost; whole segments lost in the overlap recording |
+| 0.3 s | none | End of recording recovered; words at the speaker change still lost |
+| 0.6 s | none | Words recovered, but the next speaker also gets the previous speaker's last word ("Not, but such a tide") |
+| 0.6 s | 0.6 s | Clean on the clip; a few sentence endings still cut in the synthetic recordings |
+| 0.8 s | 0.8 s | The next speaker loses their first words ("The tide as moving" for "But such a tide as moving") |
+| 0.8 s | 0.6 s | Best: clip fully correct, every sentence ending present in both synthetic recordings |
+
+- The background hold is the same idea applied to what each speaker's encoder is told about the others. It tells the new speaker's encoder that the previous speaker is still finishing, so it does not transcribe their last word as its own. It must be shorter than the speaker hold.
+- Remaining flaw: when one speaker takes over from another with no gap at all, the previous speaker can be given the first word or two of the newcomer as well.
+- The upstream crate has no such hold, and the loop that applies the masks is private, which is why the crate is vendored (`src-tauri/vendor/parakeet-rs`, `VOICEREADER_PATCH.md`).
+- NVIDIA's own NeMo pipeline for this model has related settings, so this is a gap in the Rust port rather than a new idea.
+
+### 12.7 The Windows audio library must first be used by a thread that stays alive
+
+`cpal` 0.15 keeps one process-wide device enumerator, created on the first thread that uses it. When that thread ended and another thread used `cpal` afterwards, the process died with an access violation. The app's background threads end after a few idle seconds, so listing microphones and then recording a little later could crash the app. A parked `audio-host` thread now makes the first use. This was found because the microphone tests crashed when run one after another on separate threads; a regression test covers it.
+
+### 12.8 The speaker limit drops people, it does not merge them
+
+A 4.4-minute news report with about ten speakers came out with large gaps. The app followed four speakers at the time, and everything from the fifth voice onward was skipped without any sign: 97 seconds of speech.
+
+Words found, counted against the same model run without speaker labels (714 words):
+
+| Limit | Speaker hold | Words found | Extra words |
+|---|---|---|---|
+| 4 | none | 51% | 9 |
+| 4 | 0.8 s / 0.6 s | 57% | 10 |
+| 8 | none | 93% | 48 |
+| 8 | 0.6 s / 0.3 s | 94% | 49 |
+| 8 | 0.8 s / 0.6 s | 97.5% | 76 |
+| 8 | 0.8 s / none | 97% | 71 |
+
+- The limit is therefore 8 by default.
+- Speed did not suffer: only speakers who are talking are processed, so the cost follows the people talking at once, not the limit.
+- "Extra words" are mostly sentences that appear under two speakers, where candidates talked over each other or where the diarizer was unsure between two of the later voices. With more speakers than the model was trained for, this is the main remaining error.
+- The first word or two of a new speaker is sometimes missing ("The answer is on Medicare for all" came out as "Is on Medicare for all"). The diarizer needs a moment to notice a new voice, and a speaker's input is only switched on from that point. Not fixed.
+- More than eight speakers cannot be told apart at all; the diarizer has eight slots. On this recording it reported no speech outside them, so the extra voices were filed under existing labels rather than lost.
+
+### 12.9 Speakers beyond the limit become one "unknown speaker"
+
+Instead of skipping the slots beyond the limit, one extra model instance transcribes them together, using the highest activity among those slots as its mask. Same recording, 714 reference words:
+
+| Limit | Beyond the limit | Words found | Extra words |
+|---|---|---|---|
+| 4 | skipped (upstream) | 57% | 10 |
+| 4 | one unknown speaker | 95% | 47 |
+| 8 | nothing beyond it | 97.6% | 78 |
+
+- Pooling the later voices produced fewer duplicated sentences than giving each its own label (47 extra words against 78), at the price of not knowing who said what.
+- Also tried: letting the same instance transcribe every stretch in which no tracked speaker is active, to catch speech the diarizer missed. It found no additional words and added two stray fragments, so it was left out.
+- Speed was unchanged (about 5 times real time on this recording in every case).

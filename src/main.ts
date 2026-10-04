@@ -17,6 +17,8 @@ import {
   formatRateNumber,
   rateFromPayload,
 } from "./shared";
+import { brandMark, icon } from "./icons";
+import { asrModelStatus, downloadAsrModel, initTranscribe } from "./transcribe";
 import "./styles.css";
 import type {
   Audio8DownloadResult,
@@ -72,186 +74,322 @@ if (!app) {
 }
 
 app.innerHTML = `
-  <main class="shell">
-    <header class="hero">
-      <div class="hero-left">
-        <h1>VOICEREADER DESKTOP</h1>
-        <button class="runtime runtime-btn" id="runtime-pill" type="button" title="Open engine diagnostics">Engine: checking...</button>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        ${brandMark(28)}
+        <span class="brand-name">VoiceReader</span>
       </div>
-      <button id="theme-toggle-btn" class="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
-        <span class="theme-toggle-track">
-          <span class="theme-toggle-icon sun" aria-hidden="true">☀</span>
-          <span class="theme-toggle-icon moon" aria-hidden="true">☾</span>
-          <span class="theme-toggle-thumb" aria-hidden="true"></span>
-        </span>
+
+      <nav class="nav" aria-label="VoiceReader pages">
+        <div class="nav-group">
+          <p class="nav-label">Speak</p>
+          <button class="nav-item active" type="button" data-nav="reader" title="Read aloud" aria-current="page">
+            ${icon("speaker")}<span class="nav-text">Read aloud</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="voices" title="Voices">
+            ${icon("voices")}<span class="nav-text">Voices</span>
+          </button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-label">Listen</p>
+          <button class="nav-item" type="button" data-nav="transcribe" title="Transcribe">
+            ${icon("mic")}<span class="nav-text">Transcribe</span>
+          </button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-label">App</p>
+          <button class="nav-item" type="button" data-nav="models" title="Models">
+            ${icon("models")}<span class="nav-text">Models</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="settings" title="Settings">
+            ${icon("settings")}<span class="nav-text">Settings</span>
+          </button>
+        </div>
+      </nav>
+
+      <button class="runtime-status" id="runtime-pill" type="button" title="Open diagnostics">
+        <span class="runtime-text" id="runtime-text">Checking engine...</span>
       </button>
-    </header>
+    </aside>
 
-    <section class="tabs" role="tablist" aria-label="VoiceReader pages">
-      <button class="tab active" data-tab="reader" role="tab" aria-selected="true">Reader</button>
-      <button class="tab" data-tab="voices" role="tab" aria-selected="false">Voices & Clone</button>
-      <button class="tab" data-tab="engine" role="tab" aria-selected="false">Engine</button>
-    </section>
+    <main class="content" id="content">
+      <div class="content-inner">
 
-    <section class="panel active" id="reader-panel">
-      <div class="grid">
-        <article class="card">
-          <h2>Quick Start</h2>
-          <p class="hint">Use the global hotkey shown below after highlighting text in any app.</p>
-          <div class="inline-row hotkey-row">
-            <div class="hotkey" id="hotkey-pill">Loading hotkey...</div>
-            <button id="hotkey-edit-btn">Edit</button>
-          </div>
-          <div class="row">
-            <div class="inline-row hotkey-capture is-hidden" id="hotkey-capture-row">
-              <input id="hotkey-input" placeholder="Click and press a shortcut" readonly />
-              <button id="set-hotkey-btn">Set Hotkey</button>
-              <button id="cancel-hotkey-btn">Cancel</button>
+        <section class="page active" data-page="reader" aria-labelledby="reader-title">
+          <header class="page-header">
+            <h1 class="page-title" id="reader-title">Read aloud</h1>
+            <div class="page-actions">
+              <span class="hotkey-label">Hotkey</span>
+              <div class="keycaps" id="hotkey-pill">Loading...</div>
+              <button class="btn btn-ghost btn-sm" id="hotkey-edit-btn" type="button">Change</button>
             </div>
-            <p class="hint">Avoid OS-reserved combos such as Alt+Space (Windows) and Cmd+Space (macOS).</p>
+          </header>
+          <div class="hotkey-capture is-hidden" id="hotkey-capture-row">
+            <input id="hotkey-input" placeholder="Click here and press a shortcut" readonly />
+            <button class="btn" id="set-hotkey-btn" type="button">Set hotkey</button>
+            <button class="btn btn-ghost" id="cancel-hotkey-btn" type="button">Cancel</button>
           </div>
+          <p class="hint hotkey-hint">Avoid OS-reserved combos such as Alt+Space (Windows) and Cmd+Space (macOS).</p>
 
-          <div class="row">
-            <label for="model-select">Model Mode</label>
-            <select id="model-select"></select>
-          </div>
-
-          <div class="row">
-            <label for="voice-select">Available Voices</label>
-            <select id="voice-select"></select>
-          </div>
-
-          <details class="advanced-settings">
-            <summary>Advanced Settings</summary>
-            <div class="controls">
-              <label>Rate <input id="rate" type="number" min="0.25" max="4" step="0.05" value="1.5" /></label>
-              <label>Volume <input id="volume" type="number" min="0" max="2" step="0.05" value="1" /></label>
-              <label>Chunk Max Chars <input id="chunk-max" type="number" min="100" max="200" step="10" value="200" /></label>
+          <article class="card">
+            <div class="field-row">
+              <div class="field">
+                <label for="model-select">Model</label>
+                <select id="model-select"></select>
+              </div>
+              <div class="field">
+                <label for="voice-select">Voice</label>
+                <select id="voice-select"></select>
+              </div>
+              <div class="field">
+                <div class="field-label">
+                  <label for="rate">Speed</label>
+                  <span class="range-readout" id="rate-readout">1.5x</span>
+                </div>
+                <div class="range-wrap">
+                  <input id="rate" type="range" min="0.25" max="4" step="0.05" value="1.5" />
+                </div>
+              </div>
             </div>
-          </details>
 
-          <div class="button-row">
-            <button id="read-btn">Read Selection Now</button>
-            <button id="cancel-btn">Cancel Active Job</button>
-          </div>
-        </article>
+            <label class="sr-only" for="speak-text">Text to read</label>
+            <textarea id="speak-text" class="speak-text" rows="8" placeholder="Paste or type text to hear it in the selected voice">Welcome to VoiceReader. Highlight any text, press your hotkey, and hear it read aloud in the voice you choose.</textarea>
 
-        <article class="card">
-          <h2>Speak Test</h2>
-          <p class="hint">This uses the same /speak -> WS pipeline as the hotkey flow.</p>
-          <textarea id="speak-text" rows="6">This is VoiceReader app integration test text. If you hear this, the sidecar handshake and stream playback path are working end to end.</textarea>
-          <div class="button-row">
-            <button id="speak-btn" class="accent">Speak Text</button>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <section class="panel" id="voices-panel">
-      <div class="grid single">
-        <article class="card">
-          <h2>Clone Voice</h2>
-          <p class="hint" id="clone-hint">Upload a short, clean reference clip to create and save a cloned voice profile.</p>
-          <div class="clone-grid">
-            <label>
-              Voice Name
-              <input id="clone-display-name" placeholder="My Voice" />
-            </label>
-            <label>
-              Language Hint
-              <input id="clone-language" placeholder="en" value="en" />
-            </label>
-            <label class="span-2">
-              Reference Text (optional for Kyutai, required for Audio8)
-              <textarea id="clone-ref-text" rows="2" placeholder="Optional transcript of the uploaded sample"></textarea>
-            </label>
-            <label class="span-2">
-              Reference Audio File (WAV)
-              <input id="clone-audio-file" type="file" accept=".wav,audio/wav" />
-            </label>
-            <div class="button-row span-2">
-              <button id="clone-voice-btn" class="accent">Clone & Save Voice</button>
-              <button id="refresh-voices-btn">Refresh Voices</button>
+            <div class="action-row">
+              <button class="btn btn-primary" id="speak-btn" type="button">Speak</button>
+              <button class="btn" id="read-btn" type="button">Read selection</button>
+              <button class="btn" id="cancel-btn" type="button">Stop</button>
             </div>
-            <p class="clone-feedback is-hidden span-2" id="clone-status" role="status" aria-live="polite"></p>
-            <p class="hint span-2" id="clone-file-label">No file selected</p>
-          </div>
+          </article>
+        </section>
 
-          <h2>Voice Library</h2>
-          <p class="hint">Preset + saved voices in one editable table. Save edits per row, and delete saved cloned voices.</p>
-          <table>
-            <thead>
-              <tr>
-                <th>Source</th>
-                <th>Voice #</th>
-                <th>Name</th>
-                <th>Language</th>
-                <th>Description</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="voices-table"></tbody>
-          </table>
-        </article>
-      </div>
-    </section>
+        <section class="page" data-page="voices" aria-labelledby="voices-title">
+          <header class="page-header">
+            <h1 class="page-title" id="voices-title">Voices</h1>
+          </header>
+          <div class="stack">
+            <article class="card">
+              <h2 class="card-title">Clone a voice</h2>
+              <p class="hint" id="clone-hint">Upload a short, clean reference clip to create and save a cloned voice profile.</p>
+              <div class="clone-grid">
+                <div class="field">
+                  <label for="clone-display-name">Voice name</label>
+                  <input id="clone-display-name" placeholder="My voice" />
+                </div>
+                <div class="field">
+                  <label for="clone-language">Language hint</label>
+                  <input id="clone-language" placeholder="en" value="en" />
+                </div>
+                <div class="field span-2">
+                  <label for="clone-audio-file">Reference audio (WAV)</label>
+                  <input id="clone-audio-file" type="file" accept=".wav,audio/wav" />
+                  <p class="caption" id="clone-file-label">No file selected</p>
+                </div>
+                <div class="field span-2">
+                  <div class="field-label">
+                    <label for="clone-ref-text">Reference text (optional for Kyutai, required for Audio8)</label>
+                    <button class="btn btn-sm" id="clone-transcribe-btn" type="button" title="Fill in the reference text from the audio file. English only.">Transcribe audio</button>
+                  </div>
+                  <textarea id="clone-ref-text" rows="2" placeholder="Optional transcript of the uploaded sample"></textarea>
+                  <div class="clone-asr-prompt is-hidden" id="clone-asr-prompt">
+                    <p class="hint" id="clone-asr-prompt-text"></p>
+                    <div class="action-row">
+                      <button class="btn btn-sm" id="clone-asr-download-btn" type="button">Download model</button>
+                      <button class="btn btn-ghost btn-sm" id="clone-asr-dismiss-btn" type="button">Not now</button>
+                    </div>
+                    <progress class="download-progress is-hidden" data-asr-progress max="100" value="0"></progress>
+                    <p class="caption mono is-hidden" data-asr-progress-text></p>
+                  </div>
+                </div>
+                <div class="action-row span-2">
+                  <button class="btn btn-primary" id="clone-voice-btn" type="button">Clone and save voice</button>
+                </div>
+                <p class="clone-feedback is-hidden span-2" id="clone-status" role="status" aria-live="polite"></p>
+              </div>
+            </article>
 
-    <section class="panel" id="engine-panel">
-      <div class="grid single">
-        <article class="card" id="model-downloads-card">
-          <h2>Model Downloads</h2>
-          <p class="hint">Kyutai Pocket TTS is bundled. Use these actions to download Qwen models on demand.</p>
-          <p class="hint mono" id="model-storage-paths">Storage: loading...</p>
-          <div class="button-row engine-actions">
-            <button id="download-qwen-custom-btn">Download Qwen CustomVoice</button>
-            <button id="download-qwen-base-btn">Download Qwen Base</button>
-            <button id="download-qwen-all-btn" class="accent">Download Both Qwen Models</button>
+            <article class="card">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Voice library</h2>
+                  <p class="hint">Built-in and saved voices. Edit a saved voice and save it, or delete it.</p>
+                </div>
+                <button class="btn btn-sm" id="refresh-voices-btn" type="button">Refresh voices</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Source</th>
+                      <th>Voice #</th>
+                      <th>Name</th>
+                      <th>Language</th>
+                      <th>Description</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="voices-table"></tbody>
+                </table>
+              </div>
+            </article>
           </div>
-          <p class="hint" id="model-download-status">No download in progress.</p>
-        </article>
-        <article class="card is-hidden" id="audio8-card">
-          <h2>Audio8 TTS (optional download)</h2>
-          <p class="hint">Multilingual model with voice cloning, about 860 MB. Runs on the CPU, and uses a GPU for audio decoding when one helps. English and Chinese are the primary languages.</p>
-          <div class="button-row engine-actions">
-            <button id="download-audio8-btn" class="accent">Download Audio8 model</button>
+        </section>
+
+        <section class="page" data-page="transcribe" aria-labelledby="transcribe-title">
+          <header class="page-header">
+            <div class="page-heading">
+              <h1 class="page-title" id="transcribe-title">Transcribe</h1>
+              <span class="badge">English only</span>
+            </div>
+          </header>
+          <div id="transcribe-root">
+            <article class="card empty-state">
+              <span class="empty-icon">${icon("mic", 24)}</span>
+              <p class="empty-text">Transcription is being set up in this build.</p>
+            </article>
           </div>
-          <p class="hint" id="audio8-status">Checking Audio8 model status...</p>
-          <progress id="audio8-progress" class="download-progress is-hidden" max="100" value="0"></progress>
-          <p class="hint mono is-hidden" id="audio8-progress-text"></p>
-        </article>
-        <article class="card is-hidden" id="compute-card">
-          <h2>Compute Device</h2>
-          <p class="hint">Where the heavy part of a model runs. Auto uses the GPU when one is available and faster than the CPU. Choose CPU to keep the GPU free for other work.</p>
-          <div class="button-row engine-actions">
-            <button class="compute-btn" data-compute="auto">Auto</button>
-            <button class="compute-btn" data-compute="gpu">GPU</button>
-            <button class="compute-btn" data-compute="cpu">CPU</button>
+        </section>
+
+        <section class="page" data-page="models" aria-labelledby="models-title">
+          <header class="page-header">
+            <h1 class="page-title" id="models-title">Models</h1>
+          </header>
+          <div class="stack">
+            <article class="card model-row">
+              <div class="model-main">
+                <div class="model-title">
+                  <h2 class="model-name">Kyutai Pocket TTS</h2>
+                  <span class="badge">Bundled</span>
+                  <span class="badge">English</span>
+                </div>
+                <p class="model-desc">Fast, lightweight voices with voice cloning. Always runs on the CPU.</p>
+                <p class="model-status ok">Ready</p>
+              </div>
+            </article>
+
+            <article class="card model-row is-hidden" id="audio8-card">
+              <div class="model-main">
+                <div class="model-title">
+                  <h2 class="model-name">Audio8 TTS</h2>
+                  <span class="badge">About 860 MB</span>
+                </div>
+                <p class="model-desc">Multilingual model with voice cloning. English and Chinese are the primary languages.</p>
+                <p class="model-status" id="audio8-status">Checking Audio8 model status...</p>
+              </div>
+              <div class="model-action">
+                <button class="btn btn-primary" id="download-audio8-btn" type="button">Download model</button>
+              </div>
+              <div class="model-progress">
+                <progress id="audio8-progress" class="download-progress is-hidden" max="100" value="0"></progress>
+                <p class="caption mono is-hidden" id="audio8-progress-text"></p>
+              </div>
+            </article>
+
+            <div id="asr-models-slot"></div>
+
+            <article class="card model-row" id="model-downloads-card">
+              <div class="model-main">
+                <div class="model-title">
+                  <h2 class="model-name">Qwen3 TTS</h2>
+                  <span class="badge">Optional download</span>
+                </div>
+                <p class="model-desc">CustomVoice and Base models, downloaded on demand.</p>
+                <p class="model-status" id="model-download-status">No download in progress.</p>
+              </div>
+              <div class="model-footer">
+                <button class="btn" id="download-qwen-custom-btn" type="button">Download CustomVoice</button>
+                <button class="btn" id="download-qwen-base-btn" type="button">Download Base</button>
+                <button class="btn" id="download-qwen-all-btn" type="button">Download both</button>
+              </div>
+            </article>
+
+            <p class="caption mono storage-line" id="model-storage-paths">Storage: loading...</p>
           </div>
-          <p class="hint" id="compute-status"></p>
-        </article>
-        <article class="card">
-          <h2>Engine Health</h2>
-          <div class="button-row engine-actions">
-            <button id="refresh-btn">Refresh Health</button>
-            <button id="restart-btn">Restart Engine</button>
+        </section>
+
+        <section class="page" data-page="settings" aria-labelledby="settings-title">
+          <header class="page-header">
+            <h1 class="page-title" id="settings-title">Settings</h1>
+          </header>
+          <div class="stack">
+            <article class="card settings-section">
+              <h2 class="card-title">Playback</h2>
+              <div class="setting-row">
+                <div class="setting-text">
+                  <label for="volume">Volume</label>
+                  <p class="setting-desc">Playback loudness. 1 is normal, and values up to 2 boost the audio.</p>
+                </div>
+                <input id="volume" type="number" min="0" max="2" step="0.05" value="1" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-text">
+                  <label for="chunk-max">Chunk max chars</label>
+                  <p class="setting-desc">Most characters sent to the model at once, from 100 to 200. Smaller chunks can start playing sooner.</p>
+                </div>
+                <input id="chunk-max" type="number" min="100" max="200" step="10" value="200" />
+              </div>
+            </article>
+
+            <article class="card settings-section is-hidden" id="compute-card">
+              <h2 class="card-title">Compute device</h2>
+              <p class="setting-desc">Where the heavy part of a model runs. Auto uses the GPU when one is available and faster than the CPU. Choose CPU to keep the GPU free for other work.</p>
+              <div class="segmented" role="group" aria-label="Compute device">
+                <button class="compute-btn" type="button" data-compute="auto" aria-pressed="false">Auto</button>
+                <button class="compute-btn" type="button" data-compute="gpu" aria-pressed="false">GPU</button>
+                <button class="compute-btn" type="button" data-compute="cpu" aria-pressed="false">CPU</button>
+              </div>
+              <p class="setting-desc" id="compute-status"></p>
+            </article>
+
+            <article class="card settings-section">
+              <h2 class="card-title">Appearance</h2>
+              <div class="setting-row">
+                <div class="setting-text">
+                  <span class="setting-label">Theme</span>
+                  <p class="setting-desc">Switch between the dark and light interface.</p>
+                </div>
+                <button id="theme-toggle-btn" class="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme">
+                  <span class="theme-toggle-track">
+                    <span class="theme-toggle-thumb" aria-hidden="true"></span>
+                    <span class="theme-toggle-icon sun" aria-hidden="true">${icon("sun", 14)}</span>
+                    <span class="theme-toggle-icon moon" aria-hidden="true">${icon("moon", 14)}</span>
+                  </span>
+                </button>
+              </div>
+            </article>
+
+            <article class="card diagnostics" id="settings-diagnostics">
+              <div class="card-header">
+                <div>
+                  <h2 class="card-title">Diagnostics</h2>
+                  <p class="hint">For troubleshooting. Check engine health or restart the engine.</p>
+                </div>
+                <div class="action-row">
+                  <button class="btn btn-sm" id="refresh-btn" type="button">Refresh health</button>
+                  <button class="btn btn-sm" id="restart-btn" type="button">Restart engine</button>
+                </div>
+              </div>
+              <pre id="health-json" class="json-box"></pre>
+              <h3 class="subhead">Activity log</h3>
+              <div class="log-wrap">
+                <div id="log" class="log"></div>
+              </div>
+            </article>
           </div>
-          <pre id="health-json" class="json-box"></pre>
-        </article>
-        <article class="card">
-          <h2>Activity</h2>
-          <div class="log-wrap">
-            <div id="log" class="log"></div>
-          </div>
-        </article>
+        </section>
+
       </div>
-    </section>
-  </main>
+    </main>
+  </div>
 `;
 
+const contentEl = document.querySelector<HTMLElement>("#content")!;
 const hotkeyPill = document.querySelector<HTMLDivElement>("#hotkey-pill")!;
 const hotkeyCaptureRow = document.querySelector<HTMLDivElement>("#hotkey-capture-row")!;
 const themeToggleBtn = document.querySelector<HTMLButtonElement>("#theme-toggle-btn")!;
 const runtimePill = document.querySelector<HTMLButtonElement>("#runtime-pill")!;
+const runtimeText = document.querySelector<HTMLSpanElement>("#runtime-text")!;
 const hotkeyInput = document.querySelector<HTMLInputElement>("#hotkey-input")!;
 const hotkeyEditBtn = document.querySelector<HTMLButtonElement>("#hotkey-edit-btn")!;
 const hotkeyCancelBtn = document.querySelector<HTMLButtonElement>("#cancel-hotkey-btn")!;
@@ -266,6 +404,11 @@ const cloneDisplayNameInput = document.querySelector<HTMLInputElement>("#clone-d
 const cloneLanguageInput = document.querySelector<HTMLInputElement>("#clone-language")!;
 const cloneRefTextInput = document.querySelector<HTMLTextAreaElement>("#clone-ref-text")!;
 const cloneAudioFileInput = document.querySelector<HTMLInputElement>("#clone-audio-file")!;
+const cloneTranscribeBtn = document.querySelector<HTMLButtonElement>("#clone-transcribe-btn")!;
+const cloneAsrPrompt = document.querySelector<HTMLDivElement>("#clone-asr-prompt")!;
+const cloneAsrPromptText = document.querySelector<HTMLParagraphElement>("#clone-asr-prompt-text")!;
+const cloneAsrDownloadBtn = document.querySelector<HTMLButtonElement>("#clone-asr-download-btn")!;
+const cloneAsrDismissBtn = document.querySelector<HTMLButtonElement>("#clone-asr-dismiss-btn")!;
 const cloneVoiceBtn = document.querySelector<HTMLButtonElement>("#clone-voice-btn")!;
 const refreshVoicesBtn = document.querySelector<HTMLButtonElement>("#refresh-voices-btn")!;
 const cloneStatus = document.querySelector<HTMLParagraphElement>("#clone-status")!;
@@ -287,6 +430,7 @@ const downloadAudio8Btn = document.querySelector<HTMLButtonElement>("#download-a
 const cloneHint = document.querySelector<HTMLParagraphElement>("#clone-hint")!;
 
 const rateInput = document.querySelector<HTMLInputElement>("#rate")!;
+const rateReadout = document.querySelector<HTMLSpanElement>("#rate-readout")!;
 const volumeInput = document.querySelector<HTMLInputElement>("#volume")!;
 const chunkMaxInput = document.querySelector<HTMLInputElement>("#chunk-max")!;
 
@@ -322,6 +466,7 @@ let toolbarPaused = false;
 let activeToolbarJobId = "";
 
 applyTheme(currentTheme, false);
+syncRateReadout();
 
 function log(message: string, level: "info" | "error" = "info"): void {
   const line = document.createElement("div");
@@ -379,8 +524,25 @@ function applyTheme(theme: ThemeMode, persist = true): void {
 }
 
 function setHotkeyDisplay(value: string): void {
-  hotkeyPill.textContent = value;
+  // Render each key as its own keycap. A trailing "+" is the plus key itself, not a separator.
+  hotkeyPill.replaceChildren();
+  const keys = value.split(/\+(?!$)/).filter((key) => key.length > 0);
+  for (const key of keys) {
+    const cap = document.createElement("kbd");
+    cap.textContent = key;
+    hotkeyPill.append(cap);
+  }
   hotkeyInput.value = value;
+}
+
+function syncRateReadout(): void {
+  const min = Number(rateInput.min) || 0;
+  const max = Number(rateInput.max) || 1;
+  const parsed = Number(rateInput.value);
+  const value = Number.isFinite(parsed) ? clampRate(parsed) : 1;
+  rateReadout.textContent = `${formatRateNumber(value)}x`;
+  const percent = max > min ? Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100)) : 0;
+  rateInput.style.setProperty("--fill", `${percent.toFixed(1)}%`);
 }
 
 function setHotkeyEditMode(enabled: boolean): void {
@@ -526,27 +688,34 @@ function savedVoiceOrdinal(voiceId: string): number {
 }
 
 function activateTab(target: string): void {
-  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".tab"));
-  const panels = Array.from(document.querySelectorAll<HTMLElement>(".panel"));
+  const navItems = Array.from(document.querySelectorAll<HTMLButtonElement>(".nav-item"));
+  const pages = Array.from(document.querySelectorAll<HTMLElement>(".page"));
+  if (!pages.some((page) => page.dataset.page === target)) {
+    return;
+  }
 
-  tabs.forEach((tab) => {
-    const active = tab.dataset.tab === target;
-    tab.classList.toggle("active", active);
-    tab.setAttribute("aria-selected", String(active));
+  navItems.forEach((item) => {
+    const active = item.dataset.nav === target;
+    item.classList.toggle("active", active);
+    if (active) {
+      item.setAttribute("aria-current", "page");
+    } else {
+      item.removeAttribute("aria-current");
+    }
   });
 
-  panels.forEach((panel) => {
-    const panelId = panel.id.replace("-panel", "");
-    panel.classList.toggle("active", panelId === target);
+  pages.forEach((page) => {
+    page.classList.toggle("active", page.dataset.page === target);
   });
+  contentEl.scrollTop = 0;
 }
 
 function setTabs(): void {
-  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".tab"));
+  const navItems = Array.from(document.querySelectorAll<HTMLButtonElement>(".nav-item"));
 
-  tabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      const target = tab.dataset.tab;
+  navItems.forEach((item) => {
+    item.addEventListener("click", () => {
+      const target = item.dataset.nav;
       if (!target) {
         return;
       }
@@ -561,23 +730,20 @@ function encodeJson(value: unknown): string {
 
 function renderRuntimeStatus(status: RuntimeStatusPayload): void {
   if (status.running) {
-    runtimePill.className = "runtime ok";
+    runtimePill.className = "runtime-status ok";
     // A local (in-process) runtime has no process id or address worth showing; say which
-    // model is active and what it runs on instead.
-    const parts = [status.pid != null ? `Engine: running (pid=${status.pid}) @ ${status.base_url}` : "Engine: running"];
-    if (status.model_label) {
-      parts.push(status.model_label);
-    }
-    if (status.device_label) {
-      parts.push(status.device_label);
-    }
-    runtimePill.textContent = parts.join(" · ");
+    // model is active and what it runs on instead. The full detail stays in the tooltip.
+    const detail = [status.model_label, status.device_label].filter((part): part is string => Boolean(part));
+    const full = [status.pid != null ? `Engine: running (pid=${status.pid}) @ ${status.base_url}` : "Engine: running", ...detail];
+    runtimeText.textContent = detail.length > 0 ? detail.join(" · ") : "Engine running";
+    runtimePill.title = `${full.join(" · ")}. Open diagnostics.`;
     runtimeWasDown = false;
     return;
   }
 
-  runtimePill.className = "runtime down";
-  runtimePill.textContent = "Engine: down";
+  runtimePill.className = "runtime-status down";
+  runtimeText.textContent = "Engine is down";
+  runtimePill.title = "Engine: down. Open diagnostics.";
   if (!runtimeWasDown) {
     log("Engine sidecar is not running. Use Restart Engine or trigger a read action.", "error");
     runtimeWasDown = true;
@@ -851,6 +1017,75 @@ function flushQueuedPlayback(jobId: string, forceStart: boolean): void {
   }
 }
 
+/** The WAV file chosen in the clone form, or null after telling the user what is wrong. */
+function selectedCloneFile(action: string): File | null {
+  const file = cloneAudioFileInput.files?.[0];
+  const problem = !file
+    ? `Select an audio file before ${action}.`
+    : !file.name.toLowerCase().endsWith(".wav")
+      ? "Only WAV files are supported for cloning in this UI."
+      : null;
+  if (problem || !file) {
+    showCloneStatus(problem ?? "", "error");
+    log(problem ?? "", "error");
+    return null;
+  }
+  return file;
+}
+
+/** Fills the reference text from the chosen clip, using the transcription model. */
+async function transcribeCloneClip(file: File): Promise<void> {
+  cloneTranscribeBtn.disabled = true;
+  cloneTranscribeBtn.textContent = "Transcribing...";
+  showCloneStatus("Transcribing the clip... this takes a few seconds.", "info", 0);
+  try {
+    const result = await invoke<{ text: string }>("transcribe_reference_clip", {
+      wavBase64: await fileToBase64(file),
+    });
+    if (result.text) {
+      cloneRefTextInput.value = result.text;
+      showCloneStatus("Reference text filled in. Check it against the clip before cloning.", "success");
+      log(`Transcribed reference clip ${file.name}`);
+    } else {
+      showCloneStatus("No speech was recognised in this clip. The transcriber understands English only.", "error");
+    }
+  } catch (error) {
+    showCloneStatus(`Transcription failed: ${String(error)}`, "error");
+    log(`Reference clip transcription failed: ${String(error)}`, "error");
+  } finally {
+    cloneTranscribeBtn.disabled = false;
+    cloneTranscribeBtn.textContent = "Transcribe audio";
+  }
+}
+
+/** Transcribes the chosen clip, offering the model download first when it is missing. */
+async function transcribeCloneClipOrOfferDownload(): Promise<void> {
+  const file = selectedCloneFile("transcribing");
+  if (!file) {
+    return;
+  }
+  let status;
+  try {
+    status = await asrModelStatus();
+  } catch (error) {
+    showCloneStatus(`Could not check the transcription model: ${String(error)}`, "error");
+    return;
+  }
+  if (!status.supported) {
+    showCloneStatus("Transcription is not available in this build. Type the reference text instead.", "error");
+    return;
+  }
+  if (status.downloaded) {
+    cloneAsrPrompt.classList.add("is-hidden");
+    await transcribeCloneClip(file);
+    return;
+  }
+  const size = (status.download_size_bytes / (1024 * 1024 * 1024)).toFixed(2);
+  cloneAsrPromptText.textContent = `Transcribing needs the transcription model, a one-time download of about ${size} GB. It is the same model the Transcribe page uses.`;
+  cloneAsrDownloadBtn.disabled = false;
+  cloneAsrPrompt.classList.remove("is-hidden");
+}
+
 async function fileToBase64(file: File): Promise<string> {
   const arrayBuffer = await file.arrayBuffer();
   const bytes = new Uint8Array(arrayBuffer);
@@ -1010,13 +1245,15 @@ function renderAudio8Card(): void {
   if (audio8Downloaded) {
     downloadAudio8Btn.disabled = true;
     downloadAudio8Btn.textContent = "Downloaded";
-    audio8Status.textContent = "Audio8 TTS is downloaded and ready. Select it from Model Mode on the Reader tab.";
+    audio8Status.classList.add("ok");
+    audio8Status.textContent = "Ready. Select it from Model on the Read aloud page.";
     audio8Progress.classList.add("is-hidden");
     audio8ProgressText.classList.add("is-hidden");
     return;
   }
   downloadAudio8Btn.disabled = false;
-  downloadAudio8Btn.textContent = "Download Audio8 model";
+  audio8Status.classList.remove("ok");
+  downloadAudio8Btn.textContent = "Download model";
   if (!audio8Status.textContent || audio8Status.textContent.startsWith("Checking")) {
     audio8Status.textContent = "Not downloaded yet.";
   }
@@ -1059,7 +1296,9 @@ async function refreshAudio8Status(): Promise<void> {
 function renderComputeDevice(payload: ComputeDevicePayload): void {
   computeCard.classList.toggle("is-hidden", !payload.gpu_supported);
   for (const button of computeButtons) {
-    button.classList.toggle("accent", button.dataset.compute === payload.preference);
+    const active = button.dataset.compute === payload.preference;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
   }
   if (!payload.model_loaded || !payload.active_device) {
     computeStatus.textContent =
@@ -1327,7 +1566,8 @@ async function invokeAndLog(command: string, fallbackMessage: string, args?: Rec
 
 async function bindActions(): Promise<void> {
   runtimePill.addEventListener("click", () => {
-    activateTab("engine");
+    activateTab("settings");
+    document.querySelector<HTMLElement>("#settings-diagnostics")?.scrollIntoView({ block: "start", behavior: "smooth" });
   });
 
   themeToggleBtn.addEventListener("click", () => {
@@ -1423,6 +1663,8 @@ async function bindActions(): Promise<void> {
     log(`Selected saved voice ${selected.label}`);
   });
 
+  rateInput.addEventListener("input", syncRateReadout);
+
   [rateInput, volumeInput, chunkMaxInput].forEach((input) => {
     input.addEventListener("change", async () => {
       await applySpeakSettings();
@@ -1446,16 +1688,25 @@ async function bindActions(): Promise<void> {
     cloneFileLabel.textContent = file ? `Selected file: ${file.name}` : "No file selected";
   });
 
-  cloneVoiceBtn.addEventListener("click", async () => {
-    const selectedFile = cloneAudioFileInput.files?.[0];
-    if (!selectedFile) {
-      showCloneStatus("Select an audio file before cloning.", "error");
-      log("Select an audio file before cloning", "error");
+  cloneTranscribeBtn.addEventListener("click", () => void transcribeCloneClipOrOfferDownload());
+  cloneAsrDismissBtn.addEventListener("click", () => cloneAsrPrompt.classList.add("is-hidden"));
+  cloneAsrDownloadBtn.addEventListener("click", async () => {
+    cloneAsrDownloadBtn.disabled = true;
+    cloneAsrPromptText.textContent = "Downloading the transcription model. You can keep using the app.";
+    const downloaded = await downloadAsrModel();
+    if (!downloaded) {
+      cloneAsrDownloadBtn.disabled = false;
+      cloneAsrPromptText.textContent = "The download did not finish. Try again; it continues where it stopped.";
       return;
     }
-    if (!selectedFile.name.toLowerCase().endsWith(".wav")) {
-      showCloneStatus("Only WAV files are supported for cloning in this UI.", "error");
-      log("Only WAV files are supported for cloning in this UI right now", "error");
+    cloneAsrPrompt.classList.add("is-hidden");
+    // The download was started to transcribe this clip, so carry on with it.
+    await transcribeCloneClipOrOfferDownload();
+  });
+
+  cloneVoiceBtn.addEventListener("click", async () => {
+    const selectedFile = selectedCloneFile("cloning");
+    if (!selectedFile) {
       return;
     }
 
@@ -1463,7 +1714,7 @@ async function bindActions(): Promise<void> {
     const language = cloneLanguageInput.value.trim();
     const refText = cloneRefTextInput.value.trim();
     if (currentSelectedModel === AUDIO8_MODEL_ID && !refText) {
-      showCloneStatus("Audio8 needs the exact transcript of the reference clip. Fill in Reference Text first.", "error");
+      showCloneStatus("Audio8 needs the exact transcript of the reference clip. Fill in the reference text first.", "error");
       log("Audio8 voice cloning requires the exact reference transcript", "error");
       return;
     }
@@ -1484,7 +1735,7 @@ async function bindActions(): Promise<void> {
         voiceSelect.value = clonedOptionValue;
         await invoke("set_selected_voice", { voiceId: result.voice_id });
       }
-      const successMessage = result.message || `Voice cloned successfully: ${displayName}`;
+      const successMessage = result.message || `Voice cloned: ${displayName}`;
       showCloneStatus(successMessage, "success");
       log(result.message || `Cloned voice saved: ${result.voice_id}`);
     } catch (error) {
@@ -1626,6 +1877,7 @@ async function bindEvents(): Promise<void> {
       return;
     }
     rateInput.value = formatRateNumber(clampRate(parsed));
+    syncRateReadout();
   });
 
   await listen<JsonValue>("voicereader:ws-event", async ({ payload }) => {
@@ -1746,6 +1998,12 @@ async function bindEvents(): Promise<void> {
 }
 
 setTabs();
+initTranscribe({
+  log,
+  isPageActive: () => document.querySelector('.page[data-page="transcribe"]')?.classList.contains("active") ?? false,
+}).catch((error) => {
+  log(`Transcribe setup failed: ${String(error)}`, "error");
+});
 bootstrap()
   .then(bindActions)
   .then(bindEvents)

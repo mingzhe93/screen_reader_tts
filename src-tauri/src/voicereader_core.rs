@@ -37,6 +37,15 @@ use uuid::Uuid;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(feature = "build-base")]
+use crate::asr_local::{
+    asr_model_dir, asr_models_downloaded, diarizer_model_dir, transcribe_clip, transcribe_file, transcribe_microphone,
+    TranscribeEvent,
+    TranscribeSummary, TranscriptTurn, ASR_MODEL_FILES, ASR_REPO, DEFAULT_MAX_SPEAKERS, DIARIZER_MODEL_FILES,
+    DIARIZER_REPO, MAX_SPEAKERS_LIMIT, UNKNOWN_SPEAKER,
+};
+#[cfg(feature = "build-base")]
+use crate::audio_capture::list_inputs;
+#[cfg(feature = "build-base")]
 use crate::audio8_local::{
     audio8_model_dir, gpu_provider_available, is_audio8_model_dir, ComputePreference, LocalAudio8Runtime,
     AUDIO8_MODEL_FILES, AUDIO8_REPO,
@@ -68,6 +77,16 @@ const AUDIO8_DEFAULT_SPEAKER: &str = "default";
 pub(crate) const AUDIO8_DOWNLOAD_SIZE_BYTES: u64 = 858_086_392;
 #[cfg(feature = "build-base")]
 static AUDIO8_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The speech-to-text models (multitalker Parakeet and the Nemotron-3 diarizer) share one download.
+#[cfg(feature = "build-base")]
+const MODEL_ASR: &str = "parakeet_multitalker";
+/// Size of the files in `ASR_MODEL_FILES` and `DIARIZER_MODEL_FILES`, shown before the download starts.
+const ASR_DOWNLOAD_SIZE_BYTES: u64 = 1_066_840_951;
+#[cfg(feature = "build-base")]
+static ASR_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// The running transcription: its job id and the flag that stops it.
+#[cfg(feature = "build-base")]
+static ASR_JOB: Mutex<Option<(String, Arc<AtomicBool>)>> = Mutex::new(None);
 const QWEN_CUSTOM_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 const QWEN_BASE_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
 const KYUTAI_REPO: &str = "Verylicious/pocket-tts-ungated";
@@ -204,6 +223,61 @@ struct Audio8ModelStatus {
     model_dir: String,
     repo: String,
     download_size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct AsrModelStatus {
+    supported: bool,
+    downloaded: bool,
+    model_dir: String,
+    repo: String,
+    diarizer_repo: String,
+    download_size_bytes: u64,
+    default_max_speakers: usize,
+    max_speakers_limit: usize,
+}
+
+#[derive(Serialize)]
+struct TranscribeStartPayload {
+    job_id: String,
+}
+
+#[derive(Serialize)]
+struct ClipTranscriptPayload {
+    text: String,
+}
+
+#[derive(Serialize)]
+struct AudioInputPayload {
+    name: String,
+    is_default: bool,
+}
+
+#[cfg(feature = "build-base")]
+#[derive(Serialize, Clone)]
+struct TranscriptTurnPayload {
+    id: usize,
+    speaker: usize,
+    /// True for speech from people beyond the speaker limit, who share one label.
+    unknown: bool,
+    start_secs: f32,
+    end_secs: f32,
+    text: String,
+}
+
+/// One `voicereader:transcript` event. `kind` is "loading", "started", "turn",
+/// "progress", "level", "done", "cancelled" or "error".
+#[cfg(feature = "build-base")]
+#[derive(Serialize, Clone)]
+struct TranscriptEventPayload {
+    job_id: String,
+    kind: String,
+    turn: Option<TranscriptTurnPayload>,
+    processed_secs: f32,
+    total_secs: Option<f32>,
+    /// Input loudness from 0 to 1, in "level" events.
+    level: f32,
+    message: String,
 }
 
 #[cfg(feature = "build-base")]
@@ -596,6 +670,14 @@ pub fn run_app() {
             prefetch_models,
             audio8_model_status,
             download_audio8_model,
+            asr_model_status,
+            download_asr_model,
+            transcribe_audio_file,
+            cancel_transcription,
+            transcribe_microphone_input,
+            transcribe_reference_clip,
+            list_audio_inputs,
+            save_text_file,
             get_compute_device,
             set_compute_device,
             restart_engine,
@@ -1004,6 +1086,457 @@ async fn download_audio8_model(app: AppHandle, state: State<'_, SharedState>) ->
         let _ = (app, state);
         Err("Audio8 TTS is available in the Base build only.".to_string())
     }
+}
+
+#[tauri::command]
+async fn asr_model_status(app: AppHandle, state: State<'_, SharedState>) -> Result<AsrModelStatus, String> {
+    #[cfg(feature = "build-base")]
+    {
+        ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        let models_dir = Path::new(&guard.models_dir);
+        return Ok(AsrModelStatus {
+            supported: true,
+            downloaded: !guard.models_dir.is_empty() && asr_models_downloaded(models_dir),
+            model_dir: asr_model_dir(models_dir).to_string_lossy().to_string(),
+            repo: ASR_REPO.to_string(),
+            diarizer_repo: DIARIZER_REPO.to_string(),
+            download_size_bytes: ASR_DOWNLOAD_SIZE_BYTES,
+            default_max_speakers: DEFAULT_MAX_SPEAKERS,
+            max_speakers_limit: MAX_SPEAKERS_LIMIT,
+        });
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state);
+        Ok(AsrModelStatus {
+            supported: false,
+            downloaded: false,
+            model_dir: String::new(),
+            repo: String::new(),
+            diarizer_repo: String::new(),
+            download_size_bytes: ASR_DOWNLOAD_SIZE_BYTES,
+            default_max_speakers: 0,
+            max_speakers_limit: 0,
+        })
+    }
+}
+
+#[tauri::command]
+async fn download_asr_model(app: AppHandle, state: State<'_, SharedState>) -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    {
+        ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+        let models_dir = {
+            let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+            PathBuf::from(&guard.models_dir)
+        };
+        if ASR_DOWNLOAD_ACTIVE.swap(true, Ordering::SeqCst) {
+            return Err("A transcription model download is already running.".to_string());
+        }
+        let file_count = ASR_MODEL_FILES.len() + DIARIZER_MODEL_FILES.len();
+        let emit = {
+            let app = app.clone();
+            move |state: &str, file: &str, file_index: usize, downloaded_bytes: u64, message: &str| {
+                let _ = app.emit_all(
+                    "voicereader:model-download",
+                    ModelDownloadPayload {
+                        model: MODEL_ASR.to_string(),
+                        state: state.to_string(),
+                        file: file.to_string(),
+                        file_index,
+                        file_count,
+                        downloaded_bytes,
+                        // The two repos are downloaded one after the other, so the total
+                        // is the known size of both rather than what one repo reports.
+                        total_bytes: ASR_DOWNLOAD_SIZE_BYTES.max(downloaded_bytes),
+                        message: message.to_string(),
+                    },
+                );
+            }
+        };
+
+        let result = async {
+            let speech_bytes = download_model_files(
+                ASR_REPO,
+                &ASR_MODEL_FILES,
+                &asr_model_dir(&models_dir),
+                |file, file_index, downloaded_bytes, _| emit("progress", file, file_index, downloaded_bytes, ""),
+            )
+            .await?;
+            download_model_files(
+                DIARIZER_REPO,
+                &DIARIZER_MODEL_FILES,
+                &diarizer_model_dir(&models_dir),
+                |file, file_index, downloaded_bytes, _| {
+                    emit(
+                        "progress",
+                        file,
+                        ASR_MODEL_FILES.len() + file_index,
+                        speech_bytes + downloaded_bytes,
+                        "",
+                    )
+                },
+            )
+            .await?;
+            if asr_models_downloaded(&models_dir) {
+                Ok(())
+            } else {
+                Err(anyhow!("Transcription model files are incomplete after download"))
+            }
+        }
+        .await;
+        ASR_DOWNLOAD_ACTIVE.store(false, Ordering::SeqCst);
+
+        return match result {
+            Ok(()) => {
+                let message = format!(
+                    "Transcription model downloaded to {}",
+                    asr_model_dir(&models_dir).display()
+                );
+                emit("done", "", file_count, ASR_DOWNLOAD_SIZE_BYTES, &message);
+                Ok(GenericResult { ok: true, message })
+            }
+            Err(err) => {
+                let message = to_cmd_error(err);
+                emit("error", "", 0, 0, &message);
+                Err(message)
+            }
+        };
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state);
+        Err("Transcription is available in the Base build only.".to_string())
+    }
+}
+
+/// Clears the running transcription when its task ends, and tells the window if the
+/// task ended without reporting a result (a panic inside the model code).
+#[cfg(feature = "build-base")]
+struct TranscriptionJobGuard {
+    app: AppHandle,
+    job_id: String,
+    reported: bool,
+}
+
+#[cfg(feature = "build-base")]
+impl TranscriptionJobGuard {
+    fn emit(&self, kind: &str, turn: Option<&TranscriptTurn>, processed_secs: f32, total_secs: Option<f32>, message: &str) {
+        self.emit_with_level(kind, turn, processed_secs, total_secs, 0.0, message);
+    }
+
+    fn emit_with_level(
+        &self,
+        kind: &str,
+        turn: Option<&TranscriptTurn>,
+        processed_secs: f32,
+        total_secs: Option<f32>,
+        level: f32,
+        message: &str,
+    ) {
+        let _ = self.app.emit_all(
+            "voicereader:transcript",
+            TranscriptEventPayload {
+                job_id: self.job_id.clone(),
+                kind: kind.to_string(),
+                turn: turn.map(|turn| TranscriptTurnPayload {
+                    id: turn.id,
+                    speaker: turn.speaker,
+                    unknown: turn.speaker == UNKNOWN_SPEAKER,
+                    start_secs: turn.start_secs,
+                    end_secs: turn.end_secs,
+                    text: turn.text.clone(),
+                }),
+                processed_secs,
+                total_secs,
+                level,
+                message: message.to_string(),
+            },
+        );
+    }
+
+    /// Sends the final event. The job is released first, so the window can start the
+    /// next transcription as soon as it hears about this one.
+    fn finish(&mut self, kind: &str, processed_secs: f32, message: &str) {
+        self.reported = true;
+        release_transcription_job(&self.job_id);
+        self.emit(kind, None, processed_secs, None, message);
+    }
+}
+
+#[cfg(feature = "build-base")]
+impl Drop for TranscriptionJobGuard {
+    fn drop(&mut self) {
+        if !self.reported {
+            self.finish("error", 0.0, "Transcription stopped unexpectedly.");
+        }
+    }
+}
+
+/// Less speech than this from speakers beyond the limit is not worth a note.
+#[cfg(feature = "build-base")]
+const UNKNOWN_SPEAKER_NOTE_SECS: f32 = 2.0;
+
+/// "42 s", "3 min 10 s" or "1 h 2 min".
+#[cfg(feature = "build-base")]
+fn format_duration(seconds: f32) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    match (total / 3600, (total % 3600) / 60, total % 60) {
+        (0, 0, secs) => format!("{secs} s"),
+        (0, mins, secs) => format!("{mins} min {secs} s"),
+        (hours, mins, _) => format!("{hours} h {mins} min"),
+    }
+}
+
+#[cfg(feature = "build-base")]
+fn release_transcription_job(job_id: &str) {
+    if let Ok(mut job) = ASR_JOB.lock() {
+        if job.as_ref().is_some_and(|(active, _)| active == job_id) {
+            *job = None;
+        }
+    }
+}
+
+/// Starts a transcription on a background thread and returns its job id. `work` gets the
+/// flag that `cancel_transcription` sets and a sink for the events to send to the window.
+#[cfg(feature = "build-base")]
+fn start_transcription_job<F>(app: &AppHandle, work: F) -> Result<TranscribeStartPayload, String>
+where
+    F: FnOnce(Arc<AtomicBool>, &mut dyn FnMut(TranscribeEvent<'_>)) -> Result<TranscribeSummary> + Send + 'static,
+{
+    let job_id = Uuid::new_v4().to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut job = ASR_JOB.lock().map_err(|_| "Transcription state lock poisoned".to_string())?;
+        if job.is_some() {
+            return Err("A transcription is already running.".to_string());
+        }
+        *job = Some((job_id.clone(), stop.clone()));
+    }
+
+    let mut job = TranscriptionJobGuard {
+        app: app.clone(),
+        job_id: job_id.clone(),
+        reported: false,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        job.emit("loading", None, 0.0, None, "");
+        let result = work(stop, &mut |event| match event {
+            TranscribeEvent::Started { total_secs } => job.emit("started", None, 0.0, total_secs, ""),
+            TranscribeEvent::Turn(turn) => job.emit("turn", Some(turn), 0.0, None, ""),
+            TranscribeEvent::Progress {
+                processed_secs,
+                total_secs,
+            } => job.emit("progress", None, processed_secs, total_secs, ""),
+            TranscribeEvent::Level(level) => job.emit_with_level("level", None, 0.0, None, level, ""),
+        });
+        match result {
+            Ok(summary) if summary.cancelled => job.finish("cancelled", summary.audio_secs, "Transcription stopped."),
+            Ok(summary) => {
+                let speakers: HashSet<usize> = summary
+                    .turns
+                    .iter()
+                    .map(|turn| turn.speaker)
+                    .filter(|&speaker| speaker != UNKNOWN_SPEAKER)
+                    .collect();
+                let speakers = format!(
+                    "{} {}",
+                    speakers.len(),
+                    if speakers.len() == 1 { "speaker" } else { "speakers" }
+                );
+                let message = if summary.live {
+                    format!("Recording finished. {}, {speakers}.", format_duration(summary.audio_secs))
+                } else {
+                    format!(
+                        "Done. {} of audio, {speakers}, transcribed in {}.",
+                        format_duration(summary.audio_secs),
+                        format_duration(summary.elapsed_secs)
+                    )
+                };
+                // People beyond the limit share the "Unknown speaker" label; say how to split them.
+                let message = if summary.unknown_speaker_secs >= UNKNOWN_SPEAKER_NOTE_SECS {
+                    format!(
+                        "{message} About {} is from further speakers and is shown as Unknown speaker; raise Speakers to label them separately.",
+                        format_duration(summary.unknown_speaker_secs)
+                    )
+                } else {
+                    message
+                };
+                job.finish("done", summary.audio_secs, &message);
+            }
+            Err(err) => job.finish("error", 0.0, &to_cmd_error(err)),
+        }
+    });
+    Ok(TranscribeStartPayload { job_id })
+}
+
+/// The models folder, once the engine is up and the transcription model is in it.
+#[cfg(feature = "build-base")]
+async fn transcription_models_dir(app: &AppHandle, state: &State<'_, SharedState>) -> Result<PathBuf, String> {
+    ensure_engine_ready(app, &state.inner).await.map_err(to_cmd_error)?;
+    let models_dir = {
+        let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+        PathBuf::from(&guard.models_dir)
+    };
+    if !asr_models_downloaded(&models_dir) {
+        return Err("The transcription model is not downloaded yet. Download it on the Models page first.".to_string());
+    }
+    Ok(models_dir)
+}
+
+#[tauri::command]
+async fn transcribe_audio_file(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    path: String,
+    max_speakers: Option<u32>,
+) -> Result<TranscribeStartPayload, String> {
+    #[cfg(feature = "build-base")]
+    {
+        let models_dir = transcription_models_dir(&app, &state).await?;
+        let audio_path = PathBuf::from(path.trim());
+        if !audio_path.is_file() {
+            return Err(format!("File not found: {}", audio_path.display()));
+        }
+        let max_speakers = max_speakers.map(|value| value as usize).unwrap_or(DEFAULT_MAX_SPEAKERS);
+        return start_transcription_job(&app, move |cancel, on_event| {
+            transcribe_file(&models_dir, &audio_path, max_speakers, &cancel, on_event)
+        });
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state, path, max_speakers);
+        Err("Transcription is available in the Base build only.".to_string())
+    }
+}
+
+/// Transcribes the microphone until `cancel_transcription` is called. `device` is a name
+/// from `list_audio_inputs`; without it the system default input is used.
+#[tauri::command]
+async fn transcribe_microphone_input(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    device: Option<String>,
+    max_speakers: Option<u32>,
+) -> Result<TranscribeStartPayload, String> {
+    #[cfg(feature = "build-base")]
+    {
+        let models_dir = transcription_models_dir(&app, &state).await?;
+        let device = device.map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
+        let max_speakers = max_speakers.map(|value| value as usize).unwrap_or(DEFAULT_MAX_SPEAKERS);
+        return start_transcription_job(&app, move |stop, on_event| {
+            transcribe_microphone(&models_dir, device.as_deref(), max_speakers, stop, on_event)
+        });
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state, device, max_speakers);
+        Err("Transcription is available in the Base build only.".to_string())
+    }
+}
+
+/// Transcribes a voice-cloning reference clip (WAV, base64) and returns its text, so
+/// the user does not have to type the transcript. Waits for the result.
+#[tauri::command]
+async fn transcribe_reference_clip(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    wav_base64: String,
+) -> Result<ClipTranscriptPayload, String> {
+    #[cfg(feature = "build-base")]
+    {
+        let models_dir = transcription_models_dir(&app, &state).await?;
+        let wav_bytes = BASE64_STANDARD
+            .decode(wav_base64.trim())
+            .map_err(|err| format!("The audio file could not be read: {err}"))?;
+        // One model at a time: it takes about 1.3 GB while it is loaded.
+        let job_id = Uuid::new_v4().to_string();
+        {
+            let mut job = ASR_JOB.lock().map_err(|_| "Transcription state lock poisoned".to_string())?;
+            if job.is_some() {
+                return Err("A transcription is already running. Wait for it to finish, then try again.".to_string());
+            }
+            *job = Some((job_id.clone(), Arc::new(AtomicBool::new(false))));
+        }
+        let result = tauri::async_runtime::spawn_blocking(move || transcribe_clip(&models_dir, &wav_bytes)).await;
+        release_transcription_job(&job_id);
+        return match result {
+            Ok(Ok(text)) => Ok(ClipTranscriptPayload { text }),
+            Ok(Err(err)) => Err(to_cmd_error(err)),
+            Err(err) => Err(format!("Transcription stopped unexpectedly: {err}")),
+        };
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state, wav_base64);
+        Err("Transcription is available in the Base build only.".to_string())
+    }
+}
+
+#[tauri::command]
+async fn list_audio_inputs() -> Result<Vec<AudioInputPayload>, String> {
+    #[cfg(feature = "build-base")]
+    {
+        // Asking the system for its devices can take a moment, so keep it off the main thread.
+        return tauri::async_runtime::spawn_blocking(|| {
+            list_inputs()
+                .into_iter()
+                .map(|input| AudioInputPayload {
+                    name: input.name,
+                    is_default: input.is_default,
+                })
+                .collect()
+        })
+        .await
+        .map_err(|err| format!("Failed to list microphones: {err}"));
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    Ok(Vec::new())
+}
+
+#[tauri::command]
+fn cancel_transcription() -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    {
+        let job = ASR_JOB.lock().map_err(|_| "Transcription state lock poisoned".to_string())?;
+        return Ok(match job.as_ref() {
+            Some((_, cancel)) => {
+                cancel.store(true, Ordering::SeqCst);
+                GenericResult {
+                    ok: true,
+                    message: "Stopping transcription".to_string(),
+                }
+            }
+            None => GenericResult {
+                ok: false,
+                message: "No transcription is running".to_string(),
+            },
+        });
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    Err("Transcription is available in the Base build only.".to_string())
+}
+
+/// Writes text to a path the user picked in a save dialog (transcript export).
+#[tauri::command]
+async fn save_text_file(path: String, contents: String) -> Result<GenericResult, String> {
+    let path = PathBuf::from(path.trim());
+    if path.as_os_str().is_empty() {
+        return Err("No file name was given.".to_string());
+    }
+    std::fs::write(&path, contents).map_err(|err| format!("Failed to save {}: {err}", path.display()))?;
+    Ok(GenericResult {
+        ok: true,
+        message: format!("Saved {}", path.display()),
+    })
 }
 
 /// Returns the Audio8 runtime, loading the model on first use.

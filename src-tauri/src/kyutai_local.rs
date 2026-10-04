@@ -112,7 +112,7 @@ impl LocalKyutaiRuntime {
             .map(|path| format!("sox={}", path.display()))
             .unwrap_or_else(|| "sox=unavailable(resample_fallback_pitch_shift)".to_string());
         json!({
-            "engine_version": "0.1.0",
+            "engine_version": env!("CARGO_PKG_VERSION"),
             "active_model_id": self.model_id,
             "device": "cpu",
             "capabilities": {

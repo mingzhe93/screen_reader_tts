@@ -253,6 +253,12 @@ fn resolve_onnxruntime_path() -> Result<PathBuf> {
     ))
 }
 
+/// Loads the bundled ONNX Runtime library. Safe to call more than once; every ONNX
+/// backend (Audio8, transcription) calls it before creating a session.
+pub(crate) fn ensure_onnxruntime() -> Result<()> {
+    init_onnxruntime(&resolve_onnxruntime_path()?)
+}
+
 pub struct LocalAudio8Runtime {
     model: Arc<Audio8Model>,
     model_dir: PathBuf,
@@ -271,7 +277,7 @@ impl LocalAudio8Runtime {
                 model_dir.display()
             ));
         }
-        init_onnxruntime(&resolve_onnxruntime_path()?)?;
+        ensure_onnxruntime()?;
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         // Defaults: two chunks generated at once (one thread each) and one codec decoder
         // with up to 8 threads. On a 16-core / 32-thread CPU, more generators, more
@@ -331,7 +337,7 @@ impl LocalAudio8Runtime {
 
     pub fn health_payload(&self) -> Value {
         json!({
-            "engine_version": "0.1.0",
+            "engine_version": env!("CARGO_PKG_VERSION"),
             "active_model_id": AUDIO8_REPO,
             "device": if self.model.decoder_device() == DecoderDevice::Cpu { "cpu" } else { "cpu+gpu" },
             "capabilities": {

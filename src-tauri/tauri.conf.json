@@ -8,7 +8,7 @@
   },
   "package": {
     "productName": "VoiceReader",
-    "version": "0.1.4"
+    "version": "0.2.0"
   },
   "tauri": {
     "allowlist": {
@@ -26,6 +26,11 @@
       },
       "window": {
         "all": true
+      },
+      "dialog": {
+        "all": false,
+        "open": true,
+        "save": true
       }
     },
     "windows": [

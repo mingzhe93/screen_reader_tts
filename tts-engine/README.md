@@ -1,22 +1,21 @@
-# tts-engine (Python sidecar for Full build)
+# tts-engine (Python sidecar for the Full build)
 
-This is the Phase 1 local engine service for VoiceReader.
+This is the local engine service of the VoiceReader **Full build** (`build-full`), version 0.2.0. It is **not part of the default Base build** (`build-base`), which does not start it and needs no Python at run time. The Full build is kept for future heavier models and is not actively used.
 
 ## Build profile context
 
-VoiceReader now ships in two desktop profiles:
+VoiceReader ships in two desktop profiles:
 
-- **Base build** (`build-base`): Rust-native Kyutai runtime only, no Python sidecar, no Qwen/GPU path, and English-only synthesis (`languages: ["en"]`).  
-  This is the lightweight path (portable package is around ~200 MB).
-- **Full build** (`build-full`): Python sidecar + Kyutai + Qwen model switching/downloads.
+- **Base build** (`build-base`, the default for `npm run desktop:dev` and `npm run desktop:build`): everything runs inside the Rust process. Kyutai Pocket TTS, the optional Audio8 TTS model and speech-to-text transcription are implemented in Rust, so there is no Python sidecar, no Qwen model and no localhost API. The sidecar's API is not its interface; the Tauri commands and events described in `docs/DESIGN_SPEC.md` are.
+- **Full build** (`build-full`): the desktop app starts this Python sidecar as a child process and talks to it over loopback HTTP and WebSocket (`docs/IPC_API.md`). It offers Kyutai Pocket TTS and Qwen3-TTS 0.6B (CustomVoice and Base) with model switching and downloads. Audio8 TTS and transcription are not available in the Full build.
 
-This `tts-engine` folder is used by the **Full build** profile.
+This `tts-engine` folder is used by the **Full build** profile only. `npm run sidecar:build` packages it with PyInstaller into `src-tauri/binaries/tts-engine-<target triple>/`.
 
 Current scope:
 - HTTP + WebSocket API contract from `docs/IPC_API.md`
 - Bearer-token auth for HTTP and WS
 - WS headerless fallback auth via `Sec-WebSocket-Protocol: auth.bearer.v1, <token>`
-- Voice profile persistence (`voices/<voice_id>/meta.json` + `prompt.safetensors`)
+- Voice profile persistence (`voices/<voice_id>/meta.json`, `reference_audio.wav` and `prompt.safetensors`)
 - Speak job lifecycle (`/speak`, `/cancel`, WS events)
 - Built-in first-run voice (`voice_id: "0"`) so `/speak` works without cloning
 - Real Kyutai Pocket TTS inference path for `voice_id: "0"` and saved cloned voices
@@ -24,9 +23,9 @@ Current scope:
 - Automatic fallback to mock audio backend when Kyutai/Qwen runtime is unavailable (in `auto` mode)
 - Kyutai language support in current app flow is English-only
 
-Not implemented yet:
+Not implemented in the sidecar:
 - Qwen cloned-voice inference path
-- Optional ASR transcription flow
+- Speech to text (transcription exists only in the Base build, in Rust)
 
 ## Run locally
 
@@ -95,7 +94,7 @@ Runtime behavior:
 - For `Verylicious/pocket-tts-ungated`, engine materializes `voicereader-pocket-tts.yaml` inside that model folder and loads Pocket TTS from local files.
 - Kyutai supports default `voice_id: "0"` and saved cloned voice UUIDs.
 
-If `-SynthBackend qwen` fails with `Torch not compiled with CUDA enabled`, your env has a CPU-only torch build.
+If the `qwen` backend (`VOICEREADER_SYNTH_BACKEND=qwen`, or `--synth-backend qwen` in the helper scripts) fails with `Torch not compiled with CUDA enabled`, your env has a CPU-only torch build.
 
 CPU-only test path:
 
@@ -205,7 +204,7 @@ With engine already running:
 
 ```powershell
 cd tts-engine
-python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 500 --prefetch-queue-size 5 --start-playback-after 2
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 200 --prefetch-queue-size 5 --start-playback-after 2
 ```
 
 This script:
@@ -217,8 +216,8 @@ This script:
 Optional flags:
 
 ```powershell
-# force smaller chunks to stress chunking behavior
-python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 200 --prefetch-queue-size 5 --start-playback-after 2
+# force smaller chunks to stress chunking behavior (the engine never makes chunks longer than 200 characters)
+python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --chunk-max-chars 100 --prefetch-queue-size 5 --start-playback-after 2
 
 # save the combined streamed audio
 python ./scripts/stream_play_queue_test.py --base-url http://127.0.0.1:8765 --token dev-token --voice-id 0 --save-wav-path ./out_stream.wav --prefetch-queue-size 5 --start-playback-after 2
@@ -239,7 +238,7 @@ python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0
 ```
 
 Defaults in this one-command flow:
-- `ChunkMaxChars=500`
+- `ChunkMaxChars=200`
 - `PrefetchQueueSize=5`
 - `StartPlaybackAfter=2`
 - warmup is triggered with `wait=true` before speak
@@ -276,7 +275,7 @@ python ./scripts/run_stream_play_with_engine.py --token dev-token --voice-id 0 -
 
 Long pauses or broken-sounding playback can come from:
 - CPU inference (`QwenDeviceMap=cpu`) which is much slower than CUDA on this model size.
-- Sequential per-chunk generation: the engine generates chunk N+1 only after chunk N has completed.
+- One-chunk look-ahead only: the engine starts generating chunk N+1 as soon as chunk N is generated, while chunk N's rate processing runs, but never further ahead. A model slower than real time still leaves gaps.
 - Synchronous playback in the Windows test client path to preserve chunk order.
 - Small chunk sizes at high playback rates (tempo processing can output bursty packets, causing buffer underflow).
 
@@ -292,10 +291,7 @@ How to reduce pauses:
 - Use CUDA-enabled torch (`QwenDeviceMap=cuda:0`, `QwenDtype=bfloat16`).
 - Use queue buffering (`PrefetchQueueSize=5`, `StartPlaybackAfter=2`).
 - Trigger warmup (`POST /v1/warmup` with `wait=true`) on startup and after model changes.
-- Use larger chunk windows for smoother playback:
-  - default `ChunkMaxChars=500`
-  - group up to 3 sentences per chunk
-  - for low-latency tuning, try `ChunkMaxChars=350` to `600` depending on hardware.
+- Chunk size is fixed by the engine: the splitter (`chunking.py`) makes one sentence per chunk and caps a chunk at 200 characters, whatever `chunking.max_chars` (100 to 2000) the request asks for, so larger chunk windows are not available.
 
 Cancel behavior details:
 - `POST /v1/cancel` is honored at chunk boundaries.

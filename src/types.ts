@@ -150,6 +150,48 @@ export type ModelDownloadProgressPayload = {
   message: string;
 };
 
+export type AsrModelStatus = {
+  supported: boolean;
+  downloaded: boolean;
+  model_dir: string;
+  repo: string;
+  diarizer_repo: string;
+  download_size_bytes: number;
+  default_max_speakers: number;
+  max_speakers_limit: number;
+};
+
+export type TranscribeStartPayload = {
+  job_id: string;
+};
+
+export type TranscriptTurn = {
+  id: number;
+  /** Zero-based, in order of first appearance. */
+  speaker: number;
+  /** True for speech from people beyond the speaker limit, who share one label. */
+  unknown: boolean;
+  start_secs: number;
+  end_secs: number;
+  text: string;
+};
+
+export type TranscriptEventPayload = {
+  job_id: string;
+  kind: "loading" | "started" | "turn" | "progress" | "level" | "done" | "cancelled" | "error";
+  turn: TranscriptTurn | null;
+  processed_secs: number;
+  total_secs: number | null;
+  /** Input loudness from 0 to 1, in "level" events. */
+  level: number;
+  message: string;
+};
+
+export type AudioInput = {
+  name: string;
+  is_default: boolean;
+};
+
 export type QueuedPlayback = {
   buffers: AudioBuffer[];
   bufferedSeconds: number;
