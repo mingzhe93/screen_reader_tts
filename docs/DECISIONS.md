@@ -1,6 +1,13 @@
 # VoiceReader Decisions
 
-Direction agreed on 2026-10-03, after a seven-month gap in development, and the decisions made on the way to version 0.2.0 (2026-10-04). Newest decisions go at the top of each section.
+Direction agreed on 2026-10-03, after a seven-month gap in development, and the decisions made through version 0.2.1 (2026-10-05). Newest decisions go at the top of each section.
+
+## Release 0.2.1 (2026-10-05)
+
+- **macOS portable support is working on Apple Silicon.** Highlighted-text hotkeys and the floating playback toolbar have been tested. SoX is bundled for pitch-preserving speed changes, and both platforms use the updated app icon.
+- **Audio8 GPU acceleration on macOS is deferred.** Core ML inference failed with the shipped decoder, so macOS uses the CPU. GPU acceleration remains available on Windows through DirectML.
+- **Recording export is optional.** The Transcribe page offers Copy, Transcription, and Recording & transcription. The combined export saves a ZIP containing the original uploaded audio or the microphone's mono WAV recording, plus a text transcript.
+- **Release versions stay aligned.** The desktop, lockfile app entries and Python engine metadata use 0.2.1 and are synchronized from `package.json`.
 
 ## Product direction
 
@@ -24,7 +31,7 @@ Direction agreed on 2026-10-03, after a seven-month gap in development, and the 
 - **Voice cloning must keep working** for every TTS model. Audio8 needs the reference audio plus its exact transcript, so the clone flow gains a transcript field.
 - **Audio8 0.1B support is implemented (2026-10-03) and tested by the user.** Measured on a Ryzen 9 9950X: about 0.8 s to first audio at 1.0x, about 1.4 s at 1.5x, roughly 2x real time at best, about 1.5 GB of memory while speaking. Details are in `docs/learnings.md` section 7.
 - **ONNX Runtime is loaded as a shared library, not linked statically.** Static linking clashes with the protobuf copy inside the Kyutai runtime's dependencies. The library is fetched at build time by `scripts/fetch-onnxruntime.js` (ONNX Runtime 1.24.4 at the time of writing, 1.23.2 for Intel macOS) and is not committed. Transcription uses this same library.
-- **GPU acceleration goes through ONNX Runtime's native providers, not WebGPU in the app window** (2026-10-04). DirectML on Windows is implemented for the Audio8 decoder and chosen by benchmark, with CPU fallback; Core ML on macOS is wired in but opt-in until tested on a Mac. Only graphs that measure faster on the GPU are moved; generation stays on the CPU. Details are in `docs/learnings.md` section 11.
+- **GPU acceleration goes through ONNX Runtime's native providers, not WebGPU in the app window** (2026-10-04; macOS status updated 2026-10-05). DirectML on Windows is implemented for the Audio8 decoder and chosen by benchmark, with CPU fallback. Core ML on macOS failed inference with the shipped decoder, so macOS Audio8 GPU support is deferred and the app uses the CPU. Only graphs that measure faster on the GPU are moved; generation stays on the CPU. Details are in `docs/learnings.md` section 11.
 - **The user can choose the compute device** (2026-10-04): Auto (default), GPU or CPU on the Settings page (the Engine tab at the time). Auto means "GPU when available and faster than the CPU", not "GPU whenever present", because a weak integrated GPU measured four times slower than the CPU. CPU exists so the GPU can be left free for other work.
 - **Chatterbox was considered and set aside** (2026-10-04). It promises better quality and cloning without a transcript, but is realistically a GPU model; Audio8 stays for now.
 - **The Qwen ONNX port plan is dropped.** `docs/onnxruntime_plan.md` planned a Rust ONNX Runtime port of Qwen, which is no longer the goal. Its approach (ONNX Runtime via the `ort` crate, tokenizer, cached decode loop) was reused for Audio8, and the file was deleted on 2026-10-04.
@@ -55,7 +62,7 @@ Direction agreed on 2026-10-03, after a seven-month gap in development, and the 
 3. Test it; decide whether it becomes the default. Done 2026-10-04: Kyutai stays the default, Audio8 stays as the optional model.
 4. Housekeeping before ASR. Done 2026-10-04.
 5. Redesign the main window, add file transcription and live microphone transcription. Done 2026-10-04 and tried by the user on recordings and the microphone.
-6. Release version 0.2.0 on GitHub. In preparation (2026-10-04).
+6. Release version 0.2.0 on GitHub. Published; version 0.2.1 is now in preparation (2026-10-05).
 7. Live transcription of system audio, mixed with the microphone. Next.
 8. Word boosting.
 

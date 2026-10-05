@@ -1,14 +1,25 @@
 # VoiceReader
 
-Version 0.2.0. A desktop app that reads highlighted text aloud and turns speech into a transcript with speaker labels.
+Version 0.2.1. A desktop app that reads highlighted text aloud and turns speech into a transcript with speaker labels.
 
 - **Read aloud.** Highlight text in any app, press a hotkey, and hear it spoken. The voices are open-weight text-to-speech models, with voice cloning from a short clip.
 - **Transcribe.** Record from the microphone, or pick a recording, and get a transcript that labels who spoke. It tells up to 8 speakers apart. English only.
 - **Local.** The models run on your own computer. After the one-time model downloads, nothing is sent to a cloud service while you use it.
-- **Platforms.** Windows is the tested platform. The macOS code exists but is largely untested. On Linux the hotkey flow does not work (see [Platform status](#platform-status)).
+- **Platforms.** Windows and macOS (Apple Silicon, macOS 14 or newer) work. Audio8 GPU acceleration is available on Windows; it is not available yet on macOS, where Audio8 runs on the CPU. On Linux the hotkey flow does not work (see [Platform status](#platform-status)).
 - **Stack.** A Tauri 1.x desktop app: a Vite/TypeScript frontend and a Rust backend.
 
-To try it, build it from source: see [Quick start](#quick-start-base-build).
+## How to use
+
+1. Go to the [latest release](https://github.com/mingzhe93/screen_reader_tts/releases/latest) and download the portable ZIP for your computer:
+   - **macOS (Apple Silicon):** `VoiceReader_macos_arm64_portable.zip`
+   - **Windows (x64):** `VoiceReader-portable-win-x64.zip`
+2. Extract the ZIP and open VoiceReader. On macOS, open `VoiceReader.app` and allow **Accessibility** access in System Settings > Privacy & Security so it can read highlighted text. Allow **Microphone** access when prompted if you want to record.
+3. To read text aloud, **highlight text in another app and press the hotkey** shown on the Read aloud page. The defaults are **Ctrl+Shift+S on macOS** and **Alt+S on Windows**. Keep the source app focused when you press it. Kyutai's English voices are included, and a floating toolbar appears while reading.
+4. For **Chinese text**, first open **Models** and download **Audio8 TTS**, then select Audio8 on the Read aloud page. **macOS Audio8 uses the CPU; GPU acceleration is not available yet.**
+5. For **transcription**, first open **Models** and download **Transcription**. Then open **Transcribe** to record and transcribe your microphone in real time, or choose an existing recording. Transcription currently supports English only.
+6. After transcribing, choose **Copy**, **Transcription** (text, Markdown or SRT), or **Recording & transcription** (a ZIP containing the audio and a text transcript). Stop a live recording before exporting it, and save it before starting another transcription or closing the app.
+
+To build from source, see [Development setup](#development-setup-base-build).
 
 ## What it can do
 
@@ -17,7 +28,7 @@ To try it, build it from source: see [Quick start](#quick-start-base-build).
 - Change the playback rate from `0.25x` to `4.0x` while audio is playing. Pitch is preserved when SoX is available.
 - Clone a voice from a WAV clip, save it, and reuse it. The Transcribe audio button fills in the clip's transcript for you (English only; it uses the transcription model and offers to download it if it is missing). Saved voices can be renamed, annotated and deleted on the Voices page.
 - Choose from 21 preset voices with Kyutai Pocket TTS.
-- Run a model on the CPU, and move part of Audio8 to a GPU when that is faster (see Compute device below).
+- Run models on the CPU, and move part of Audio8 to a GPU on Windows when that is faster (see Compute device below).
 - Transcribe speech on the Transcribe page, with a label per speaker and the transcript shown while it is produced. Press Record to transcribe the microphone live, or choose or drop a WAV, MP3, M4A, MP4, FLAC or OGG Vorbis file. Each of the 8 speakers has its own label colour. Speakers can be renamed, and the transcript can be copied or exported as text, Markdown or SRT subtitles. English only.
 
 The main window has a sidebar with five pages: Read aloud, Voices, Transcribe, Models and Settings.
@@ -64,13 +75,14 @@ Two builds exist. They are chosen by Cargo feature, and exactly one must be enab
 | Platform | Status |
 |---|---|
 | Windows | Primary and tested platform. Selection capture sends Ctrl+C with `SendInput`. The source label comes from the foreground window title. Audio8 can decode on any DirectX 12 GPU through DirectML. |
-| macOS | Implemented in code, largely untested. Selection capture sends Cmd+C through CGEvent, and the source label is the frontmost application's name. `src-tauri/Info.plist` holds the microphone permission text; recording has not been tried on a Mac. Core ML decoding for Audio8 is opt-in and currently falls back to CPU on the tested Apple Silicon Mac: the shipped decoder failed Core ML inference. The portable build and model download states have been tested; recording and selection capture still need verification. |
+| macOS | Working on Apple Silicon with macOS 14 or newer. The portable app, model downloads, highlighted-text hotkey and floating playback toolbar have been tested. Selection capture requires Accessibility permission; microphone recording requires Microphone permission. SoX is bundled to preserve pitch when changing speed. Audio8 runs on the CPU: macOS GPU acceleration is not available yet. Intel and universal builds still need verification. |
 | Linux | Not supported for the hotkey flow: simulated copy and source-window lookup are not implemented. `scripts/fetch-onnxruntime.js` has a Linux x64 download, and SoX is looked up on `PATH`, but nothing else about Linux is covered. |
 
 ## Known limitations
 
 - Kyutai is English only. Use Audio8 for Chinese.
 - Audio8 runs generation on the CPU and is close to real time. Playback above about 1.5x can stutter.
+- Audio8 GPU acceleration is not available yet on macOS. Use the CPU; choosing GPU currently falls back to CPU.
 - Without SoX, rate changes use plain resampling, which also changes pitch. Windows builds bundle SoX under `src-tauri/binaries/sox`; macOS builds include a native runtime under `src-tauri/binaries/sox-macos`.
 - Rate changes are applied to the next piece of audio the runtime produces, not to audio that is already queued in the player.
 - The skip-back button does nothing yet.
@@ -86,7 +98,7 @@ Two builds exist. They are chosen by Cargo feature, and exactly one must be enab
 - The transcript and unsaved microphone recording are kept for the current session, until the next transcription starts or the app closes. **Copy** copies the transcript; **Transcription** saves TXT, Markdown or SRT; **Recording & transcription** saves both files in a ZIP after transcription finishes.
 - Transcription speed has been measured on a desktop CPU only; a laptop CPU has not been measured.
 
-## Quick start (Base build)
+## Development setup (Base build)
 
 ### Prerequisites
 
@@ -134,7 +146,9 @@ If there is no audio, check the OS output device, then use Refresh health and Re
 | `npm run onnxruntime:fetch`, `npm run kyutai-voices:fetch` | The two halves of `assets:fetch`. |
 | `npm run models:bundle:kyutai` | Ensure the Kyutai model (and SoX, if found on the build machine) is under `src-tauri/binaries`. Runs inside every Base build. |
 
-The Base scripts also run `scripts/sync-version.js`, which copies the version from `package.json` into `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
+The Base scripts also run `scripts/sync-version.js`, which copies the version from `package.json` into the desktop and Python engine metadata and the app entries in both lockfiles.
+
+The build scripts produce versioned ZIP filenames. When publishing a release, name the uploaded assets `VoiceReader-portable-win-x64.zip` and `VoiceReader_macos_arm64_portable.zip` to match the download instructions above.
 
 What belongs under `src-tauri/binaries` for each build is described in `src-tauri/binaries/README.txt`.
 
@@ -156,7 +170,7 @@ What belongs under `src-tauri/binaries` for each build is described in `src-taur
 
 If the saved hotkey cannot be registered, the app falls back to the platform default above and saves that. `Alt+Space` and `Cmd+Space` are refused as OS-reserved.
 
-Compute device controls where Audio8's audio decoder runs. It does not affect transcription, which always runs on the CPU because the GPU measured no faster for it. Auto uses the GPU only when a one-time benchmark shows it is at least 1.5 times faster than the CPU. GPU uses it whenever the provider loads. CPU never touches the GPU. On macOS, Auto currently stays on CPU. The opt-in Core ML path was tested with ONNX Runtime 1.24.4 and the shipped Audio8 decoder, but inference failed and safely fell back to CPU. A trial using MLProgram also failed in Apple’s Metal graph compiler and is not included in the release. macOS GPU acceleration is therefore experimental, not verified working. Details are in `docs/learnings.md` section 11.
+Compute device controls where Audio8's audio decoder runs. It does not affect transcription, which always runs on the CPU because the GPU measured no faster for it. On Windows, Auto uses the GPU only when a one-time benchmark shows it is at least 1.5 times faster than the CPU. GPU uses it whenever the provider loads. CPU never touches the GPU. **Audio8 GPU acceleration is not available yet on macOS.** Auto uses the CPU, and selecting GPU currently falls back to CPU because the shipped decoder failed Core ML inference. Details are in `docs/learnings.md` section 11.
 
 ### Environment variables
 
@@ -198,7 +212,7 @@ Python is used only while building; users do not need Python, Node or Rust insta
 The macOS configuration targets macOS 14 or newer. Build on Apple Silicon for an arm64
 release; Intel and universal releases need separate build and runtime verification.
 
-The output is `src-tauri/target/release/bundle/portable/VoiceReader_0.2.0_macos_arm64_portable.zip`
+The output is `src-tauri/target/release/bundle/portable/VoiceReader_0.2.1_macos_arm64_portable.zip`
 on Apple Silicon. Extract it and open `VoiceReader.app`; moving it to Applications is optional.
 The entire `.app` must stay together. Settings, saved voices and downloaded models go
 under the user's application data directory, so portable here means no installer,

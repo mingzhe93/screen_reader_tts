@@ -20,7 +20,7 @@ A Cargo feature picks the build. Exactly one must be enabled; the crate refuses 
 
 Code shared by both builds (commands, state, hotkey, selection capture, toolbar) lives in `voicereader_core.rs`. Code that exists only in one build is behind `#[cfg(feature = ...)]`. In the Base build `qwen_modes_enabled()` is false, so Qwen modes are hidden and their commands return an error. Audio8 and transcription exist only in the Base build. In the Full build `download_audio8_model`, `download_asr_model`, `transcribe_audio_file`, `transcribe_microphone_input` and `cancel_transcription` return an error, `audio8_model_status` and `asr_model_status` report `supported: false`, and `list_audio_inputs` returns an empty list.
 
-The app version is 0.2.0. `package.json` is the source: `scripts/sync-version.js`, which runs before dev and build, copies it to `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`. The Base runtimes report it as `engine_version` in their health JSON (through `CARGO_PKG_VERSION`), and the model downloader sends it in its user agent. The sidecar has its own version, also 0.2.0, in `tts-engine/pyproject.toml`, `tts_engine/__init__.py` and `tts_engine/config.py`; the sync script does not change it.
+The app version is 0.2.1. `package.json` is the source: `scripts/sync-version.js`, which runs before dev and build, copies it to `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, the app entries in both lockfiles, and the Full-build Python engine metadata (`tts-engine/pyproject.toml`, `tts_engine/__init__.py` and `tts_engine/config.py`). Dependency versions are left unchanged. The Base runtimes report it as `engine_version` in their health JSON (through `CARGO_PKG_VERSION`), and the model downloader sends it in its user agent. The sidecar reports the same release version.
 
 ## 3. Source layout
 
@@ -203,7 +203,7 @@ Each model download is a Tauri command and runs once at a time. The transcriptio
 The Compute Device setting (Auto, GPU, CPU) decides where Audio8's decoder runs. The two generation graphs always run on the CPU.
 
 - Windows: the GPU provider is DirectML. Auto benchmarks the decoder on the GPU and on the CPU once and keeps the GPU only if it is at least 1.5 times faster. The result is cached for 7 days in `audio8-decoder-device.json`. If a GPU session fails to load, the model loads on the CPU.
-- macOS: the provider is Core ML. It is wired in but untested, so Auto picks the CPU and only GPU selects Core ML.
+- macOS: Audio8 GPU acceleration is not available yet. Auto picks the CPU. Selecting GPU attempts Core ML, but inference with the shipped decoder failed in testing and falls back to CPU.
 - Other platforms: CPU only.
 - Changing the setting while Audio8 is loaded stops any speech and reloads the model. `VOICEREADER_AUDIO8_DECODER_DEVICE` overrides the setting.
 
@@ -220,7 +220,7 @@ Measurements and the reasons for these choices are in `docs/learnings.md` sectio
 ## 14. Platform differences
 
 - Windows: copy is sent with `SendInput`; modifier state comes from `GetAsyncKeyState`; the source label is the foreground window title; the Audio8 decoder can use DirectML.
-- macOS: copy is sent with CGEvent; modifier state comes from the CGEvent source state; the source label is the frontmost application's name. `src-tauri/Info.plist` carries the microphone permission text (`NSMicrophoneUsageDescription`) for live transcription; recording has not been tried on a Mac.
+- macOS: copy is sent with CGEvent; modifier state comes from the CGEvent source state; the source label is the frontmost application's name. Selection capture requires Accessibility access. The highlighted-text hotkey and floating toolbar have been tested on Apple Silicon. `src-tauri/Info.plist` carries the microphone permission text (`NSMicrophoneUsageDescription`) for live transcription.
 - Other platforms: no copy simulation and no source label, so the hotkey flow reports an empty selection.
 
 ## 15. Transcription

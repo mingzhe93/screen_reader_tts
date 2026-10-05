@@ -342,9 +342,9 @@ through ONNX Runtime's DirectML provider.
 - The same library also contains the CPU provider, so one file serves both.
 
 ### 11.5 Not done or not verified
-- macOS: the Core ML provider is wired in but untested (no Mac available), so it is
-  opt-in. Whether Core ML accepts this decoder, with its variable-length input, is
-  unknown.
+- macOS (updated 2026-10-05): Core ML inference was tested on Apple Silicon with
+  ONNX Runtime 1.24.4 and the shipped Audio8 decoder, but failed and fell back to
+  CPU. Auto uses the CPU. Audio8 GPU acceleration is not available yet on macOS.
 - Laptop integrated GPUs (Intel Iris Xe or Arc, Radeon 780M) are far stronger than
   the one measured here, and laptop CPUs are weaker, so the outcome there may differ.
   The benchmark handles either case.
