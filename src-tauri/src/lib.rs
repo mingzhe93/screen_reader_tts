@@ -25,3 +25,6 @@ mod kyutai_local;
 mod model_download;
 #[cfg(feature = "build-base")]
 mod text_chunking;
+
+#[cfg(feature = "build-base")]
+mod recording_export;

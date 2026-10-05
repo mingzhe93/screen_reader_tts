@@ -15,7 +15,7 @@ rand = "0.8"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tauri = { version = "1.6", features = [ "global-shortcut-all", "clipboard-read-text", "global-shortcut", "shell-open", "window-all", "dialog-open", "dialog-save"] }
+tauri = { version = "1.6", features = [ "macos-private-api", "global-shortcut-all", "clipboard-read-text", "global-shortcut", "shell-open", "window-all", "dialog-open", "dialog-save"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 uuid = { version = "1", features = ["v4"], optional = true }
@@ -26,6 +26,8 @@ pocket-tts = { version = "0.2.1", optional = true }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "api-22", "half"], optional = true }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
 hound = { version = "3.5", optional = true }
+tempfile = { version = "3.25", optional = true }
+zip = { version = "=7.2.0", default-features = false, optional = true }
 half = { version = "2", optional = true }
 # Speech to text: multitalker Parakeet with the Nemotron-3 diarizer, on the same ONNX Runtime.
 # Vendored: vendor/parakeet-rs is version 0.3.8 with a patch that stops words being lost
@@ -43,6 +45,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directm
 libloading = { version = "0.9", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "1.6", features = ["macos-private-api"] }
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"], optional = true }
 core-graphics = "0.24"
 core-foundation = "0.10"
@@ -52,4 +55,4 @@ objc = "0.2"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 build-full = []
-build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading", "dep:parakeet-rs", "dep:symphonia", "dep:cpal"]
+build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading", "dep:parakeet-rs", "dep:symphonia", "dep:cpal", "dep:tempfile", "dep:zip"]

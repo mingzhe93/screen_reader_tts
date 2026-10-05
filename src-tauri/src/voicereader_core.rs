@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 #[cfg(feature = "build-base")]
 use crate::asr_local::{
-    asr_model_dir, asr_models_downloaded, diarizer_model_dir, transcribe_clip, transcribe_file, transcribe_microphone,
+    asr_model_dir, asr_models_downloaded, diarizer_model_dir, transcribe_clip, transcribe_file, transcribe_microphone_recorded,
     TranscribeEvent,
     TranscribeSummary, TranscriptTurn, ASR_MODEL_FILES, ASR_REPO, DEFAULT_MAX_SPEAKERS, DIARIZER_MODEL_FILES,
     DIARIZER_REPO, MAX_SPEAKERS_LIMIT, UNKNOWN_SPEAKER,
@@ -678,6 +678,7 @@ pub fn run_app() {
             transcribe_reference_clip,
             list_audio_inputs,
             save_text_file,
+            export_recording_transcript,
             get_compute_device,
             set_compute_device,
             restart_engine,
@@ -692,6 +693,9 @@ pub fn run_app() {
             set_hotkey,
             speak_text,
             trigger_read_selection,
+            selection_access,
+            show_playback_toolbar,
+            hide_playback_toolbar,
             cancel_active_job,
         ])
         .build(tauri::generate_context!())
@@ -707,7 +711,7 @@ fn create_toolbar_window(app: &AppHandle) -> Result<()> {
         return Ok(());
     }
 
-    WindowBuilder::new(
+    let toolbar = WindowBuilder::new(
         app,
         TOOLBAR_WINDOW_LABEL,
         WindowUrl::App(TOOLBAR_WINDOW_PATH.into()),
@@ -723,7 +727,49 @@ fn create_toolbar_window(app: &AppHandle) -> Result<()> {
     .build()
     .context("Failed to build toolbar window")?;
 
+    #[cfg(target_os = "macos")]
+    {
+        use objc::{msg_send, sel, sel_impl, runtime::Object};
+        let native = toolbar.ns_window()? as *mut Object;
+        // Floating controls must accompany other apps across Spaces, full-screen
+        // windows and Stage Manager. Values come from AppKit's NSWindow.h.
+        unsafe {
+            let behavior: usize = msg_send![native, collectionBehavior];
+            let behavior = (behavior & !((1 << 7) | (1 << 9) | (1 << 16) | (1 << 17)))
+                | (1 << 0) | (1 << 8) | (1 << 18);
+            let _: () = msg_send![native, setCollectionBehavior: behavior];
+            let _: () = msg_send![native, setHidesOnDeactivate: false];
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = toolbar;
     Ok(())
+}
+
+#[tauri::command]
+fn hide_playback_toolbar(app: AppHandle) -> Result<(), String> {
+    let toolbar = app.get_window(TOOLBAR_WINDOW_LABEL)
+        .ok_or_else(|| "Playback toolbar was not created".to_string())?;
+    toolbar.hide().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn show_playback_toolbar(app: AppHandle) -> Result<(), String> {
+    let toolbar = app.get_window(TOOLBAR_WINDOW_LABEL)
+        .ok_or_else(|| "Playback toolbar was not created".to_string())?;
+    #[cfg(target_os = "macos")]
+    {
+        // Tao's show() makes the window key and steals focus from the text
+        // source. AppKit can display a floating window without activating it.
+        let native = toolbar.ns_window().map_err(|err| err.to_string())? as usize;
+        toolbar.run_on_main_thread(move || {
+            use objc::{msg_send, sel, sel_impl, runtime::Object};
+            unsafe { let _: () = msg_send![native as *mut Object, orderFrontRegardless]; }
+        }).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    toolbar.show().map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1305,7 +1351,7 @@ fn release_transcription_job(job_id: &str) {
 #[cfg(feature = "build-base")]
 fn start_transcription_job<F>(app: &AppHandle, work: F) -> Result<TranscribeStartPayload, String>
 where
-    F: FnOnce(Arc<AtomicBool>, &mut dyn FnMut(TranscribeEvent<'_>)) -> Result<TranscribeSummary> + Send + 'static,
+    F: FnOnce(String, Arc<AtomicBool>, &mut dyn FnMut(TranscribeEvent<'_>)) -> Result<TranscribeSummary> + Send + 'static,
 {
     let job_id = Uuid::new_v4().to_string();
     let stop = Arc::new(AtomicBool::new(false));
@@ -1315,6 +1361,7 @@ where
             return Err("A transcription is already running.".to_string());
         }
         *job = Some((job_id.clone(), stop.clone()));
+        crate::recording_export::clear_audio();
     }
 
     let mut job = TranscriptionJobGuard {
@@ -1324,7 +1371,7 @@ where
     };
     tauri::async_runtime::spawn_blocking(move || {
         job.emit("loading", None, 0.0, None, "");
-        let result = work(stop, &mut |event| match event {
+        let result = work(job.job_id.clone(), stop, &mut |event| match event {
             TranscribeEvent::Started { total_secs } => job.emit("started", None, 0.0, total_secs, ""),
             TranscribeEvent::Turn(turn) => job.emit("turn", Some(turn), 0.0, None, ""),
             TranscribeEvent::Progress {
@@ -1402,8 +1449,10 @@ async fn transcribe_audio_file(
             return Err(format!("File not found: {}", audio_path.display()));
         }
         let max_speakers = max_speakers.map(|value| value as usize).unwrap_or(DEFAULT_MAX_SPEAKERS);
-        return start_transcription_job(&app, move |cancel, on_event| {
-            transcribe_file(&models_dir, &audio_path, max_speakers, &cancel, on_event)
+        return start_transcription_job(&app, move |job_id, cancel, on_event| {
+            let summary = transcribe_file(&models_dir, &audio_path, max_speakers, &cancel, on_event)?;
+            crate::recording_export::keep_audio(job_id, crate::recording_export::SessionAudio { path: audio_path, _temporary_directory: None })?;
+            Ok(summary)
         });
     }
 
@@ -1428,8 +1477,12 @@ async fn transcribe_microphone_input(
         let models_dir = transcription_models_dir(&app, &state).await?;
         let device = device.map(|name| name.trim().to_string()).filter(|name| !name.is_empty());
         let max_speakers = max_speakers.map(|value| value as usize).unwrap_or(DEFAULT_MAX_SPEAKERS);
-        return start_transcription_job(&app, move |stop, on_event| {
-            transcribe_microphone(&models_dir, device.as_deref(), max_speakers, stop, on_event)
+        return start_transcription_job(&app, move |job_id, stop, on_event| {
+            let directory = tempfile::Builder::new().prefix("voicereader-recording-").tempdir()?;
+            let path = directory.path().join("recording.wav");
+            let summary = transcribe_microphone_recorded(&models_dir, device.as_deref(), max_speakers, stop, Some(&path), on_event)?;
+            crate::recording_export::keep_audio(job_id, crate::recording_export::SessionAudio { path, _temporary_directory: Some(directory) })?;
+            Ok(summary)
         });
     }
 
@@ -1537,6 +1590,22 @@ async fn save_text_file(path: String, contents: String) -> Result<GenericResult,
         ok: true,
         message: format!("Saved {}", path.display()),
     })
+}
+
+/// The job ID binds the export to the transcript shown in the UI.
+#[tauri::command]
+async fn export_recording_transcript(job_id: String, path: String, contents: String, format: String) -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    {
+        let destination = PathBuf::from(path.trim());
+        if destination.as_os_str().is_empty() { return Err("No file name was given.".to_string()); }
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::recording_export::export_session(&job_id, &destination, &contents, &format).map_err(to_cmd_error)?;
+            Ok(GenericResult { ok: true, message: format!("Saved recording and transcription to {}", destination.display()) })
+        }).await.map_err(|err| err.to_string())?
+    }
+    #[cfg(not(feature = "build-base"))]
+    { let _ = (job_id, path, contents, format); Err("Recording export is available in the Base build only.".to_string()) }
 }
 
 /// Returns the Audio8 runtime, loading the model on first use.
@@ -2456,11 +2525,24 @@ fn register_hotkey_binding(app: &AppHandle, state: Arc<Mutex<EngineState>>, hotk
     Ok(())
 }
 
+#[tauri::command]
+fn selection_access(prompt: bool) -> serde_json::Value {
+    json!({ "required": cfg!(target_os = "macos"), "allowed": crate::selection::selection_access_allowed(prompt) })
+}
+
 fn should_ignore_hotkey_while_app_focused(app: &AppHandle) -> bool {
-    let Some(window) = app.get_window("main") else {
-        return false;
-    };
-    window.is_focused().unwrap_or(false)
+    #[cfg(target_os = "macos")]
+    {
+        // Query the actual foreground process. Window focus can be cached when
+        // a global Carbon hotkey arrives after switching to another application.
+        let _ = app;
+        return crate::selection::own_app_is_frontmost();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Some(window) = app.get_window("main") else { return false; };
+        window.is_focused().unwrap_or(false)
+    }
 }
 
 async fn read_selection_and_speak_inner(app: &AppHandle, state: &Arc<Mutex<EngineState>>) -> Result<()> {
@@ -2468,7 +2550,7 @@ async fn read_selection_and_speak_inner(app: &AppHandle, state: &Arc<Mutex<Engin
 
     // Capture source window before simulated Ctrl+C changes focus state.
     let source_window = get_foreground_window_title().unwrap_or_default();
-    let text = capture_selected_text_from_active_app(app).await;
+    let text = capture_selected_text_from_active_app(app).await?;
     let Some(text) = text else {
         let _ = app.emit_all(
             "voicereader:selection-empty",
@@ -3798,6 +3880,8 @@ pub fn handle_run_event(app: &AppHandle, event: &RunEvent) {
             }
         }
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            #[cfg(feature = "build-base")]
+            crate::recording_export::clear_audio();
             if let Some(state) = app.try_state::<SharedState>() {
                 let state = state.inner.clone();
                 tauri::async_runtime::block_on(async {

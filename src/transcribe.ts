@@ -147,9 +147,11 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
           <h2 class="card-title">Transcript</h2>
           <div class="action-row">
             <button class="btn btn-sm" id="asr-copy-btn" type="button">${icon("copy", 14)}Copy</button>
-            <button class="btn btn-sm" id="asr-export-btn" type="button">${icon("download", 14)}Export</button>
+            <button class="btn btn-sm" id="asr-export-btn" type="button">${icon("download", 14)}Transcription</button>
+            <button class="btn btn-sm" id="asr-export-recording-btn" type="button" disabled>${icon("download", 14)}Recording &amp; transcription</button>
           </div>
         </div>
+        <p class="caption is-hidden" id="asr-recording-export-hint">Download your recording before starting another transcription or closing VoiceReader.</p>
         <div class="speaker-names" id="asr-speakers"></div>
         <div class="transcript-list" id="asr-transcript"></div>
       </section>
@@ -168,7 +170,7 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
         <p class="model-status" id="asr-model-status">Checking transcription model status...</p>
       </div>
       <div class="model-action">
-        <button class="btn" id="asr-model-download-btn" type="button">Download model</button>
+        <button class="btn btn-primary" id="asr-model-download-btn" type="button">Download model</button>
       </div>
       <div class="model-progress">
         <progress class="download-progress is-hidden" data-asr-progress max="100" value="0"></progress>
@@ -198,6 +200,7 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
   const transcriptEl = root.querySelector<HTMLDivElement>("#asr-transcript")!;
   const copyBtn = root.querySelector<HTMLButtonElement>("#asr-copy-btn")!;
   const exportBtn = root.querySelector<HTMLButtonElement>("#asr-export-btn")!;
+  const exportRecordingBtn = root.querySelector<HTMLButtonElement>("#asr-export-recording-btn")!;
   const modelStatusEl = modelSlot.querySelector<HTMLParagraphElement>("#asr-model-status")!;
   const modelSizeEl = modelSlot.querySelector<HTMLSpanElement>("#asr-model-size")!;
   const modelDownloadBtn = modelSlot.querySelector<HTMLButtonElement>("#asr-model-download-btn")!;
@@ -213,6 +216,8 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
   let hearingAudio = false;
   let jobId: string | null = null;
   let recordingName = "";
+  let completedJobId: string | null = null;
+  let exporting = false;
   const turns = new Map<number, TranscriptTurn>();
   const rows = new Map<number, HTMLDivElement>();
   const speakerNames = new Map<number, string>();
@@ -240,8 +245,8 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
     controlsCard.classList.toggle("is-hidden", !downloaded);
     setupDownloadBtn.classList.toggle("is-hidden", !supported || downloaded);
     setupDownloadBtn.disabled = downloading;
-    modelDownloadBtn.disabled = downloading;
-    modelDownloadBtn.classList.toggle("is-hidden", downloaded);
+    modelDownloadBtn.disabled = downloading || downloaded;
+    modelDownloadBtn.textContent = downloaded ? "Downloaded" : "Download model";
     modelStatusEl.classList.toggle("ok", downloaded);
 
     if (!modelStatus) {
@@ -384,12 +389,14 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
     }
     row.querySelector<HTMLParagraphElement>(".transcript-text")!.textContent = turn.text;
     transcriptSection.classList.remove("is-hidden");
+    renderExportActions();
     if (nearBottom && contentEl) {
       contentEl.scrollTop = contentEl.scrollHeight;
     }
   }
 
   function clearTranscript(): void {
+    completedJobId = null;
     turns.clear();
     rows.clear();
     speakerNames.clear();
@@ -397,10 +404,22 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
     transcriptEl.replaceChildren();
     speakersEl.replaceChildren();
     transcriptSection.classList.add("is-hidden");
+    renderExportActions();
+  }
+
+  function renderExportActions(): void {
+    root.querySelector("#asr-recording-export-hint")?.classList.toggle("is-hidden", source !== "microphone" || !completedJobId);
+    copyBtn.disabled = turns.size === 0;
+    exportBtn.disabled = turns.size === 0 || exporting;
+    exportRecordingBtn.disabled = running || !completedJobId || exporting;
+    exportRecordingBtn.title = running ? "Stop recording and wait for transcription to finish before downloading" : "Save a ZIP with the recording and transcription";
+    recordBtn.disabled = exporting;
+    chooseBtn.disabled = exporting;
   }
 
   function setRunning(next: boolean): void {
     running = next;
+    renderExportActions();
     const live = next && source === "microphone";
     recordBtn.classList.toggle("is-hidden", next);
     chooseBtn.classList.toggle("is-hidden", next);
@@ -449,7 +468,7 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
   }
 
   async function record(): Promise<void> {
-    if (running || !modelStatus?.downloaded) {
+    if (running || exporting || !modelStatus?.downloaded) {
       return;
     }
     clearTranscript();
@@ -477,6 +496,7 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
   }
 
   async function transcribe(path: string): Promise<void> {
+    if (exporting) return;
     if (running) {
       setStatus("A transcription is already running. Stop it first to start another.");
       return;
@@ -549,11 +569,15 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
         }
         break;
       case "done":
+        completedJobId = payload.job_id;
+        transcriptSection.classList.remove("is-hidden");
         setRunning(false);
         setStatus(turns.size > 0 ? payload.message : `${payload.message} No speech was found.`);
         log(payload.message);
         break;
       case "cancelled":
+        completedJobId = payload.job_id;
+        transcriptSection.classList.remove("is-hidden");
         setRunning(false);
         setStatus(turns.size > 0 ? "Stopped. The transcript so far is kept below." : "Stopped.");
         log("Transcription stopped");
@@ -593,31 +617,51 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
   }
 
   async function exportTranscript(): Promise<void> {
+    if (exporting || turns.size === 0) return;
     const baseName = recordingName.replace(/\.[^.]+$/, "") || "transcript";
-    const path = await save({
-      defaultPath: `${baseName}.txt`,
-      filters: [
-        { name: "Text", extensions: ["txt"] },
-        { name: "Markdown", extensions: ["md"] },
-        { name: "Subtitles", extensions: ["srt"] },
-      ],
-    });
-    if (!path) {
-      return;
-    }
-    const extension = path.split(".").pop()?.toLowerCase();
-    const format: ExportFormat = extension === "md" || extension === "srt" ? extension : "txt";
+    const contents = { txt: transcriptText("txt"), md: transcriptText("md"), srt: transcriptText("srt") };
+    exporting = true;
+    renderExportActions();
     try {
-      const result = await invoke<{ ok: boolean; message: string }>("save_text_file", {
-        path,
-        contents: transcriptText(format),
+      const path = await save({
+        defaultPath: `${baseName}.txt`,
+        filters: [
+          { name: "Text", extensions: ["txt"] },
+          { name: "Markdown", extensions: ["md"] },
+          { name: "Subtitles", extensions: ["srt"] },
+        ],
       });
+      if (!path) return;
+      const extension = path.split(".").pop()?.toLowerCase();
+      const format: ExportFormat = extension === "md" || extension === "srt" ? extension : "txt";
+      const result = await invoke<{ ok: boolean; message: string }>("save_text_file", { path, contents: contents[format] });
       log(result.message);
       setStatus(result.message);
     } catch (error) {
       log(`Export failed: ${String(error)}`, "error");
       setStatus(String(error), "error");
-    }
+    } finally { exporting = false; renderExportActions(); }
+  }
+
+  async function exportRecordingAndTranscript(): Promise<void> {
+    if (running || exporting || !completedJobId) return;
+    const exportJobId = completedJobId;
+    const contents = transcriptText("txt");
+    const baseName = recordingName.replace(/\.[^.]+$/, "") || "recording";
+    exporting = true;
+    renderExportActions();
+    try {
+      const path = await save({ defaultPath: `${baseName}.zip`, filters: [{ name: "Recording and transcription", extensions: ["zip"] }] });
+      if (!path) return;
+      const result = await invoke<{ ok: boolean; message: string }>("export_recording_transcript", {
+        jobId: exportJobId, path, contents, format: "txt",
+      });
+      log(result.message);
+      setStatus(result.message);
+    } catch (error) {
+      log(`Recording export failed: ${String(error)}`, "error");
+      setStatus(String(error), "error");
+    } finally { exporting = false; renderExportActions(); }
   }
 
   setupDownloadBtn.addEventListener("click", () => void downloadModel());
@@ -640,6 +684,8 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
   });
   copyBtn.addEventListener("click", () => void copyTranscript());
   exportBtn.addEventListener("click", () => void exportTranscript());
+  exportRecordingBtn.addEventListener("click", () => void exportRecordingAndTranscript());
+  renderExportActions();
 
   setupCard.classList.remove("is-hidden");
   await listen<ModelDownloadProgressPayload>("voicereader:model-download", ({ payload }) => {

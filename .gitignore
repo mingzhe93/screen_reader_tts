@@ -19,6 +19,7 @@ src-tauri/binaries/tts-engine-*
 src-tauri/binaries/models/
 src-tauri/binaries/onnxruntime/
 src-tauri/binaries/kyutai-voices/
+src-tauri/binaries/sox-macos/
 tts-engine/build/
 tts-engine/dist/
 tts-engine/*.spec

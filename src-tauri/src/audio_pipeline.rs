@@ -471,7 +471,8 @@ fn find_bundled_sox_near_current_executable() -> Option<PathBuf> {
         format!("resources/sox/{sox_name}"),
         sox_name.to_string(),
     ];
-    find_bundled_file(&search_roots(), "sox", sox_name, &extra)
+    let sox_dir = if cfg!(target_os = "macos") { "sox-macos" } else { "sox" };
+    find_bundled_file(&search_roots(), sox_dir, sox_name, &extra)
 }
 
 fn command_exists(command: &str) -> bool {

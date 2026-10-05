@@ -1,5 +1,7 @@
 //! Live audio from an input device (a microphone), as mono samples at a chosen rate.
 
+use std::{fs::File, io::BufWriter, path::Path};
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -70,6 +72,7 @@ pub(crate) fn list_inputs() -> Vec<AudioInput> {
 /// ends when it is dropped. It must stay on the thread that opened it.
 pub(crate) struct MicrophoneSource {
     _stream: Stream,
+    recording: Option<hound::WavWriter<BufWriter<File>>>,
     receiver: Receiver<Vec<f32>>,
     resampler: StreamResampler,
     error: Arc<Mutex<Option<String>>>,
@@ -83,6 +86,10 @@ impl MicrophoneSource {
     /// Opens `device_name`, or the system default input when it is `None`. Setting
     /// `stop` ends the recording: reads then drain what was captured and report the end.
     pub(crate) fn open(device_name: Option<&str>, target_rate: u32, stop: Arc<AtomicBool>) -> Result<Self> {
+        Self::open_recorded(device_name, target_rate, stop, None)
+    }
+
+    pub(crate) fn open_recorded(device_name: Option<&str>, target_rate: u32, stop: Arc<AtomicBool>, recording_path: Option<&Path>) -> Result<Self> {
         ensure_audio_host();
         let host = cpal::default_host();
         let device = match device_name {
@@ -106,24 +113,28 @@ impl MicrophoneSource {
         let (sender, receiver) = channel::<Vec<f32>>();
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, channels, sender, error.clone(), |s| s),
+            SampleFormat::F32 => build_stream::<f32>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| s),
             SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config, channels, sender, error.clone(), |s| s as f32 / 32_768.0)
+                build_stream::<i16>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| s as f32 / 32_768.0)
             }
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, channels, sender, error.clone(), |s| {
+            SampleFormat::U16 => build_stream::<u16>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| {
                 (s as f32 - 32_768.0) / 32_768.0
             }),
             SampleFormat::I32 => {
-                build_stream::<i32>(&device, &config, channels, sender, error.clone(), |s| s as f32 / 2_147_483_648.0)
+                build_stream::<i32>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| s as f32 / 2_147_483_648.0)
             }
             other => Err(anyhow!("The microphone uses a sample format that is not supported ({other:?}).")),
         }?;
+        let recording = recording_path.map(|path| hound::WavWriter::create(path, hound::WavSpec {
+            channels: 1, sample_rate: source_rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int,
+        })).transpose().context("Could not create the recording")?;
         stream
             .play()
             .map_err(|err| anyhow!("The microphone could not be started: {err}"))?;
 
         Ok(Self {
             _stream: stream,
+            recording,
             receiver,
             resampler: StreamResampler::new(source_rate, target_rate),
             error,
@@ -147,10 +158,14 @@ impl MicrophoneSource {
             match self.receiver.recv_timeout(wait) {
                 Ok(block) => {
                     self.last_audio = Instant::now();
+                    if let Some(writer) = self.recording.as_mut() {
+                        write_recording_samples(writer, &block)?;
+                    }
                     self.resampler.push(&block, output);
                 }
                 Err(RecvTimeoutError::Timeout) if stopping => {
                     self.resampler.finish(output);
+                    if let Some(writer) = self.recording.take() { writer.finalize().context("Could not finish the recording")?; }
                     return Ok(false);
                 }
                 Err(RecvTimeoutError::Timeout) if self.last_audio.elapsed() > SILENT_DEVICE_TIMEOUT => {
@@ -161,6 +176,7 @@ impl MicrophoneSource {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     self.resampler.finish(output);
+                    if let Some(writer) = self.recording.take() { writer.finalize().context("Could not finish the recording")?; }
                     return Ok(false);
                 }
             }
@@ -171,12 +187,21 @@ impl MicrophoneSource {
     }
 }
 
+fn write_recording_samples(writer: &mut hound::WavWriter<BufWriter<File>>, samples: &[f32]) -> Result<()> {
+    for &sample in samples {
+        let sample = if sample.is_finite() { sample.clamp(-1.0, 1.0) } else { 0.0 };
+        writer.write_sample((sample * i16::MAX as f32).round() as i16).context("Could not write the recording")?;
+    }
+    Ok(())
+}
+
 fn build_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
     channels: usize,
     sender: Sender<Vec<f32>>,
     error: Arc<Mutex<Option<String>>>,
+    stop: Arc<AtomicBool>,
     to_f32: fn(T) -> f32,
 ) -> Result<Stream>
 where
@@ -186,6 +211,9 @@ where
         .build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
+                // Stop capturing immediately, while queued audio is still drained
+                // and the transcriber finishes the last words.
+                if stop.load(Ordering::SeqCst) { return; }
                 let mono: Vec<f32> = data
                     .chunks(channels)
                     .map(|frame| frame.iter().map(|sample| to_f32(*sample)).sum::<f32>() / frame.len() as f32)
@@ -206,6 +234,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recording_keeps_native_rate_and_exact_sample_count() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recording.wav");
+        let spec = hound::WavSpec { channels: 1, sample_rate: 48000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        write_recording_samples(&mut writer, &[0.0, 0.5]).unwrap();
+        write_recording_samples(&mut writer, &[-0.5, 2.0, f32::NAN]).unwrap();
+        writer.finalize().unwrap();
+        let mut reader = hound::WavReader::open(path).unwrap();
+        assert_eq!(reader.spec(), spec);
+        assert_eq!(reader.samples::<i16>().map(Result::unwrap).collect::<Vec<_>>(), vec![0, 16384, -16384, 32767, 0]);
+    }
 
     /// Each use comes from a thread that then ends, as the app's background threads do.
     /// Without `ensure_audio_host` the second use crashes the process on Windows.

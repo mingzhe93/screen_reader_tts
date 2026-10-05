@@ -32,6 +32,7 @@ pub(crate) fn find_bundled_file(roots: &[PathBuf], dir: &str, file: &str, extra:
             [
                 root.join("binaries").join(dir).join(file),
                 root.join("resources").join("binaries").join(dir).join(file),
+                root.join("Resources").join("binaries").join(dir).join(file),
                 root.join(dir).join(file),
             ]
             .into_iter()
@@ -61,6 +62,7 @@ mod tests {
         for relative in [
             "binaries/tool/tool.bin",
             "resources/binaries/tool/tool.bin",
+            "Resources/binaries/tool/tool.bin",
             "tool/tool.bin",
         ] {
             let root = temp_root("layout");

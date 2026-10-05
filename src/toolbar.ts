@@ -1,6 +1,6 @@
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/tauri";
-import { appWindow, currentMonitor, LogicalPosition, PhysicalPosition } from "@tauri-apps/api/window";
+import { appWindow, availableMonitors, currentMonitor, primaryMonitor, LogicalPosition, PhysicalPosition } from "@tauri-apps/api/window";
 import {
   RATE_UPDATED_EVENT,
   TOOLBAR_ACTION_EVENT,
@@ -120,7 +120,7 @@ function saveToolbarPosition(position: ToolbarPosition): void {
 }
 
 async function setDefaultToolbarPosition(): Promise<void> {
-  const monitor = await currentMonitor();
+  const monitor = await currentMonitor() ?? await primaryMonitor();
   const windowSize = await appWindow.outerSize();
   if (!monitor) {
     await appWindow.setPosition(
@@ -128,9 +128,9 @@ async function setDefaultToolbarPosition(): Promise<void> {
     );
     return;
   }
-  const x = Math.round(monitor.position.x + TOOLBAR_DEFAULT_MARGIN_PX);
+  const x = Math.round(monitor.position.x + TOOLBAR_DEFAULT_MARGIN_PX * monitor.scaleFactor);
   const y = Math.round(
-    monitor.position.y + monitor.size.height - windowSize.height - TOOLBAR_DEFAULT_MARGIN_PX,
+    monitor.position.y + monitor.size.height - windowSize.height - TOOLBAR_DEFAULT_MARGIN_PX * monitor.scaleFactor,
   );
   await appWindow.setPosition(new PhysicalPosition(x, y));
 }
@@ -138,8 +138,16 @@ async function setDefaultToolbarPosition(): Promise<void> {
 async function restoreToolbarPosition(): Promise<void> {
   const saved = readSavedToolbarPosition();
   if (saved) {
-    await appWindow.setPosition(new PhysicalPosition(saved.x, saved.y));
-    return;
+    const size = await appWindow.outerSize();
+    const monitors = await availableMonitors();
+    const visible = monitors.some((monitor) =>
+      saved.x >= monitor.position.x && saved.y >= monitor.position.y &&
+      saved.x + size.width <= monitor.position.x + monitor.size.width &&
+      saved.y + size.height <= monitor.position.y + monitor.size.height);
+    if (visible) {
+      await appWindow.setPosition(new PhysicalPosition(saved.x, saved.y));
+      return;
+    }
   }
   await setDefaultToolbarPosition();
 }
@@ -185,7 +193,10 @@ void listen<ToolbarShowPayload>(TOOLBAR_SHOW_EVENT, async ({ payload }) => {
   sourceLabel.textContent = payload.source_window || "Reading aloud...";
   rateBtn.textContent = formatRate(payload.rate);
   setPauseVisual(false);
-  await appWindow.show();
+  await initialPosition;
+  await restoreToolbarPosition();
+  // The native show command owns visibility; calling show() here would
+  // activate the toolbar and take focus from the selected text on macOS.
 });
 
 void listen(TOOLBAR_HIDE_EVENT, async () => {
@@ -215,7 +226,10 @@ void appWindow.onMoved(({ payload }) => {
 
 async function initializeToolbarWindow(): Promise<void> {
   await restoreToolbarPosition();
-  await appWindow.hide();
+  // WindowBuilder already starts hidden. Hiding after asynchronous position
+  // restoration can otherwise undo the first playback's show request.
 }
 
-void initializeToolbarWindow();
+const initialPosition = initializeToolbarWindow().catch((error) => {
+  console.error("Failed to restore toolbar position", error);
+});

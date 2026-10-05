@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -121,6 +122,7 @@ def ensure_bundled_kyutai_model(root: Path, engine_dir: Path, python: Path) -> P
 
     local_data_dir = engine_dir / ".data"
     source_repo = _kyutai_model_dir(local_data_dir)
+    _ensure_kyutai_config(engine_dir, source_repo)
     if not _is_kyutai_model_ready(source_repo):
         prefetch_script = engine_dir / "scripts" / "prefetch_models.py"
         if not prefetch_script.exists():
@@ -138,6 +140,7 @@ def ensure_bundled_kyutai_model(root: Path, engine_dir: Path, python: Path) -> P
             check=True,
         )
 
+    _ensure_kyutai_config(engine_dir, source_repo)
     if not _is_kyutai_model_ready(source_repo):
         raise RuntimeError(
             "Kyutai model mirror is missing required files after prefetch. "
@@ -147,6 +150,18 @@ def ensure_bundled_kyutai_model(root: Path, engine_dir: Path, python: Path) -> P
     _copy_kyutai_model_repo(source_repo, target_repo)
     print(f"Copied bundled Kyutai model to: {target_repo}")
     return target_repo
+
+
+def _ensure_kyutai_config(engine_dir: Path, repo_dir: Path) -> None:
+    """The HF mirror has weights/embeddings but no local runtime YAML."""
+    config = repo_dir / "voicereader-pocket-tts.yaml"
+    if config.exists() or not (repo_dir / "tts_b6369a24.safetensors").is_file():
+        return
+    template = engine_dir / "config" / config.name
+    content = template.read_text(encoding="utf-8")
+    for filename in ("tts_b6369a24.safetensors", "tokenizer.model"):
+        content = content.replace(f": {filename}", f": {json.dumps((repo_dir / filename).resolve().as_posix())}")
+    config.write_text(content, encoding="utf-8")
 
 
 def _find_sox_executable() -> Path | None:
@@ -181,6 +196,9 @@ def _find_sox_executable() -> Path | None:
 
 
 def ensure_bundled_sox(root: Path) -> Path | None:
+    if sys.platform == "darwin":
+        subprocess.run([sys.executable, str(root / "scripts" / "bundle_sox_macos.py")], check=True)
+        return root / "src-tauri" / "binaries" / "sox-macos"
     sox_executable = _find_sox_executable()
     target_dir = root / "src-tauri" / "binaries" / "sox"
 

@@ -27,6 +27,8 @@
     "desktop:build:base:installer": "tauri build --features build-base --config src-tauri/tauri.base.conf.json",
     "desktop:build:standalone": "npm run desktop:build:base:installer",
     "desktop:build:portable": "npm run desktop:build:base:portable",
+    "predesktop:build:macos:portable": "node scripts/sync-version.js && npm run assets:fetch",
+    "desktop:build:macos:portable": "tauri build --features build-base --config src-tauri/tauri.macos.conf.json --bundles app && python3 ./scripts/package_portable.py --variant base",
     "predesktop:build:full:portable": "node scripts/sync-version.js",
     "desktop:build:full:portable": "npm run sidecar:build && npm run build && tauri build --features build-full --bundles none && python ./scripts/package_portable.py --variant full",
     "predesktop:build:base:portable": "node scripts/sync-version.js && npm run assets:fetch",

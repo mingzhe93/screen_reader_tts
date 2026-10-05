@@ -64,26 +64,26 @@ Two builds exist. They are chosen by Cargo feature, and exactly one must be enab
 | Platform | Status |
 |---|---|
 | Windows | Primary and tested platform. Selection capture sends Ctrl+C with `SendInput`. The source label comes from the foreground window title. Audio8 can decode on any DirectX 12 GPU through DirectML. |
-| macOS | Implemented in code, largely untested. Selection capture sends Cmd+C through CGEvent, and the source label is the frontmost application's name. `src-tauri/Info.plist` holds the microphone permission text; recording has not been tried on a Mac. Core ML decoding for Audio8 is wired in but untested, so it is opt-in. |
+| macOS | Implemented in code, largely untested. Selection capture sends Cmd+C through CGEvent, and the source label is the frontmost application's name. `src-tauri/Info.plist` holds the microphone permission text; recording has not been tried on a Mac. Core ML decoding for Audio8 is opt-in and currently falls back to CPU on the tested Apple Silicon Mac: the shipped decoder failed Core ML inference. The portable build and model download states have been tested; recording and selection capture still need verification. |
 | Linux | Not supported for the hotkey flow: simulated copy and source-window lookup are not implemented. `scripts/fetch-onnxruntime.js` has a Linux x64 download, and SoX is looked up on `PATH`, but nothing else about Linux is covered. |
 
 ## Known limitations
 
 - Kyutai is English only. Use Audio8 for Chinese.
 - Audio8 runs generation on the CPU and is close to real time. Playback above about 1.5x can stutter.
-- Without SoX, rate changes use plain resampling, which also changes pitch. Windows builds bundle SoX under `src-tauri/binaries/sox`.
+- Without SoX, rate changes use plain resampling, which also changes pitch. Windows builds bundle SoX under `src-tauri/binaries/sox`; macOS builds include a native runtime under `src-tauri/binaries/sox-macos`.
 - Rate changes are applied to the next piece of audio the runtime produces, not to audio that is already queued in the player.
 - The skip-back button does nothing yet.
 - The hotkey is ignored while the VoiceReader window itself is focused. Use Read selection there.
 - Closing the main window quits the app. There is no tray icon.
 - Text is spoken as written. URLs, markdown symbols, citation markers and emoji are not cleaned up.
 - `qwen_base_clone` appears in the Full build model list, but read-aloud with it is not enabled.
-- Live transcription hears the microphone only. System audio (the other side of a call) is not captured, and the recording itself is not saved, only the transcript.
+- Live transcription hears the microphone only. System audio (the other side of a call) is not captured. After stopping, choose **Recording & transcription** to save a ZIP with the mono WAV recording (at the microphone’s native sample rate) and a text transcript. For uploaded files, the ZIP includes the original recording.
 - Live text appears about one to two seconds behind the speaker.
 - Transcription is English only. It labels up to eight speakers. The speech model was trained on up to four, so with more than four expect some sentences under the wrong speaker or under two speakers at once. Anyone beyond the Speakers setting is still transcribed, together, as "Unknown speaker". With more than eight voices in a recording, the extra voices cannot be told apart from the first eight and appear under their labels.
 - When people talk over each other for long stretches, some words are dropped or given to the wrong speaker. When one person takes over from another with no gap, a word or two at the changeover can appear under both speakers. The first word or two of a new speaker is sometimes missing.
 - Opus audio (most `.webm` and `.opus` files) cannot be read. Convert it to one of the supported formats first.
-- A transcript is kept only until the next one is started or the app closes. Export it to keep it.
+- The transcript and unsaved microphone recording are kept for the current session, until the next transcription starts or the app closes. **Copy** copies the transcript; **Transcription** saves TXT, Markdown or SRT; **Recording & transcription** saves both files in a ZIP after transcription finishes.
 - Transcription speed has been measured on a desktop CPU only; a laptop CPU has not been measured.
 
 ## Quick start (Base build)
@@ -156,7 +156,7 @@ What belongs under `src-tauri/binaries` for each build is described in `src-taur
 
 If the saved hotkey cannot be registered, the app falls back to the platform default above and saves that. `Alt+Space` and `Cmd+Space` are refused as OS-reserved.
 
-Compute device controls where Audio8's audio decoder runs. It does not affect transcription, which always runs on the CPU because the GPU measured no faster for it. Auto uses the GPU only when a one-time benchmark shows it is at least 1.5 times faster than the CPU. GPU uses it whenever the provider loads. CPU never touches the GPU. Details are in `docs/learnings.md` section 11.
+Compute device controls where Audio8's audio decoder runs. It does not affect transcription, which always runs on the CPU because the GPU measured no faster for it. Auto uses the GPU only when a one-time benchmark shows it is at least 1.5 times faster than the CPU. GPU uses it whenever the provider loads. CPU never touches the GPU. On macOS, Auto currently stays on CPU. The opt-in Core ML path was tested with ONNX Runtime 1.24.4 and the shipped Audio8 decoder, but inference failed and safely fell back to CPU. A trial using MLProgram also failed in Apple’s Metal graph compiler and is not included in the release. macOS GPU acceleration is therefore experimental, not verified working. Details are in `docs/learnings.md` section 11.
 
 ### Environment variables
 
@@ -177,6 +177,55 @@ All optional. The Base build reads these:
 | `VOICEREADER_AUDIO8_TEST_MODEL_DIR`, `KYUTAI_TEST_MODEL_DIR`, `KYUTAI_TEST_OUT_DIR`, `VOICEREADER_ASR_TEST_MODELS_DIR`, `VOICEREADER_ASR_TEST_AUDIO`, `VOICEREADER_ASR_TEST_MAX_SPEAKERS` | Used only by the ignored Rust tests. |
 
 The Full build also reads `VOICEREADER_ENGINE_EXECUTABLE` (release builds: path to the sidecar executable) and sets the sidecar's own variables, which are listed in `tts-engine/README.md`.
+
+## Build a macOS portable release (Base)
+
+On a Mac with Xcode Command Line Tools installed (`xcode-select --install`):
+
+```sh
+brew install node rust cmake
+python3 -m venv tts-engine/.venv
+tts-engine/.venv/bin/python -m pip install huggingface_hub
+npm ci
+npm run desktop:build:macos:portable
+```
+
+The first build downloads the Kyutai model, preset clips, native ONNX Runtime and
+SoX source. It builds a native SoX executable with static libsox using the Xcode
+Command Line Tools; subsequent builds reuse it. SoX needs no Homebrew libraries
+on the user's Mac. Its minimum macOS version is also 14.0.
+Python is used only while building; users do not need Python, Node or Rust installed.
+The macOS configuration targets macOS 14 or newer. Build on Apple Silicon for an arm64
+release; Intel and universal releases need separate build and runtime verification.
+
+The output is `src-tauri/target/release/bundle/portable/VoiceReader_0.2.0_macos_arm64_portable.zip`
+on Apple Silicon. Extract it and open `VoiceReader.app`; moving it to Applications is optional.
+The entire `.app` must stay together. Settings, saved voices and downloaded models go
+under the user's application data directory, so portable here means no installer,
+rather than keeping user data beside the app.
+
+Grant the current copy of VoiceReader Accessibility permission in System Settings >
+Privacy & Security (called Device Control and Data Access on newer macOS) to capture
+selected text from other apps, and Microphone permission to record. Settings > Read
+highlighted text shows whether the running executable has access. An enabled entry
+for an older unsigned build may not authorize a rebuilt copy: remove that stale entry,
+add the current `.app`, then quit and reopen VoiceReader. Highlight text in the source
+app and press the hotkey without switching focus to VoiceReader.
+SoX is bundled, so playback rate changes preserve pitch. The Mac SoX build includes
+raw PCM, WAV and tempo effects; external codecs and audio-device drivers are disabled
+because VoiceReader handles decoding and playback itself. The existing Windows SoX
+binaries are excluded from the Mac app. Missing SoX causes the Mac build to fail
+rather than silently shipping the pitch-changing fallback.
+
+To rebuild only the Mac SoX runtime, run `python3 scripts/bundle_sox_macos.py`.
+The source download is checksum-verified and cached under `build/sox-macos`.
+The bundle includes SoX's licence files, source archive, patched header and build
+recipe under `Contents/Resources/binaries/sox-macos`.
+
+The local build is not Developer ID signed or notarized. Verify launch, speech,
+selection capture and recording on a Mac before uploading the ZIP as a release asset.
+For broader distribution, configure Apple Developer signing and notarization;
+downloaded unnotarized apps may be blocked by Gatekeeper.
 
 ## Full build
 
@@ -245,4 +294,4 @@ VoiceReader is MIT-licensed. Models and third-party components keep their own li
 - The licence of each model is listed in the [Models](#models) table.
 - `src-tauri/vendor/parakeet-rs/` is a patched copy of the `parakeet-rs` crate 0.3.8, which is licensed MIT OR Apache-2.0. Its licence file and the list of changes are in that folder.
 - The extra Kyutai voice clips are credited in `src-tauri/binaries/kyutai-voices/ATTRIBUTION.txt`, which the fetch script writes.
-- SoX is bundled for Windows under `src-tauri/binaries/sox` with its own licence files.
+- SoX is bundled for Windows under `src-tauri/binaries/sox` with its own licence files, and for macOS under `src-tauri/binaries/sox-macos` with licence files and corresponding source/build recipe.

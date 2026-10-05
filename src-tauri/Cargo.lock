@@ -6569,11 +6569,13 @@ dependencies = [
  "symphonia",
  "tauri",
  "tauri-build",
+ "tempfile",
  "tokenizers 0.23.2",
  "tokio",
  "tokio-tungstenite",
  "uuid",
  "windows-sys 0.59.0",
+ "zip",
 ]
 
 [[package]]

@@ -331,6 +331,13 @@ app.innerHTML = `
               </div>
             </article>
 
+            <article class="card settings-section is-hidden" id="selection-access-card">
+              <h2 class="card-title">Read highlighted text</h2>
+              <p class="setting-desc">Allow VoiceReader in System Settings → Privacy &amp; Security → Accessibility (Device Control and Data Access on newer macOS). This lets the hotkey copy the text you highlight in another app.</p>
+              <p class="hint" id="selection-access-status" role="status"></p>
+              <button class="btn" id="selection-access-btn" type="button">Check access</button>
+            </article>
+
             <article class="card settings-section is-hidden" id="compute-card">
               <h2 class="card-title">Compute device</h2>
               <p class="setting-desc">Where the heavy part of a model runs. Auto uses the GPU when one is available and faster than the CPU. Choose CPU to keep the GPU free for other work.</p>
@@ -869,20 +876,31 @@ function sourceLabelFromWindowTitle(sourceWindow: string): string {
   return segments[segments.length - 1] ?? trimmed;
 }
 
-function showToolbar(sourceWindow: string, rate: number): void {
+async function showToolbar(sourceWindow: string, rate: number): Promise<void> {
   toolbarPaused = false;
   const payload: ToolbarShowPayload = {
     job_id: activeToolbarJobId,
     source_window: sourceLabelFromWindowTitle(sourceWindow),
     rate,
   };
-  void emit(TOOLBAR_SHOW_EVENT, payload);
-  void emit(TOOLBAR_PAUSED_EVENT, { paused: false } satisfies ToolbarPausePayload);
+  try {
+    await invoke("show_playback_toolbar");
+    // Playback may have finished while the native window was being shown.
+    if (activeToolbarJobId !== payload.job_id || !activeToolbarJobId) {
+      if (!activeToolbarJobId) await invoke("hide_playback_toolbar");
+      return;
+    }
+    await emit(TOOLBAR_SHOW_EVENT, payload);
+    await emit(TOOLBAR_PAUSED_EVENT, { paused: false } satisfies ToolbarPausePayload);
+  } catch (error) { log(`Could not show playback toolbar: ${String(error)}`, "error"); }
 }
 
 function hideToolbar(): void {
   toolbarPaused = false;
   activeToolbarJobId = "";
+  void invoke("hide_playback_toolbar").catch((error) => {
+    log(`Could not hide playback toolbar: ${String(error)}`, "error");
+  });
   void emit(TOOLBAR_HIDE_EVENT, {});
 }
 
@@ -1942,7 +1960,7 @@ async function bindEvents(): Promise<void> {
         }
       }
     }
-    showToolbar(sourceWindow, toolbarRate);
+    void showToolbar(sourceWindow, toolbarRate);
     log(`job_started id=${jobId}`);
   });
 
@@ -2017,3 +2035,17 @@ bootstrap()
   .catch((error) => {
     log(`Bootstrap failed: ${String(error)}`, "error");
   });
+
+async function refreshSelectionAccess(prompt = false): Promise<void> {
+  try {
+    const status = await invoke<{ required: boolean; allowed: boolean }>("selection_access", { prompt });
+    document.querySelector("#selection-access-card")?.classList.toggle("is-hidden", !status.required);
+    const label = document.querySelector("#selection-access-status");
+    if (label) label.textContent = status.allowed
+      ? "Access granted. Highlight text in another app and press your hotkey."
+      : "Access needed. Enable this copy of VoiceReader, then quit and reopen it. If it is already enabled, remove the old entry and add the current app again.";
+  } catch (error) { log(`Could not check selection access: ${String(error)}`, "error"); }
+}
+document.querySelector("#selection-access-btn")?.addEventListener("click", () => { void refreshSelectionAccess(true); });
+window.addEventListener("focus", () => { void refreshSelectionAccess(); });
+void refreshSelectionAccess();

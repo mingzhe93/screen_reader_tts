@@ -13,7 +13,11 @@ const SELECTION_COPY_POLL_MS: u64 = 25;
 const HOTKEY_MODIFIER_RELEASE_TIMEOUT_MS: u64 = 350;
 const HOTKEY_MODIFIER_RELEASE_POLL_MS: u64 = 10;
 
-pub(crate) async fn capture_selected_text_from_active_app(app: &AppHandle) -> Option<String> {
+pub(crate) async fn capture_selected_text_from_active_app(app: &AppHandle) -> anyhow::Result<Option<String>> {
+    #[cfg(target_os = "macos")]
+    if !selection_access_allowed(true) {
+        anyhow::bail!("VoiceReader needs macOS Accessibility access to read highlighted text. Open System Settings > Privacy & Security > Accessibility (Device Control and Data Access on newer macOS), enable this copy of VoiceReader, then quit and reopen it. If VoiceReader is already enabled, remove the old entry and add the current app again.");
+    }
     let previous_clipboard = app.clipboard_manager().read_text().ok().flatten();
     let probe_clipboard_value = build_selection_probe_value();
     let probe_set = app
@@ -27,7 +31,7 @@ pub(crate) async fn capture_selected_text_from_active_app(app: &AppHandle) -> Op
 
     if !trigger_system_copy_shortcut() {
         restore_clipboard_text(app, previous_clipboard, probe_set);
-        return None;
+        anyhow::bail!("Could not send the Copy shortcut to the selected application");
     }
 
     let previous_trimmed = previous_clipboard.as_deref().map(str::trim);
@@ -53,7 +57,42 @@ pub(crate) async fn capture_selected_text_from_active_app(app: &AppHandle) -> Op
 
     restore_clipboard_text(app, previous_clipboard, probe_set);
 
-    captured
+    Ok(captured)
+}
+
+/// macOS permissions belong to the running executable, not just its display name.
+/// A rebuilt, unsigned app can have an enabled but stale entry in System Settings.
+pub(crate) fn selection_access_allowed(prompt: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::{base::TCFType, boolean::CFBoolean, dictionary::{CFDictionary, CFDictionaryRef}, string::{CFString, CFStringRef}};
+        #[link(name = "ApplicationServices", kind = "framework")]
+        extern "C" {
+            static kAXTrustedCheckOptionPrompt: CFStringRef;
+            fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+        }
+        // The key is a process-lifetime framework constant; the dictionary retains
+        // both it and the boolean until the trust check completes.
+        unsafe {
+            let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+            let options = CFDictionary::from_CFType_pairs(&[(key, CFBoolean::from(prompt))]);
+            AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    { let _ = prompt; true }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn own_app_is_frontmost() -> bool {
+    use objc::{class, msg_send, sel, sel_impl, runtime::Object};
+    unsafe {
+        let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let active: *mut Object = msg_send![workspace, frontmostApplication];
+        if active.is_null() { return false; }
+        let pid: i32 = msg_send![active, processIdentifier];
+        pid as u32 == std::process::id()
+    }
 }
 
 fn normalized_clipboard_text(raw: Option<String>) -> Option<String> {
@@ -183,11 +222,17 @@ fn trigger_copy_shortcut_windows() -> bool {
 
 #[cfg(target_os = "macos")]
 fn hotkey_modifiers_pressed_macos() -> bool {
-    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::event_source::CGEventSourceStateID;
     use core_graphics::event::CGEventFlags;
 
+    // core-graphics 0.24 does not wrap this Quartz function.
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceFlagsState(state_id: CGEventSourceStateID) -> u64;
+    }
     let source_state = CGEventSourceStateID::CombinedSessionState;
-    let flags = CGEventSource::flags_state(source_state);
+    // Safety: this queries the system's modifier state and takes no pointers.
+    let flags = CGEventFlags::from_bits_truncate(unsafe { CGEventSourceFlagsState(source_state) });
 
     flags.contains(CGEventFlags::CGEventFlagCommand)
         || flags.contains(CGEventFlags::CGEventFlagShift)
@@ -232,7 +277,7 @@ fn get_frontmost_app_name_macos() -> Option<String> {
     use objc::{class, msg_send, sel, sel_impl};
     use objc::runtime::Object;
     use core_foundation::string::CFString;
-    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::base::TCFType;
 
     unsafe {
         let workspace: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];

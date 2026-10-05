@@ -282,12 +282,19 @@ pub(crate) fn transcribe_microphone(
     device_name: Option<&str>,
     max_speakers: usize,
     stop: Arc<AtomicBool>,
-    mut on_event: impl FnMut(TranscribeEvent<'_>),
+    on_event: impl FnMut(TranscribeEvent<'_>),
+) -> Result<TranscribeSummary> {
+    transcribe_microphone_recorded(models_dir, device_name, max_speakers, stop, None, on_event)
+}
+
+pub(crate) fn transcribe_microphone_recorded(
+    models_dir: &Path, device_name: Option<&str>, max_speakers: usize,
+    stop: Arc<AtomicBool>, recording_path: Option<&Path>, mut on_event: impl FnMut(TranscribeEvent<'_>),
 ) -> Result<TranscribeSummary> {
     // The model loads first, so the first words are not captured while it is loading
     // and then transcribed late.
     let model = load_model(models_dir, max_speakers)?;
-    let microphone = MicrophoneSource::open(device_name, SAMPLE_RATE, stop)?;
+    let microphone = MicrophoneSource::open_recorded(device_name, SAMPLE_RATE, stop, recording_path)?;
     let started = Instant::now();
     on_event(TranscribeEvent::Started { total_secs: None });
     // A recording ends through `stop`, which lets the last words through; it is never cut off.

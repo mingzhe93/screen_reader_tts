@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile
 
@@ -47,6 +49,49 @@ def _zip_dir(source_dir: Path, zip_path: Path) -> None:
                 print(f"  zipped {index}/{len(files)} files...", flush=True)
 
 
+def _package_macos(target_release: Path, product_name: str, version: str, variant: str) -> int:
+    if variant != "base":
+        raise RuntimeError("The macOS portable release currently supports the Base build only.")
+    app = target_release / "bundle" / "macos" / f"{product_name}.app"
+    if not app.is_dir():
+        raise RuntimeError(f"App bundle missing: {app}. Run `npm run desktop:build:macos:portable`.")
+    # Inspect the actual executable, rather than labelling a cross-build with the host architecture.
+    import plistlib
+    info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
+    executable = app / "Contents" / "MacOS" / info["CFBundleExecutable"]
+    arch = subprocess.check_output(["lipo", "-archs", str(executable)], text=True).strip()
+    arch_label = {"arm64": "arm64", "x86_64": "x64"}.get(arch)
+    if arch_label is None:
+        raise RuntimeError(f"Unsupported app architectures: {arch}; bundle matching ONNX Runtime first.")
+    resources = app / "Contents" / "Resources" / "binaries"
+    for relative in [
+        "onnxruntime/libonnxruntime.dylib",
+        "sox-macos/sox",
+        "models/Verylicious/pocket-tts-ungated/tts_b6369a24.safetensors",
+        "models/Verylicious/pocket-tts-ungated/tokenizer.model",
+        "models/Verylicious/pocket-tts-ungated/voicereader-pocket-tts.yaml",
+        "models/Verylicious/pocket-tts-ungated/embeddings/alba.safetensors",
+        "kyutai-voices/ATTRIBUTION.txt",
+    ]:
+        if not (resources / relative).is_file():
+            raise RuntimeError(f"Required bundled asset missing: {resources / relative}")
+    runtime_arch = subprocess.check_output(
+        ["lipo", "-archs", str(resources / "onnxruntime/libonnxruntime.dylib")], text=True
+    ).split()
+    if arch not in runtime_arch:
+        raise RuntimeError(f"App architecture {arch} does not match ONNX Runtime {runtime_arch}.")
+    zip_path = target_release / "bundle" / "portable" / f"{product_name}_{version}_macos_{arch_label}_portable.zip"
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    # ditto preserves app permissions, symlinks and macOS bundle metadata.
+    zip_path.unlink(missing_ok=True)
+    subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(zip_path)], check=True)
+    print(f"PORTABLE_APP={app}")
+    print(f"PORTABLE_ZIP={zip_path}")
+    print(f"PORTABLE_ZIP_SIZE_MB={zip_path.stat().st_size / (1024 * 1024):.2f}")
+    print("PORTABLE_PACKAGE_OK")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Package VoiceReader portable folder/zip.")
     parser.add_argument(
@@ -65,6 +110,8 @@ def main() -> int:
     bundle_portable_dir = target_release / "bundle" / "portable"
 
     product_name, version = _read_app_meta(src_tauri)
+    if sys.platform == "darwin":
+        return _package_macos(target_release, product_name, version, args.variant)
     exe_name = f"{product_name}.exe"
     exe_path = target_release / exe_name
 
