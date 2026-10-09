@@ -309,11 +309,13 @@ impl LocalKyutaiRuntime {
         fn spawn_generate(
             model: &Arc<TTSModel>,
             text: String,
-            voice_state: ModelState,
+            voice_state: &ModelState,
             gain: f32,
-        ) -> LookAhead {
+        ) -> Result<LookAhead> {
             let model = Arc::clone(model);
-            std::thread::spawn(move || -> GenResult {
+            // Each thread needs memory of its own: see `detached_state`.
+            let voice_state = detached_state(voice_state)?;
+            Ok(std::thread::spawn(move || -> GenResult {
                 let tensor = model
                     .generate(&text, &voice_state)
                     .context("Pocket-TTS generation failed (look-ahead)")?;
@@ -328,7 +330,7 @@ impl LocalKyutaiRuntime {
                     pcm.push((scaled * 32767.0) as i16);
                 }
                 Ok(pcm)
-            })
+            }))
         }
 
         // Determine how many chunks to generate concurrently.
@@ -348,9 +350,9 @@ impl LocalKyutaiRuntime {
             queue.push_back(spawn_generate(
                 &self.model,
                 text_chunks[next_to_submit].clone(),
-                voice_state.clone(),
+                &voice_state,
                 gain,
-            ));
+            )?);
             next_to_submit += 1;
         }
 
@@ -375,9 +377,9 @@ impl LocalKyutaiRuntime {
                 queue.push_back(spawn_generate(
                     &self.model,
                     text_chunks[next_to_submit].clone(),
-                    voice_state.clone(),
+                    &voice_state,
                     gain,
-                ));
+                )?);
                 next_to_submit += 1;
             }
 
@@ -586,6 +588,27 @@ fn materialize_runtime_config(config_path: &Path, model_dir: &Path, data_dir: &P
     Ok(runtime_root)
 }
 
+/// A copy of a voice state that shares no memory with the original.
+///
+/// Cloning a `ModelState` copies the map, but the tensors in it still share their
+/// storage, and the model appends to its attention cache in place whenever the cache has
+/// room left. Chunks generated side by side from clones of one state then write into the
+/// same memory and speak each other's words. How much room is left depends on the
+/// length of the voice prompt (the cache grows in powers of two), so only some voices
+/// were affected: those whose prompt left dozens of free slots.
+fn detached_state(state: &ModelState) -> Result<ModelState> {
+    state
+        .iter()
+        .map(|(module, tensors)| {
+            let copied = tensors
+                .iter()
+                .map(|(name, tensor)| Ok((name.clone(), tensor.copy().context("Failed to copy voice state")?)))
+                .collect::<Result<HashMap<_, _>>>()?;
+            Ok((module.clone(), copied))
+        })
+        .collect()
+}
+
 fn load_model_from_runtime_config(runtime_config_root: &Path) -> Result<TTSModel> {
     let previous_cwd = std::env::current_dir().context("Failed to read current working directory")?;
     std::env::set_current_dir(runtime_config_root)
@@ -746,7 +769,12 @@ mod tests {
 
         let normal = speak(4);
         let fast = speak(6);
-        assert!(fast < normal * 0.85, "tempo was not applied: {fast:.2}s vs {normal:.2}s");
+        if crate::audio_pipeline::player_applies_rate() {
+            // The player applies the speed, so the audio itself must not get shorter.
+            assert!(fast > normal * 0.85, "audio was shortened here: {fast:.2}s vs {normal:.2}s");
+        } else {
+            assert!(fast < normal * 0.85, "tempo was not applied: {fast:.2}s vs {normal:.2}s");
+        }
         std::fs::remove_dir_all(&data_dir).ok();
     }
 
@@ -773,6 +801,41 @@ mod tests {
             for chunk in runtime.plan_chunks(text, setting) {
                 assert!(chunk.chars().count() as f32 <= MAX_CHUNK_CHARS + 1.0, "setting {setting}: {chunk}");
             }
+        }
+        std::fs::remove_dir_all(&data_dir).ok();
+    }
+
+    /// Chunks generated side by side must each get the voice state to themselves.
+    /// "fantine" is a voice whose prompt leaves the model's cache half empty, which is
+    /// what exposed the fault: the three-word first chunk came out as five seconds (the
+    /// length limit) of the second chunk's words. Run with:
+    /// `KYUTAI_TEST_MODEL_DIR=<model dir> cargo test --release --features build-base -- --ignored --nocapture parallel`
+    #[test]
+    #[ignore = "needs the bundled Kyutai model"]
+    fn chunks_generated_in_parallel_do_not_mix() {
+        let model_dir = PathBuf::from(std::env::var("KYUTAI_TEST_MODEL_DIR").expect("set KYUTAI_TEST_MODEL_DIR"));
+        let data_dir = std::env::temp_dir().join(format!("voicereader-kyutai-parallel-{}", std::process::id()));
+        let mut runtime = LocalKyutaiRuntime::new(&model_dir, &data_dir, "test", "alba").unwrap();
+        let text = "Welcome to VoiceReader. Highlight any text, press your hotkey, and hear it read aloud in the voice you choose.";
+        assert_eq!(runtime.plan_chunks(text, 200).len(), 2, "the test needs two chunks to run side by side");
+
+        for attempt in 0..3 {
+            let pieces: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = pieces.clone();
+            let cancel = AtomicBool::new(false);
+            let rate = AtomicU32::new(4);
+            runtime
+                .stream_synthesize(DEFAULT_VOICE_ID, "fantine", text, 200, 1.0, &cancel, &rate, move |_, pcm, _| {
+                    sink.lock().unwrap().push(pcm.len());
+                    Ok(())
+                })
+                .unwrap();
+            let seconds: Vec<f32> =
+                pieces.lock().unwrap().iter().map(|len| *len as f32 / runtime.sample_rate as f32).collect();
+            println!("attempt {attempt}: pieces of {seconds:.1?} s");
+            assert_eq!(seconds.len(), 2);
+            assert!(seconds[0] < 3.5, "the first chunk ran on for {:.1} s", seconds[0]);
+            assert!(seconds[1] > 2.5 && seconds[1] < 9.0, "the second chunk took {:.1} s", seconds[1]);
         }
         std::fs::remove_dir_all(&data_dir).ok();
     }

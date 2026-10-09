@@ -1,6 +1,6 @@
 # tts-engine (Python sidecar for the Full build)
 
-This is the local engine service of the VoiceReader **Full build** (`build-full`), version 0.2.1. It is **not part of the default Base build** (`build-base`), which does not start it and needs no Python at run time. The Full build is kept for future heavier models and is not actively used.
+This is the local engine service of the VoiceReader **Full build** (`build-full`), version 0.2.2. It is **not part of the default Base build** (`build-base`), which does not start it and needs no Python at run time. The Full build is kept for future heavier models and is not actively used.
 
 ## Build profile context
 

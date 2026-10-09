@@ -20,7 +20,7 @@ A Cargo feature picks the build. Exactly one must be enabled; the crate refuses 
 
 Code shared by both builds (commands, state, hotkey, selection capture, toolbar) lives in `voicereader_core.rs`. Code that exists only in one build is behind `#[cfg(feature = ...)]`. In the Base build `qwen_modes_enabled()` is false, so Qwen modes are hidden and their commands return an error. Audio8 and transcription exist only in the Base build. In the Full build `download_audio8_model`, `download_asr_model`, `transcribe_audio_file`, `transcribe_microphone_input` and `cancel_transcription` return an error, `audio8_model_status` and `asr_model_status` report `supported: false`, and `list_audio_inputs` returns an empty list.
 
-The app version is 0.2.1. `package.json` is the source: `scripts/sync-version.js`, which runs before dev and build, copies it to `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, the app entries in both lockfiles, and the Full-build Python engine metadata (`tts-engine/pyproject.toml`, `tts_engine/__init__.py` and `tts_engine/config.py`). Dependency versions are left unchanged. The Base runtimes report it as `engine_version` in their health JSON (through `CARGO_PKG_VERSION`), and the model downloader sends it in its user agent. The sidecar reports the same release version.
+The app version is 0.2.2. `package.json` is the source: `scripts/sync-version.js`, which runs before dev and build, copies it to `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, the app entries in both lockfiles, and the Full-build Python engine metadata (`tts-engine/pyproject.toml`, `tts_engine/__init__.py` and `tts_engine/config.py`). Dependency versions are left unchanged. The Base runtimes report it as `engine_version` in their health JSON (through `CARGO_PKG_VERSION`), and the model downloader sends it in its user agent. The sidecar reports the same release version.
 
 ## 3. Source layout
 
@@ -35,7 +35,7 @@ Rust backend (`src-tauri/src/`). `lib.rs` declares the modules; every module exc
 | `model_download.rs` | Resumable model download from Hugging Face |
 | `kyutai_local.rs`, `audio8_local.rs` | The two Base-build TTS runtimes. `kyutai_local.rs` also stores the saved voices; `audio8_local.rs` also chooses the decoder device and loads the ONNX Runtime library (`ensure_onnxruntime`), which transcription uses too |
 | `audio8_model.rs` | Audio8 ONNX inference |
-| `audio_pipeline.rs` | SoX tempo stream and rate-controlled PCM emission, shared by both runtimes |
+| `audio_pipeline.rs` | PCM emission shared by both runtimes, the switch for where the speed is applied, the older SoX tempo path, and reference-clip normalization |
 | `bundled_paths.rs` | Locating files bundled next to the app |
 | `text_chunking.rs` | Text normalization and chunking |
 | `asr_local.rs` | Transcription: model files, the chunk loop, grouping text into speaker turns |
@@ -52,6 +52,9 @@ Frontend (`src/`):
 | `transcribe.ts` | The Transcribe page and the transcription row on the Models page |
 | `toolbar.ts` | The floating toolbar window |
 | `playback.ts` | Prebuffer and rebuffer times, leading silence, PCM decoding |
+| `player.ts` | The speech player: audio device, queueing, start and refill decisions, pause, stop |
+| `tempo-worklet.ts`, `player-messages.ts` | The player's audio-thread half, and the messages between the two halves |
+| `tempo-stretch.ts` | The time-stretcher (WSOLA) that changes speed without changing pitch |
 | `shared.ts` | Toolbar event names and rate helpers used by both windows |
 | `types.ts` | Payload types for the commands and events |
 | `icons.ts` | The inline SVG icons and the brand mark |
@@ -70,7 +73,7 @@ The two HTML entry points are `index.html` and `toolbar.html`.
   - The bottom of the sidebar shows the engine status (model and device); clicking it opens Settings at Diagnostics.
 - **Toolbar window** (`toolbar.html`, label `toolbar`), created at startup: 360 by 108, frameless, transparent, always on top, hidden from the taskbar, hidden until a job starts.
   - Controls: rate button (steps by `0.25x` and wraps from `4.0x` to `0.25x`), skip back (shows a short flash only; seeking is not implemented), pause or resume, stop, skip forward.
-  - Pause suspends the Web Audio context. Skip forward stops the audio already scheduled and plays what is queued next.
+  - Pause suspends the Web Audio context. Skip forward jumps past the audio received so far.
   - The label is the last segment of the source window title split on ` - `, or "Reading aloud..." when there is none.
   - It opens at the bottom-left of the current monitor with a 20 px margin. Dragging saves the position to the toolbar window's local storage (`voicereader.toolbar.position.v1`) and it is restored on the next start.
 - Closing the main window closes the toolbar and exits the app. Engine shutdown runs on exit.
@@ -151,7 +154,11 @@ Both runtimes sit behind the same `stream_synthesize(...)` shape: voice, text, c
 
 ### 7.3 Playback rate
 
-The frontend sends the rate to the backend as a number; the backend keeps it in a shared atomic counter in steps of `0.25x`. A running job reads it between pieces of audio. When it has changed, the emitter flushes its SoX stream and opens a new one for the new rate. SoX (`tempo`, run as a child process) keeps the pitch. If SoX cannot be found, the audio is resampled instead, which changes the pitch. Volume is applied as PCM gain when the audio is generated and is fixed for the job.
+The speed is applied by the player in the app window, not by the runtimes. The runtimes send audio at normal speed, and `voicereader:job-started` carries `rate_applied_by_player: true`. The player time-stretches the audio as it plays (section 9), so a change is heard within a fraction of a second, in steps as fine as the slider's `0.05x`.
+
+The backend still keeps the rate: `set_speak_settings` and `cycle_speak_rate` store it and emit `voicereader:rate-updated`, which is how the toolbar and the slider stay in step, and Audio8 uses it to size its first piece of audio (faster playback needs a bigger reserve before starting). Volume is applied as PCM gain when the audio is generated and is fixed for the job.
+
+The older path is kept for comparison behind `VOICEREADER_RATE_IN_BACKEND=1`: the emitter stretches each piece with SoX (`tempo`, run as a child process) in steps of `0.25x`, or resamples it (changing the pitch) when SoX is missing, and reports `rate_applied_by_player: false`. A change then affects only audio not yet generated. The sidecar of the Full build always works this way.
 
 ## 8. Chunking
 
@@ -170,10 +177,12 @@ Details and known gaps are in `docs/learnings.md` section 10. The Python sidecar
 
 ## 9. Playback queue (frontend)
 
-- Audio plays through one Web Audio context. Chunks are decoded to floating point and scheduled back to back after a cursor. The first chunk of the session gets 160 ms of silence in front, because the first device wake-up can clip the start.
-- Chunks queue per job. Playback holds until a prebuffer is filled: 0.24 s at 1.0x or below, rising to 0.85 s at 2.0x and up to 2.0 s above that. The terminal event forces whatever is queued to play.
-- If everything scheduled has already finished when a new chunk arrives, playback pauses and refills before resuming: 1 s of audio the first time a job runs dry, 2 s after that. Each refill is logged as `playback_rebuffer`.
-- Cancel, stop and a new job clear the queue. Audio from a canceled job that is still arriving is dropped.
+- **Two halves.** `player.ts` runs in the window and decides when to start, refill, pause and stop. `tempo-worklet.ts` runs on the audio thread (an AudioWorklet): it holds the audio not yet heard and produces the samples for the speakers. They exchange the messages in `player-messages.ts`, each stamped with a job number so that anything from a job that was stopped or replaced is ignored.
+- **Audio device.** One Web Audio context, opened at the sample rate of the audio (24 kHz for Kyutai, 44.1 kHz for Audio8) so the browser does the resampling to the device; it is reopened when the rate changes, and opened once at startup so the first job does not wait for it. The first audio after opening gets 160 ms of silence in front, because the device wake-up can clip the start.
+- **Speed.** The worklet passes the audio through `TempoStretcher` (`tempo-stretch.ts`), a WSOLA time-stretcher with speech-sized segments (40 ms segments, 15 ms search, 8 ms crossfade) in two stages, each applying the square root of the speed. Setting the speed only changes a number in the stretcher, so nothing is dropped or repeated, and at exactly 1.0x the audio passes through sample for sample. `npm run test:player` checks this.
+- **Starting.** Playback holds until a reserve is waiting, measured in seconds of listening at the current speed: 0.24 s at 1.0x or below, rising to 0.85 s at 2.0x and up to 2.0 s above that. The end of the job starts whatever is waiting.
+- **Running dry.** When the worklet runs out of audio before the job has ended, it stops pulling and reports it; the player waits for a refill before going on: 1 s of audio the first time, 2 s after that. Each refill is logged as `playback_rebuffer`. When the last audio of a finished job has been played, the worklet reports that and the toolbar closes.
+- **Replacing and stopping.** Cancel, stop and a new job reset the player, which drops everything waiting. A new job always replaces the one playing; audio and end-of-job events that still arrive from the replaced job are ignored.
 
 ## 10. Files, storage and ONNX Runtime
 

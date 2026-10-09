@@ -277,6 +277,7 @@ pub(crate) fn transcribe_file(
 /// Transcribes what the microphone hears until `stop` is set, then finishes the words
 /// still in progress. `device_name` picks an input device; `None` is the system default.
 /// Must run on one thread from start to end, because the capture stream cannot move.
+#[cfg(test)]
 pub(crate) fn transcribe_microphone(
     models_dir: &Path,
     device_name: Option<&str>,

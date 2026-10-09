@@ -1,6 +1,6 @@
 {
   "name": "voicereader-desktop",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "models:bundle:kyutai": "python ./tts-engine/scripts/build_sidecar.py --models-only",
     "onnxruntime:fetch": "node scripts/fetch-onnxruntime.js",
     "kyutai-voices:fetch": "node scripts/fetch-kyutai-voices.js",
+    "test:player": "node scripts/test-tempo-stretch.mjs",
     "assets:fetch": "npm run onnxruntime:fetch && npm run kyutai-voices:fetch",
     "predesktop:dev": "node scripts/sync-version.js && npm run assets:fetch",
     "desktop:dev": "tauri dev --features build-base",

@@ -366,6 +366,8 @@ struct JobStartedPayload {
     source: String,
     source_window: String,
     rate: f32,
+    /// True when the audio is sent at normal speed and the player applies `rate`.
+    rate_applied_by_player: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -2642,6 +2644,7 @@ async fn speak_and_stream(
                 source: source.to_string(),
                 source_window: source_window.to_string(),
                 rate: settings.rate,
+                rate_applied_by_player: crate::audio_pipeline::player_applies_rate(),
             },
         );
 
@@ -2751,8 +2754,16 @@ async fn speak_and_stream(
                 if guard.last_job_id.as_deref() == Some(job_id_clone.as_str()) {
                     guard.last_job_id = None;
                 }
-                guard.active_cancel_flag = None;
-                guard.active_rate_steps = None;
+                // A newer job may have replaced this one and registered its own flags;
+                // clearing those would leave it impossible to stop or to change its rate.
+                if guard
+                    .active_cancel_flag
+                    .as_ref()
+                    .is_some_and(|flag| Arc::ptr_eq(flag, &cancel_flag))
+                {
+                    guard.active_cancel_flag = None;
+                    guard.active_rate_steps = None;
+                }
                 guard.suppressed_job_ids.remove(&job_id_clone);
             }
         });
@@ -2805,6 +2816,8 @@ async fn speak_and_stream(
             source: source.to_string(),
             source_window: source_window.to_string(),
             rate: settings.rate,
+            // The sidecar stretches the audio itself.
+            rate_applied_by_player: false,
         },
     );
 

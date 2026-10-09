@@ -67,8 +67,14 @@ mod tests {
         ] {
             let root = temp_root("layout");
             touch(&root.join(relative));
-            let found = find_bundled_file(&[root.clone()], "tool", "tool.bin", &[]);
-            assert_eq!(found, Some(root.join(relative)));
+            // Compared as files, not as spellings: on a case-insensitive file system
+            // (Windows, default macOS) "Resources" is found through "resources".
+            let found = find_bundled_file(&[root.clone()], "tool", "tool.bin", &[]).expect(relative);
+            assert_eq!(
+                std::fs::canonicalize(found).unwrap(),
+                std::fs::canonicalize(root.join(relative)).unwrap(),
+                "{relative}"
+            );
             std::fs::remove_dir_all(&root).ok();
         }
     }

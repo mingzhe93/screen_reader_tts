@@ -3,7 +3,10 @@
 This file captures implementation-level lessons from the Rust (`build-base`) and
 Python sidecar (`build-full`) playback pipelines. Sections 1 to 6 cover the shared
 playback pipeline. Sections 7 to 11 cover Audio8, Kyutai voices, buffering, chunking
-and GPU use, with measurements. Section 12 covers transcription.
+and GPU use, with measurements. Section 12 covers transcription. Section 13 covers
+moving the speed change into the player; it replaces the SoX approach of sections 1, 3
+and 4 for the Base build. Section 14 is a fault in parallel generation that garbled
+some Kyutai voices.
 
 Where the code lives: `kyutai_local.rs` and `audio8_local.rs` are the Base runtimes.
 `audio_pipeline.rs` holds the SoX tempo stream and the rate-controlled emitter that both
@@ -38,6 +41,9 @@ Rust base runtime, Kyutai:
 
 The next chunks are pre-generated while the current one is still being pushed through
 SoX and emitted. This removes most dead-air between chunks on CPU workloads.
+
+Each generation thread must get its own deep copy of the voice state. Sharing clones of
+one state garbled the speech of about half the voices; see section 14.
 
 Rust base runtime, Audio8 uses a different layout (two chunks generated at once and a
 single decode loop); see section 7.3.
@@ -465,3 +471,102 @@ Instead of skipping the slots beyond the limit, one extra model instance transcr
 - Pooling the later voices produced fewer duplicated sentences than giving each its own label (47 extra words against 78), at the price of not knowing who said what.
 - Also tried: letting the same instance transcribe every stretch in which no tracked speaker is active, to catch speech the diarizer missed. It found no additional words and added two stray fragments, so it was left out.
 - Speed was unchanged (about 5 times real time on this recording in every case).
+
+## 13. Applying the speed in the player (2026-10-09)
+
+### 13.1 Why
+
+The backend stretched each piece of audio to the chosen speed before sending it (sections 1, 3 and 4). Anything already generated kept its old speed, and Kyutai generates most of a text within seconds, so moving the slider often changed nothing audible until the next read. The speed is now applied where the audio is played: the backend sends normal-speed audio, and an AudioWorklet in the app window time-stretches it on the way to the speakers.
+
+### 13.2 The stretcher
+
+WSOLA, the method behind SoX `tempo` and SoundTouch: copy a segment, jump ahead by the segment length times the speed, search a small window for the spot where the audio best continues what was just played, and crossfade into it. Speech-sized segments (40 ms, 15 ms search, 8 ms crossfade) rather than SoX's music defaults.
+
+Word error rate of the app's own speech recognizer on sped-up audio, against its transcript of the original. Lower is better. "Stages" is how many passes the speed is split over.
+
+A 56-second reading by six people (24 kHz, 158 words):
+
+| Speed | 1 stage | 2 stages | 3 stages | SoX chain (old) |
+|---|---|---|---|---|
+| 1.25x | 1.3% | 1.3% | 0.6% | 3.2% |
+| 1.5x | 2.5% | 2.5% | 2.5% | 2.5% |
+| 2.0x | 5.1% | 5.7% | 4.4% | 5.1% |
+| 2.5x | 28.5% | 23.4% | 22.8% | 33.5% |
+| 3.0x | 72.2% | 58.2% | 58.9% | 69.6% |
+
+Two minutes of a news report (16 kHz, 328 words):
+
+| Speed | 1 stage | 2 stages | 3 stages | SoX chain (old) |
+|---|---|---|---|---|
+| 1.25x | 2.1% | not run | 2.7% | 2.7% |
+| 1.5x | 4.0% | 2.1% | 4.0% | 9.1% |
+| 2.0x | 7.0% | 7.6% | 8.5% | 15.5% |
+| 2.5x | 39.3% | 35.1% | 42.4% | 50.9% |
+| 3.0x | 82.6% | 79.6% | 89.3% | 84.1% |
+
+- Two stages was the best or close to it everywhere, and at least as good as the SoX chain at every speed, so two stages it is. The differences between one, two and three stages are small next to the difference from SoX.
+- The recognizer was trained on normal speech and falls apart above 2x whatever the stretcher, so the high-speed rows compare stretchers, not what a person can follow. The user has since listened to the player-side speed control on Windows and accepted it (2026-10-09).
+- The number of stages is fixed, so changing the speed only changes each stage's factor. A scheme with a varying number of stages (as SoX was driven) would have to flush and rebuild on every change.
+- At exactly 1.0x the best continuation is always the audio's own next sample, so the stretcher passes the audio through bit for bit. No bypass switch is needed, and none of the clicks one would cause.
+- Cost is negligible: several hundred times faster than real time in JavaScript.
+
+### 13.3 The player
+
+- The worklet holds the audio and stops pulling when it runs out, instead of the window scheduling pieces ahead on a timeline. Starting, refilling and stopping stay decisions of the window, made from the worklet's reports.
+- The audio context is opened at the audio's own sample rate, which leaves resampling to the browser. Opening it took 7 to 30 ms in a Chromium test, apart from one first start of about half a second, so it is opened once at startup.
+- In a browser test, 4 s of audio at 4x finished in 1.06 s, 2 s at 1x in 2.12 s, and 3 s at 2x in 1.58 s.
+- Audio8's first piece is still sized by the speed, because faster listening drains the reserve sooner, but without the 0.3 s allowance SoX needed for the audio it held back.
+- With that allowance and SoX's own delay gone, Audio8's first audio at 1.5x arrived after about 1.0 s in the model test, against 1.4 s on the SoX path.
+
+### 13.4 Not verified
+
+- By ear, at any speed, with either model.
+- In the app itself: the tests above ran in a browser preview with generated tones, not with the backend.
+- On macOS (WKWebView): AudioWorklet and an audio context at 24 or 44.1 kHz.
+
+## 14. Kyutai voices that repeated and skipped words (2026-10-09)
+
+### 14.1 Symptom
+
+With 11 of the 21 preset voices, a read of more than one chunk came out wrong: the opening words missing, phrases repeated, the ending cut. The user's example, voice "fantine", for "Welcome to VoiceReader. Highlight any text, press your hotkey, and hear it read aloud in the voice you choose.": "Highlight any text, press your hotkey, ands hear it read aloud aloud, in, hear it read aloud aloud in". The other ten voices were fine, every time.
+
+### 14.2 What it was not
+
+- Not the voices. Each voice read two test passages cleanly when the chunks were generated one after another: the 11 "bad" voices made no more mistakes than the others, as counted by the app's speech recognizer.
+- Not the player or the new speed control. The audio was already wrong when it left the runtime.
+- Not the model's end-of-speech detection as such, although the three-word first chunk running to its five-second length limit looked like it.
+
+### 14.3 Cause
+
+The fault only appeared when two chunks were generated at the same time, which is how the app generates (section 2).
+
+The Pocket TTS crate keeps each attention layer's cache in a buffer that grows in powers of two, and when the buffer has room it appends in place (`slice_set` in its `attention.rs`). Cloning a voice state copies the map of tensors, but the tensors still share their storage. So two generation threads working from clones of the same voice state wrote their text and their audio frames into the same memory, and each read back a mix of both chunks.
+
+Whether a voice was affected depended on one number: how much room its prompt left in the buffer.
+
+| Free slots after the voice prompt | Voices | Result |
+|---|---|---|
+| 2 or 3 (of 128) | alba, marius, javert, jean, cosette, mary, charles, george | Fine: the first write overflows the buffer, which makes a private copy |
+| 22 (of 128) | caro_davy, stuart_bell | Fine in the test, but at risk when two chunks of under 22 tokens run together |
+| 53 to 124 (of 128 or 256) | fantine, eponine, azelma, anna, vera, jane, eve, paul, michael, bill_boerst, peter_yearsley | Garbled |
+
+The table was read from the voice states, and the last row is exactly the list of voices the user had found to be bad. A voice cloned by the user lands in one row or another by the length of its clip, so cloned voices were affected at random.
+
+The fault is as old as parallel generation: fantine, eponine and azelma were among the original eight presets.
+
+### 14.4 Fix
+
+Each generation thread now gets a deep copy of the voice state (`detached_state` in `kyutai_local.rs`: every tensor copied to storage of its own). The copy is a few megabytes and takes milliseconds.
+
+Recognizer errors on the example sentence through the app's generation path, two readings per voice (the sentence has 19 words, and about 2 "errors" are the recognizer writing "voice reader"):
+
+| | The 11 affected voices | The other 10 |
+|---|---|---|
+| Before | 16.5 to 26 errors | 2 to 5.5 |
+| After | 2 to 3 | 2 to 4.5 |
+
+`chunks_generated_in_parallel_do_not_mix` guards it: without the fix its first chunk runs to the length limit and the test fails.
+
+### 14.5 Audio8
+
+Checked for the same fault, since it also generates two chunks at once. It does not have it: each generation copies the voice prefix into the state of the session it has checked out, so nothing is shared. Reading the same sentence and a 114-word passage through the app path, with the built-in voice and with a cloned voice, gave 1 to 4 recognizer errors per reading, the same level as Kyutai's good voices.

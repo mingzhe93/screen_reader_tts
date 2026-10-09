@@ -1,11 +1,7 @@
 import { invoke } from "@tauri-apps/api/tauri";
 import { emit, listen } from "@tauri-apps/api/event";
-import {
-  decodePcm16Base64ToFloat32,
-  minPrebufferSeconds,
-  prependSilence,
-  rebufferSeconds,
-} from "./playback";
+import { decodePcm16Base64ToFloat32 } from "./playback";
+import { SpeechPlayer } from "./player";
 import {
   RATE_UPDATED_EVENT,
   TOOLBAR_ACTION_EVENT,
@@ -35,7 +31,6 @@ import type {
   ModelOption,
   ModelUpdatePayload,
   PrefetchModelsResult,
-  QueuedPlayback,
   RuntimeStatusPayload,
   SpeakerPreset,
   StoredVoice,
@@ -189,7 +184,10 @@ app.innerHTML = `
                 <div class="field span-2">
                   <div class="field-label">
                     <label for="clone-ref-text">Reference text (optional for Kyutai, required for Audio8)</label>
-                    <button class="btn btn-sm" id="clone-transcribe-btn" type="button" title="Fill in the reference text from the audio file. English only.">Transcribe audio</button>
+                    <button class="btn btn-sm btn-two-line" id="clone-transcribe-btn" type="button" title="Fill in the reference text from the audio file. English only.">
+                      <span id="clone-transcribe-label">Transcribe audio</span>
+                      <span class="btn-note">(English only)</span>
+                    </button>
                   </div>
                   <textarea id="clone-ref-text" rows="2" placeholder="Optional transcript of the uploaded sample"></textarea>
                   <div class="clone-asr-prompt is-hidden" id="clone-asr-prompt">
@@ -412,6 +410,7 @@ const cloneLanguageInput = document.querySelector<HTMLInputElement>("#clone-lang
 const cloneRefTextInput = document.querySelector<HTMLTextAreaElement>("#clone-ref-text")!;
 const cloneAudioFileInput = document.querySelector<HTMLInputElement>("#clone-audio-file")!;
 const cloneTranscribeBtn = document.querySelector<HTMLButtonElement>("#clone-transcribe-btn")!;
+const cloneTranscribeLabel = document.querySelector<HTMLSpanElement>("#clone-transcribe-label")!;
 const cloneAsrPrompt = document.querySelector<HTMLDivElement>("#clone-asr-prompt")!;
 const cloneAsrPromptText = document.querySelector<HTMLParagraphElement>("#clone-asr-prompt-text")!;
 const cloneAsrDownloadBtn = document.querySelector<HTMLButtonElement>("#clone-asr-download-btn")!;
@@ -447,15 +446,8 @@ const readBtn = document.querySelector<HTMLButtonElement>("#read-btn")!;
 const cancelBtn = document.querySelector<HTMLButtonElement>("#cancel-btn")!;
 const speakBtn = document.querySelector<HTMLButtonElement>("#speak-btn")!;
 
-let audioContext: AudioContext | null = null;
-let playbackCursor = 0;
 let runtimeWasDown = false;
-const activeAudioSources = new Set<AudioBufferSourceNode>();
 const suppressedJobIds = new Set<string>();
-const playbackChunkCounts = new Map<string, number>();
-const queuedPlaybackByJob = new Map<string, QueuedPlayback>();
-let hasOutputPrimed = false;
-let hasStartupSilenceInjected = false;
 let currentPresetSpeakers: SpeakerPreset[] = [];
 let currentSelectedModel = "";
 let latestVoicesPayload: JsonValue = {};
@@ -471,6 +463,18 @@ let pendingHotkeyCapture = "";
 let cloneStatusTimeoutId: number | null = null;
 let toolbarPaused = false;
 let activeToolbarJobId = "";
+// True when the backend sends audio at normal speed and the player applies the chosen
+// speed (the Base build). False when the audio arrives already at that speed (the
+// sidecar build), in which case the player must not stretch it again.
+let playerAppliesRate = false;
+const player = new SpeechPlayer({
+  onFinished: () => hideToolbar(),
+  onRebuffer: (count, waitSeconds) => log(`playback_rebuffer count=${count} wait_for=${waitSeconds.toFixed(2)}s`),
+  onError: (message) => log(message, "error"),
+});
+// The newest job the backend announced. Audio and end-of-job events from any other
+// job are stale: that job was replaced, and its output must not reach the speakers.
+let currentPlaybackJobId = "";
 
 applyTheme(currentTheme, false);
 syncRateReadout();
@@ -848,12 +852,9 @@ function renderUnifiedVoiceOptions(selectedVoiceId: string, selectedSpeaker: str
   }
 }
 
-function ensureAudioContext(): AudioContext {
-  if (!audioContext) {
-    audioContext = new AudioContext();
-    playbackCursor = audioContext.currentTime;
-  }
-  return audioContext;
+/** Sends the chosen speed to the player. Heard at once, including mid-sentence. */
+function applyPlayerTempo(): void {
+  player.setTempo(playerAppliesRate ? selectedRateSetting() : 1);
 }
 
 function selectedRateSetting(): number {
@@ -878,6 +879,7 @@ function sourceLabelFromWindowTitle(sourceWindow: string): string {
 
 async function showToolbar(sourceWindow: string, rate: number): Promise<void> {
   toolbarPaused = false;
+  void player.setPaused(false);
   const payload: ToolbarShowPayload = {
     job_id: activeToolbarJobId,
     source_window: sourceLabelFromWindowTitle(sourceWindow),
@@ -897,6 +899,7 @@ async function showToolbar(sourceWindow: string, rate: number): Promise<void> {
 
 function hideToolbar(): void {
   toolbarPaused = false;
+  void player.setPaused(false);
   activeToolbarJobId = "";
   void invoke("hide_playback_toolbar").catch((error) => {
     log(`Could not hide playback toolbar: ${String(error)}`, "error");
@@ -905,134 +908,9 @@ function hideToolbar(): void {
 }
 
 async function togglePlaybackPause(): Promise<void> {
-  const context = ensureAudioContext();
-  if (toolbarPaused) {
-    if (context.state === "suspended") {
-      await context.resume();
-    }
-    toolbarPaused = false;
-  } else {
-    if (context.state !== "suspended") {
-      await context.suspend();
-    }
-    toolbarPaused = true;
-  }
+  toolbarPaused = !toolbarPaused;
+  await player.setPaused(toolbarPaused);
   void emit(TOOLBAR_PAUSED_EVENT, { paused: toolbarPaused } satisfies ToolbarPausePayload);
-}
-
-function playbackIsIdle(): boolean {
-  return activeAudioSources.size === 0 && queuedPlaybackByJob.size === 0;
-}
-
-function playbackHasRunDry(): boolean {
-  // Everything scheduled so far has already finished playing. While paused the audio
-  // clock is frozen, so a pause is never mistaken for running dry.
-  return audioContext !== null && playbackCursor <= audioContext.currentTime;
-}
-
-function ensureQueuedPlayback(jobId: string): QueuedPlayback {
-  const existing = queuedPlaybackByJob.get(jobId);
-  if (existing) {
-    return existing;
-  }
-  const created: QueuedPlayback = {
-    buffers: [],
-    bufferedSeconds: 0,
-    started: false,
-    terminal: false,
-    rebufferCount: 0,
-  };
-  queuedPlaybackByJob.set(jobId, created);
-  return created;
-}
-
-function clearQueuedPlayback(): void {
-  queuedPlaybackByJob.clear();
-}
-
-function nextChunkLeadSeconds(jobId: string): number {
-  const DEFAULT_LEAD_SECONDS = 0.015;
-  const FIRST_CHUNK_LEAD_SECONDS = 0.1;
-  const FIRST_OUTPUT_PREROLL_SECONDS = 0.14;
-
-  let lead = DEFAULT_LEAD_SECONDS;
-  if (jobId) {
-    const currentCount = playbackChunkCounts.get(jobId) ?? 0;
-    if (currentCount === 0) {
-      lead = FIRST_CHUNK_LEAD_SECONDS;
-    }
-    playbackChunkCounts.set(jobId, currentCount + 1);
-  }
-
-  if (!hasOutputPrimed) {
-    lead += FIRST_OUTPUT_PREROLL_SECONDS;
-    hasOutputPrimed = true;
-  }
-  return lead;
-}
-
-function scheduleAudioBuffer(jobId: string, buffer: AudioBuffer): void {
-  const context = ensureAudioContext();
-  const source = context.createBufferSource();
-  source.buffer = buffer;
-  source.connect(context.destination);
-  activeAudioSources.add(source);
-  source.onended = () => {
-    activeAudioSources.delete(source);
-    if (jobId !== activeToolbarJobId) {
-      return;
-    }
-    if (playbackIsIdle()) {
-      resetPlaybackCursor();
-      hideToolbar();
-    }
-  };
-
-  const now = context.currentTime;
-  const leadSeconds = nextChunkLeadSeconds(jobId);
-  const startAt = Math.max(playbackCursor, now + leadSeconds);
-  source.start(startAt);
-  playbackCursor = startAt + buffer.duration;
-}
-
-function flushQueuedPlayback(jobId: string, forceStart: boolean): void {
-  const queued = queuedPlaybackByJob.get(jobId);
-  if (!queued) {
-    return;
-  }
-
-  if (queued.started && !forceStart && !queued.terminal && queued.buffers.length > 0 && playbackHasRunDry()) {
-    // Audio ran out before this chunk arrived. Playing each late chunk as it lands
-    // sounds choppy, so hold playback and refill the buffer first.
-    queued.started = false;
-    queued.rebufferCount += 1;
-    log(
-      `playback_rebuffer job_id=${jobId} count=${queued.rebufferCount} wait_for=${rebufferSeconds(selectedRateSetting(), queued.rebufferCount).toFixed(2)}s`,
-    );
-  }
-
-  if (!queued.started) {
-    const rate = selectedRateSetting();
-    const requiredSeconds =
-      queued.rebufferCount > 0 ? rebufferSeconds(rate, queued.rebufferCount) : minPrebufferSeconds(rate);
-    if (!forceStart && queued.bufferedSeconds < requiredSeconds) {
-      return;
-    }
-    queued.started = true;
-  }
-
-  while (queued.buffers.length > 0) {
-    const buffer = queued.buffers.shift();
-    if (!buffer) {
-      continue;
-    }
-    scheduleAudioBuffer(jobId, buffer);
-    queued.bufferedSeconds = Math.max(0, queued.bufferedSeconds - buffer.duration);
-  }
-
-  if (queued.terminal && queued.buffers.length === 0) {
-    queuedPlaybackByJob.delete(jobId);
-  }
 }
 
 /** The WAV file chosen in the clone form, or null after telling the user what is wrong. */
@@ -1054,7 +932,7 @@ function selectedCloneFile(action: string): File | null {
 /** Fills the reference text from the chosen clip, using the transcription model. */
 async function transcribeCloneClip(file: File): Promise<void> {
   cloneTranscribeBtn.disabled = true;
-  cloneTranscribeBtn.textContent = "Transcribing...";
+  cloneTranscribeLabel.textContent = "Transcribing...";
   showCloneStatus("Transcribing the clip... this takes a few seconds.", "info", 0);
   try {
     const result = await invoke<{ text: string }>("transcribe_reference_clip", {
@@ -1072,7 +950,7 @@ async function transcribeCloneClip(file: File): Promise<void> {
     log(`Reference clip transcription failed: ${String(error)}`, "error");
   } finally {
     cloneTranscribeBtn.disabled = false;
-    cloneTranscribeBtn.textContent = "Transcribe audio";
+    cloneTranscribeLabel.textContent = "Transcribe audio";
   }
 }
 
@@ -1114,7 +992,7 @@ async function fileToBase64(file: File): Promise<string> {
   return btoa(binary);
 }
 
-async function enqueueAudioChunk(eventPayload: Record<string, unknown>): Promise<void> {
+function enqueueAudioChunk(eventPayload: Record<string, unknown>): void {
   const audio = eventPayload.audio as Record<string, unknown> | undefined;
   if (!audio) {
     return;
@@ -1132,73 +1010,20 @@ async function enqueueAudioChunk(eventPayload: Record<string, unknown>): Promise
     return;
   }
 
-  const context = ensureAudioContext();
-  if (context.state === "suspended" && !toolbarPaused) {
-    await context.resume();
-  }
-
-  let samples = decodePcm16Base64ToFloat32(dataBase64);
-  if (!hasStartupSilenceInjected) {
-    // The first device wake-up can clip a short prefix; prepend silence once.
-    samples = prependSilence(samples, sampleRate, 160);
-    hasStartupSilenceInjected = true;
-  }
-  // Normalize to a plain ArrayBuffer-backed Float32Array for strict DOM typings.
-  const channelSamples = new Float32Array(samples);
-  const buffer = context.createBuffer(1, samples.length, sampleRate);
-  buffer.copyToChannel(channelSamples, 0, 0);
-  const jobId = String(eventPayload.job_id ?? "");
-  if (!jobId) {
-    scheduleAudioBuffer(jobId, buffer);
-    return;
-  }
-
-  const queued = ensureQueuedPlayback(jobId);
-  queued.buffers.push(buffer);
-  queued.bufferedSeconds += buffer.duration;
-  flushQueuedPlayback(jobId, false);
-}
-
-function resetPlaybackCursor(): void {
-  if (!audioContext) {
-    return;
-  }
-  playbackCursor = audioContext.currentTime;
-}
-
-function stopActiveSources(): void {
-  for (const source of Array.from(activeAudioSources)) {
-    try {
-      source.stop(0);
-    } catch {
-      // no-op: source may have already ended
-    }
-    try {
-      source.disconnect();
-    } catch {
-      // no-op
-    }
-  }
-  activeAudioSources.clear();
+  player.enqueue(decodePcm16Base64ToFloat32(dataBase64), sampleRate);
 }
 
 function stopAllPlayback(): void {
-  stopActiveSources();
-  clearQueuedPlayback();
-  playbackChunkCounts.clear();
-  resetPlaybackCursor();
+  player.reset();
 }
 
 function skipPlaybackForward(): void {
   if (!activeToolbarJobId) {
     return;
   }
-  stopActiveSources();
-  resetPlaybackCursor();
-  flushQueuedPlayback(activeToolbarJobId, true);
-  if (playbackIsIdle()) {
-    hideToolbar();
-  }
+  // Jumps past the audio received so far. If the job has ended, the player
+  // reports that it finished and the toolbar closes.
+  player.skipQueued();
 }
 
 async function toolbarStopPlayback(): Promise<void> {
@@ -1225,7 +1050,12 @@ async function refreshHealthAndVoices(): Promise<void> {
 }
 
 function renderStoragePaths(paths: EngineStoragePathsPayload): void {
-  modelStoragePaths.textContent = `Data: ${paths.data_dir} | Models: ${paths.models_dir} | HF cache: ${paths.hf_cache_dir}`;
+  // One path per line; `.storage-line` keeps the line breaks.
+  modelStoragePaths.textContent = [
+    `Data: ${paths.data_dir}`,
+    `Models: ${paths.models_dir}`,
+    `HF cache: ${paths.hf_cache_dir}`,
+  ].join("\n");
 }
 
 async function refreshEngineStoragePaths(): Promise<void> {
@@ -1681,7 +1511,11 @@ async function bindActions(): Promise<void> {
     log(`Selected saved voice ${selected.label}`);
   });
 
-  rateInput.addEventListener("input", syncRateReadout);
+  rateInput.addEventListener("input", () => {
+    syncRateReadout();
+    // While the slider is being dragged, not only when it is released.
+    applyPlayerTempo();
+  });
 
   [rateInput, volumeInput, chunkMaxInput].forEach((input) => {
     input.addEventListener("change", async () => {
@@ -1896,52 +1730,43 @@ async function bindEvents(): Promise<void> {
     }
     rateInput.value = formatRateNumber(clampRate(parsed));
     syncRateReadout();
+    applyPlayerTempo();
   });
 
   await listen<JsonValue>("voicereader:ws-event", async ({ payload }) => {
     const eventType = String(payload.type ?? "UNKNOWN");
     const jobId = String(payload.job_id ?? "");
+    // A replaced job keeps sending for a moment, until its synthesis notices the cancel.
+    const replaced = jobId !== "" && currentPlaybackJobId !== "" && jobId !== currentPlaybackJobId;
 
-    if (eventType === "AUDIO_CHUNK" && jobId && suppressedJobIds.has(jobId)) {
+    if (eventType === "AUDIO_CHUNK" && jobId && (suppressedJobIds.has(jobId) || replaced)) {
       return;
     }
 
     log(`ws_event=${eventType}`);
 
+    if (replaced) {
+      // Its end-of-job event must not stop or flush the job that replaced it.
+      suppressedJobIds.delete(jobId);
+      return;
+    }
+
     if (eventType === "AUDIO_CHUNK") {
-      await enqueueAudioChunk(payload);
+      enqueueAudioChunk(payload);
       return;
     }
 
     if (eventType === "JOB_CANCELED") {
-      if (jobId) {
-        suppressedJobIds.delete(jobId);
-        playbackChunkCounts.delete(jobId);
-        queuedPlaybackByJob.delete(jobId);
-      }
+      suppressedJobIds.delete(jobId);
       stopAllPlayback();
-      if (!jobId || jobId === activeToolbarJobId) {
-        hideToolbar();
-      }
+      hideToolbar();
       return;
     }
 
     if (eventType === "JOB_DONE" || eventType === "JOB_ERROR") {
-      if (jobId) {
-        suppressedJobIds.delete(jobId);
-        playbackChunkCounts.delete(jobId);
-        const queued = queuedPlaybackByJob.get(jobId);
-        if (queued) {
-          queued.terminal = true;
-          flushQueuedPlayback(jobId, true);
-        }
-      }
-      if (playbackIsIdle()) {
-        resetPlaybackCursor();
-        if (!jobId || jobId === activeToolbarJobId) {
-          hideToolbar();
-        }
-      }
+      suppressedJobIds.delete(jobId);
+      // What is queued plays out; the player then reports that it finished.
+      player.end();
     }
   });
 
@@ -1951,14 +1776,19 @@ async function bindEvents(): Promise<void> {
     const playbackRate = Number(payload.rate ?? selectedRateSetting());
     const toolbarRate = Number.isFinite(playbackRate) ? clampRate(playbackRate) : selectedRateSetting();
     if (jobId !== "unknown") {
-      suppressedJobIds.delete(jobId);
-      playbackChunkCounts.set(jobId, 0);
-      activeToolbarJobId = jobId;
-      for (const existingJobId of Array.from(queuedPlaybackByJob.keys())) {
-        if (existingJobId !== jobId) {
-          queuedPlaybackByJob.delete(existingJobId);
+      if (jobId !== currentPlaybackJobId) {
+        // A new job replaces whatever is playing or queued. Without this the old audio
+        // already scheduled keeps playing and the two jobs share one timeline.
+        if (!player.idle) {
+          log(`playback_replaced old_job_id=${currentPlaybackJobId || "unknown"} new_job_id=${jobId}`);
         }
+        stopAllPlayback();
       }
+      currentPlaybackJobId = jobId;
+      suppressedJobIds.delete(jobId);
+      activeToolbarJobId = jobId;
+      playerAppliesRate = payload.rate_applied_by_player === true;
+      player.setTempo(playerAppliesRate ? toolbarRate : 1);
     }
     void showToolbar(sourceWindow, toolbarRate);
     log(`job_started id=${jobId}`);
@@ -1976,8 +1806,6 @@ async function bindEvents(): Promise<void> {
     const jobId = String(payload.job_id ?? "");
     if (jobId) {
       suppressedJobIds.add(jobId);
-      playbackChunkCounts.delete(jobId);
-      queuedPlaybackByJob.delete(jobId);
     }
     stopAllPlayback();
     if (!jobId || jobId === activeToolbarJobId) {
@@ -2016,6 +1844,8 @@ async function bindEvents(): Promise<void> {
 }
 
 setTabs();
+// Kyutai, the model selected at every start, produces 24 kHz audio.
+player.prepare(24000);
 initTranscribe({
   log,
   isPageActive: () => document.querySelector('.page[data-page="transcribe"]')?.classList.contains("active") ?? false,

@@ -1,5 +1,9 @@
-//! Playback-rate handling shared by the in-process TTS runtimes: PCM is time-stretched
-//! by SoX (pitch preserved) or, without SoX, resampled, then handed to the caller.
+//! Playback-rate handling shared by the in-process TTS runtimes.
+//!
+//! By default the audio leaves here at normal speed and the player in the app window
+//! applies the speed while it plays (src/player.ts), so a change is heard at once.
+//! The older path is kept behind `VOICEREADER_RATE_IN_BACKEND=1` for comparison: PCM is
+//! time-stretched here by SoX (pitch preserved) or, without SoX, resampled.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,15 +27,31 @@ const SOX_OUTPUT_QUIET: Duration = Duration::from_millis(20);
 /// SoX's default 8192-sample buffer would hold back up to 0.19 s of audio per piece.
 const SOX_BUFFER_BYTES: usize = 4096;
 
+const RATE_IN_BACKEND_ENV: &str = "VOICEREADER_RATE_IN_BACKEND";
+
+/// True when the player in the app window applies the playback speed, which is the
+/// default. False when `VOICEREADER_RATE_IN_BACKEND` asks for the audio to be
+/// stretched here instead, as it was before.
+pub(crate) fn player_applies_rate() -> bool {
+    static CHOICE: OnceLock<bool> = OnceLock::new();
+    *CHOICE.get_or_init(|| {
+        let requested = std::env::var(RATE_IN_BACKEND_ENV).unwrap_or_default();
+        !matches!(requested.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    })
+}
+
 /// The playback rate selected in the app, in quarter steps (4 is 1.0x, 6 is 1.5x).
 pub(crate) fn current_rate(active_rate_steps: &AtomicU32) -> f32 {
     (active_rate_steps.load(Ordering::SeqCst).clamp(1, 16) as f32) / 4.0
 }
 
-/// Applies the live playback rate to PCM (SoX tempo, pitch preserved) and forwards it.
+/// Forwards PCM to the caller. When the backend applies the playback rate, it is
+/// time-stretched first (SoX tempo, pitch preserved); otherwise it passes through.
 pub(crate) struct RateEmitter<'a, F> {
     sample_rate: u32,
     active_rate_steps: &'a AtomicU32,
+    /// Whether this emitter changes the speed itself. See [`player_applies_rate`].
+    stretch: bool,
     rate: f32,
     sox: Option<SoxTempoStream>,
     on_chunk: F,
@@ -44,19 +64,25 @@ where
     F: Fn(usize, &[i16], u32) -> Result<()>,
 {
     pub(crate) fn new(sample_rate: u32, active_rate_steps: &'a AtomicU32, on_chunk: F) -> Self {
+        Self::with_stretch(sample_rate, active_rate_steps, !player_applies_rate(), on_chunk)
+    }
+
+    /// `stretch` says whether the playback rate is applied here.
+    pub(crate) fn with_stretch(sample_rate: u32, active_rate_steps: &'a AtomicU32, stretch: bool, on_chunk: F) -> Self {
         let rate = current_rate(active_rate_steps);
         Self {
             sample_rate,
             active_rate_steps,
+            stretch,
             rate,
-            sox: Self::open_sox(rate, sample_rate),
+            sox: if stretch { Self::open_sox(rate, sample_rate) } else { None },
             on_chunk,
             chunk_index: 0,
             had_audio: false,
         }
     }
 
-    /// The rate in effect for the audio pushed next.
+    /// The playback rate in effect for the audio pushed next, whoever applies it.
     pub(crate) fn rate(&self) -> f32 {
         self.rate
     }
@@ -91,12 +117,17 @@ where
         if (desired - self.rate).abs() > f32::EPSILON {
             self.flush_sox()?;
             self.rate = desired;
-            self.sox = Self::open_sox(desired, self.sample_rate);
+            if self.stretch {
+                self.sox = Self::open_sox(desired, self.sample_rate);
+            }
         }
         self.feed(pcm)
     }
 
     fn feed(&mut self, segment: &[i16]) -> Result<()> {
+        if !self.stretch {
+            return self.emit(segment);
+        }
         let Some(sox) = self.sox.as_mut() else {
             if (self.rate - 1.0).abs() <= f32::EPSILON {
                 return self.emit(segment);
@@ -662,6 +693,25 @@ mod tests {
         emitter.finish().unwrap();
         assert!(emitter.had_audio());
         assert_eq!(*seen.lock().unwrap(), vec![(0, 3, 24_000), (1, 2, 24_000)]);
+    }
+
+    #[test]
+    fn emitter_leaves_the_speed_to_the_player_unless_told_to_stretch() {
+        let rate = AtomicU32::new(8);
+        let lengths: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = lengths.clone();
+        let mut emitter = RateEmitter::with_stretch(24_000, &rate, false, move |_, pcm, _| {
+            sink.lock().unwrap().push(pcm.len());
+            Ok(())
+        });
+        // The rate is still reported, because callers size their first piece by it.
+        assert_eq!(emitter.rate(), 2.0);
+        emitter.push(&[5i16; 2_400]).unwrap();
+        rate.store(12, Ordering::SeqCst);
+        emitter.push(&[5i16; 1_200]).unwrap();
+        emitter.finish().unwrap();
+        assert_eq!(emitter.rate(), 3.0);
+        assert_eq!(*lengths.lock().unwrap(), vec![2_400, 1_200]);
     }
 
     #[test]

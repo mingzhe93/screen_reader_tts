@@ -3,7 +3,6 @@
     "beforeBuildCommand": "python3 tts-engine/scripts/build_sidecar.py --models-only && npm run build"
   },
   "tauri": {
-    "macOSPrivateApi": true,
     "bundle": {
       "icon": ["icons/icon.icns"],
       "resources": [

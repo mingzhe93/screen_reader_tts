@@ -8,9 +8,10 @@
   },
   "package": {
     "productName": "VoiceReader",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "tauri": {
+    "macOSPrivateApi": true,
     "allowlist": {
       "all": false,
       "shell": {

@@ -1,13 +1,22 @@
 # VoiceReader Decisions
 
-Direction agreed on 2026-10-03, after a seven-month gap in development, and the decisions made through version 0.2.1 (2026-10-05). Newest decisions go at the top of each section.
+Direction agreed on 2026-10-03, after a seven-month gap in development, and the decisions made through version 0.2.2 (2026-10-09). Newest decisions go at the top of each section.
+
+## Release 0.2.2 (2026-10-09)
+
+- **The player applies the speed, not the backend** (2026-10-09, the user's wish). Speed changes used to reach only audio not yet generated, and Kyutai generates most of a text within seconds. The backend now sends audio at normal speed and the player time-stretches it while it plays, so a change is heard at once and the slider's `0.05x` steps are honoured (the backend rounded to `0.25x`). The stretcher is written in the app (WSOLA, two stages) rather than taken from a library. `VOICEREADER_RATE_IN_BACKEND=1` brings back the SoX path for comparison; SoX stays bundled for voice-cloning clips. Measurements are in `docs/learnings.md` section 13.
+- **Chunks generated in parallel each get their own copy of the voice state** (2026-10-09). Sharing it garbled 11 of the 21 Kyutai presets, and cloned voices at random; the cause and the measurements are in `docs/learnings.md` section 14. The user had asked for those 11 voices to be removed because they read badly. They now read as well as the rest, so which presets to drop is a question of taste and is still open.
+- **A new read-aloud job replaces the one that is playing** (2026-10-09). Pressing the hotkey during playback stops the audio and empties the queue before the new text starts. Late audio and end-of-job events from the replaced job are ignored.
+- **One manifest for both platforms** (2026-10-09). `macOSPrivateApi` (needed for the transparent toolbar window on macOS) is set in the shared `tauri.conf.json`, not in the macOS-only config. The Tauri CLI rewrites the `tauri` features in `Cargo.toml` to match the config, and the build fails when they disagree, so a macOS-only setting made `Cargo.toml` differ between a Mac and a Windows machine and broke plain `cargo` builds on Windows. The setting has no effect on Windows.
+- **The clone form says that transcription is English only.** The note is on the Transcribe audio button itself, not only in its tooltip.
+- **Next: skip back and skip forward.** The player keeps the audio at normal speed, which makes moving back and forth in it possible.
 
 ## Release 0.2.1 (2026-10-05)
 
 - **macOS portable support is working on Apple Silicon.** Highlighted-text hotkeys and the floating playback toolbar have been tested. SoX is bundled for pitch-preserving speed changes, and both platforms use the updated app icon.
 - **Audio8 GPU acceleration on macOS is deferred.** Core ML inference failed with the shipped decoder, so macOS uses the CPU. GPU acceleration remains available on Windows through DirectML.
 - **Recording export is optional.** The Transcribe page offers Copy, Transcription, and Recording & transcription. The combined export saves a ZIP containing the original uploaded audio or the microphone's mono WAV recording, plus a text transcript.
-- **Release versions stay aligned.** The desktop, lockfile app entries and Python engine metadata use 0.2.1 and are synchronized from `package.json`.
+- **Release versions stay aligned.** The desktop, lockfile app entries and Python engine metadata use the release version and are synchronized from `package.json`.
 
 ## Product direction
 
@@ -62,7 +71,7 @@ Direction agreed on 2026-10-03, after a seven-month gap in development, and the 
 3. Test it; decide whether it becomes the default. Done 2026-10-04: Kyutai stays the default, Audio8 stays as the optional model.
 4. Housekeeping before ASR. Done 2026-10-04.
 5. Redesign the main window, add file transcription and live microphone transcription. Done 2026-10-04 and tried by the user on recordings and the microphone.
-6. Release version 0.2.0 on GitHub. Published; version 0.2.1 is now in preparation (2026-10-05).
+6. Release version 0.2.0 on GitHub. Published, followed by 0.2.1 (2026-10-05) and 0.2.2 (2026-10-09).
 7. Live transcription of system audio, mixed with the microphone. Next.
 8. Word boosting.
 

@@ -1,6 +1,6 @@
 # VoiceReader
 
-Version 0.2.1. A desktop app that reads highlighted text aloud and turns speech into a transcript with speaker labels.
+Version 0.2.2. A desktop app that reads highlighted text aloud and turns speech into a transcript with speaker labels.
 
 - **Read aloud.** Highlight text in any app, press a hotkey, and hear it spoken. The voices are open-weight text-to-speech models, with voice cloning from a short clip.
 - **Transcribe.** Record from the microphone, or pick a recording, and get a transcript that labels who spoke. It tells up to 8 speakers apart. English only.
@@ -25,7 +25,7 @@ To build from source, see [Development setup](#development-setup-base-build).
 
 - Read the text selected in the active app when you press a global hotkey. The app copies the selection through the clipboard and restores your previous clipboard text afterwards.
 - Show a small always-on-top toolbar in its own window while audio plays. It has rate, pause, stop and skip-forward controls, shows the source app, and remembers where you dragged it.
-- Change the playback rate from `0.25x` to `4.0x` while audio is playing. Pitch is preserved when SoX is available.
+- Change the playback speed from `0.25x` to `4.0x` while audio is playing. The change is heard at once, and the pitch stays the same.
 - Clone a voice from a WAV clip, save it, and reuse it. The Transcribe audio button fills in the clip's transcript for you (English only; it uses the transcription model and offers to download it if it is missing). Saved voices can be renamed, annotated and deleted on the Voices page.
 - Choose from 21 preset voices with Kyutai Pocket TTS.
 - Run models on the CPU, and move part of Audio8 to a GPU on Windows when that is faster (see Compute device below).
@@ -83,8 +83,8 @@ Two builds exist. They are chosen by Cargo feature, and exactly one must be enab
 - Kyutai is English only. Use Audio8 for Chinese.
 - Audio8 runs generation on the CPU and is close to real time. Playback above about 1.5x can stutter.
 - Audio8 GPU acceleration is not available yet on macOS. Use the CPU; choosing GPU currently falls back to CPU.
-- Without SoX, rate changes use plain resampling, which also changes pitch. Windows builds bundle SoX under `src-tauri/binaries/sox`; macOS builds include a native runtime under `src-tauri/binaries/sox-macos`.
-- Rate changes are applied to the next piece of audio the runtime produces, not to audio that is already queued in the player.
+- Speed changes do not raise how fast a model can generate. Audio8 still stutters above about 1.5x.
+- SoX is no longer used to change the speed (the player does that itself). It is still bundled, for preparing voice-cloning clips and for the older speed path kept behind `VOICEREADER_RATE_IN_BACKEND`: Windows builds bundle it under `src-tauri/binaries/sox`, macOS builds under `src-tauri/binaries/sox-macos`.
 - The skip-back button does nothing yet.
 - The hotkey is ignored while the VoiceReader window itself is focused. Use Read selection there.
 - Closing the main window quits the app. There is no tray icon.
@@ -187,6 +187,7 @@ All optional. The Base build reads these:
 | `VOICEREADER_AUDIO8_DECODERS` | Audio8 decoder sessions, 1 to 4. Default 1. |
 | `VOICEREADER_AUDIO8_DECODER_THREADS` | Threads for the CPU decoder, 1 up to the core count. Default is half the cores, between 1 and 8. |
 | `VOICEREADER_ASR_THREADS` | Threads for transcription, 1 to 64. Default is half the cores, between 1 and 8. |
+| `VOICEREADER_RATE_IN_BACKEND` | Set to `1` to apply the speed in the backend with SoX, as it was up to version 0.2.1, instead of in the player. Speed changes then take effect only on audio not yet generated. For comparing the two. |
 | `VOICEREADER_ENGINE_ROOT` | Location of the `tts-engine` folder. Debug builds use `<root>/.data` as the data directory. |
 | `VOICEREADER_AUDIO8_TEST_MODEL_DIR`, `KYUTAI_TEST_MODEL_DIR`, `KYUTAI_TEST_OUT_DIR`, `VOICEREADER_ASR_TEST_MODELS_DIR`, `VOICEREADER_ASR_TEST_AUDIO`, `VOICEREADER_ASR_TEST_MAX_SPEAKERS` | Used only by the ignored Rust tests. |
 
@@ -212,7 +213,7 @@ Python is used only while building; users do not need Python, Node or Rust insta
 The macOS configuration targets macOS 14 or newer. Build on Apple Silicon for an arm64
 release; Intel and universal releases need separate build and runtime verification.
 
-The output is `src-tauri/target/release/bundle/portable/VoiceReader_0.2.1_macos_arm64_portable.zip`
+The output is `src-tauri/target/release/bundle/portable/VoiceReader_0.2.2_macos_arm64_portable.zip`
 on Apple Silicon. Extract it and open `VoiceReader.app`; moving it to Applications is optional.
 The entire `.app` must stay together. Settings, saved voices and downloaded models go
 under the user's application data directory, so portable here means no installer,
@@ -225,11 +226,12 @@ highlighted text shows whether the running executable has access. An enabled ent
 for an older unsigned build may not authorize a rebuilt copy: remove that stale entry,
 add the current `.app`, then quit and reopen VoiceReader. Highlight text in the source
 app and press the hotkey without switching focus to VoiceReader.
-SoX is bundled, so playback rate changes preserve pitch. The Mac SoX build includes
+SoX is bundled for preparing voice-cloning clips (the player changes the speed itself
+and no longer needs it). The Mac SoX build includes
 raw PCM, WAV and tempo effects; external codecs and audio-device drivers are disabled
 because VoiceReader handles decoding and playback itself. The existing Windows SoX
 binaries are excluded from the Mac app. Missing SoX causes the Mac build to fail
-rather than silently shipping the pitch-changing fallback.
+rather than silently shipping without it.
 
 To rebuild only the Mac SoX runtime, run `python3 scripts/bundle_sox_macos.py`.
 The source download is checksum-verified and cached under `build/sox-macos`.

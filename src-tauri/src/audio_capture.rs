@@ -85,6 +85,7 @@ pub(crate) struct MicrophoneSource {
 impl MicrophoneSource {
     /// Opens `device_name`, or the system default input when it is `None`. Setting
     /// `stop` ends the recording: reads then drain what was captured and report the end.
+    #[cfg(test)]
     pub(crate) fn open(device_name: Option<&str>, target_rate: u32, stop: Arc<AtomicBool>) -> Result<Self> {
         Self::open_recorded(device_name, target_rate, stop, None)
     }

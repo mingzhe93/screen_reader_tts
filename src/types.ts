@@ -67,6 +67,8 @@ export type JobStartedPayload = {
   source: string;
   source_window?: string;
   rate?: number;
+  /** True when the audio arrives at normal speed and the player applies `rate`. */
+  rate_applied_by_player?: boolean;
 };
 
 export type ToolbarActionPayload = {
@@ -190,15 +192,6 @@ export type TranscriptEventPayload = {
 export type AudioInput = {
   name: string;
   is_default: boolean;
-};
-
-export type QueuedPlayback = {
-  buffers: AudioBuffer[];
-  bufferedSeconds: number;
-  started: boolean;
-  terminal: boolean;
-  // How many times this job ran out of audio mid-playback and had to refill.
-  rebufferCount: number;
 };
 
 export type ThemeMode = "dark" | "light";

@@ -14,7 +14,7 @@ use crate::audio8_model::{
     benchmark_decoder, clean_text, init_onnxruntime, load_wav_mono, max_frames_for_text, read_codes_npy,
     write_codes_npy, Audio8Model, ChunkPlan, DecoderDevice, GenParams, VoicePrefix,
 };
-use crate::audio_pipeline::RateEmitter;
+use crate::audio_pipeline::{player_applies_rate, RateEmitter};
 use crate::bundled_paths::{find_bundled_file, search_roots};
 use crate::kyutai_local::{LocalJobEndState, SavedVoiceMeta, META_FILE_NAME, REF_AUDIO_FILE_NAME};
 use crate::text_chunking::{chunk_text, normalize_for_speech};
@@ -507,7 +507,8 @@ impl LocalAudio8Runtime {
         }
 
         let mut emitter = RateEmitter::new(sample_rate, active_rate_steps, on_chunk);
-        let first_frames = first_frames_for_rate(emitter.rate(), hop as f32 / sample_rate as f32);
+        let first_frames =
+            first_frames_for_rate(emitter.rate(), hop as f32 / sample_rate as f32, !player_applies_rate());
         let gain = volume.clamp(0.0, 2.0);
         let mut pcm: Vec<i16> = Vec::new();
         let outcome = self.model.synthesize_chunks(&prefix, &plans, first_frames, cancel, |audio| {
@@ -540,7 +541,7 @@ impl LocalAudio8Runtime {
 /// Frames to buffer before the first audio is sent. The frontend waits for a prebuffer
 /// that grows with the playback rate (`minPrebufferSeconds` in src/playback.ts), so the
 /// first piece has to cover it or playback would only start with the second piece.
-fn first_frames_for_rate(rate: f32, frame_seconds: f32) -> usize {
+fn first_frames_for_rate(rate: f32, frame_seconds: f32, stretched_by_sox: bool) -> usize {
     let prebuffer = if rate <= 1.0 {
         0.24
     } else if rate <= 2.0 {
@@ -549,8 +550,15 @@ fn first_frames_for_rate(rate: f32, frame_seconds: f32) -> usize {
         (0.85 + (rate - 2.0)).min(2.0)
     };
     // SoX holds back audio while time-stretching: 0.16 to 0.25 s of output measured at 1.5x.
-    let sox_slack = if (rate - 1.0).abs() > f32::EPSILON { 0.3 } else { 0.0 };
-    let source_seconds = (prebuffer + sox_slack) * rate;
+    // The player's own stretcher holds back far less, and only audio it has already taken.
+    let slack = if !stretched_by_sox {
+        0.05
+    } else if (rate - 1.0).abs() > f32::EPSILON {
+        0.3
+    } else {
+        0.0
+    };
+    let source_seconds = (prebuffer + slack) * rate;
     usize::max(MIN_FIRST_FRAMES, (source_seconds / frame_seconds).ceil() as usize + 1)
 }
 
@@ -563,9 +571,14 @@ mod tests {
     #[test]
     fn first_frames_grow_with_playback_rate() {
         let frame_seconds = 2048.0 / 44100.0;
-        assert_eq!(first_frames_for_rate(1.0, frame_seconds), MIN_FIRST_FRAMES);
-        assert!(first_frames_for_rate(1.5, frame_seconds) > first_frames_for_rate(1.0, frame_seconds));
-        assert!(first_frames_for_rate(3.0, frame_seconds) > first_frames_for_rate(1.5, frame_seconds));
+        for stretched_by_sox in [false, true] {
+            let frames = |rate: f32| first_frames_for_rate(rate, frame_seconds, stretched_by_sox);
+            assert_eq!(frames(1.0), MIN_FIRST_FRAMES);
+            assert!(frames(1.5) > frames(1.0));
+            assert!(frames(3.0) > frames(1.5));
+        }
+        // SoX needs a bigger first piece, because it holds more audio back.
+        assert!(first_frames_for_rate(2.0, frame_seconds, true) > first_frames_for_rate(2.0, frame_seconds, false));
     }
 
     #[test]
@@ -646,9 +659,18 @@ mod tests {
 
         let (normal_pcm, normal_seconds) = speak(&mut runtime, BUILTIN_VOICE_ID, 4);
         assert!(normal_seconds > 3.0 && normal_seconds < 30.0);
-        // 1.5x through SoX should be clearly shorter than 1.0x (generation is sampled, so not exact).
         let (_, fast_seconds) = speak(&mut runtime, BUILTIN_VOICE_ID, 6);
-        assert!(fast_seconds < normal_seconds * 0.9, "tempo was not applied: {fast_seconds} vs {normal_seconds}");
+        if player_applies_rate() {
+            // The player applies the speed, so 1.5x must not shorten the audio here. Stretched
+            // audio would be two thirds as long; generation is sampled, so lengths vary a little.
+            assert!(
+                fast_seconds > normal_seconds * 0.8,
+                "audio was shortened here: {fast_seconds} vs {normal_seconds}"
+            );
+        } else {
+            // 1.5x through SoX should be clearly shorter than 1.0x.
+            assert!(fast_seconds < normal_seconds * 0.9, "tempo was not applied: {fast_seconds} vs {normal_seconds}");
+        }
 
         // Clone a voice from the audio just produced, the way the app does: metadata is
         // written by the Kyutai runtime, codes by `register_voice`.
