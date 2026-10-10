@@ -1,0 +1,3 @@
+# Preserve ONNX protobuf graphs and external weights byte for byte.
+*.onnx binary
+*.onnx.data binary

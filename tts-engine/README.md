@@ -1,6 +1,6 @@
 # tts-engine (Python sidecar for the Full build)
 
-This is the local engine service of the VoiceReader **Full build** (`build-full`), version 0.2.2. It is **not part of the default Base build** (`build-base`), which does not start it and needs no Python at run time. The Full build is kept for future heavier models and is not actively used.
+This is the local engine service of the VoiceReader **Full build** (`build-full`), version 0.2.3. It is **not part of the default Base build** (`build-base`), which does not start it and needs no Python at run time. The Full build is kept for future heavier models and is not actively used.
 
 ## Build profile context
 
@@ -9,7 +9,7 @@ VoiceReader ships in two desktop profiles:
 - **Base build** (`build-base`, the default for `npm run desktop:dev` and `npm run desktop:build`): everything runs inside the Rust process. Kyutai Pocket TTS, the optional Audio8 TTS model and speech-to-text transcription are implemented in Rust, so there is no Python sidecar, no Qwen model and no localhost API. The sidecar's API is not its interface; the Tauri commands and events described in `docs/DESIGN_SPEC.md` are.
 - **Full build** (`build-full`): the desktop app starts this Python sidecar as a child process and talks to it over loopback HTTP and WebSocket (`docs/IPC_API.md`). It offers Kyutai Pocket TTS and Qwen3-TTS 0.6B (CustomVoice and Base) with model switching and downloads. Audio8 TTS and transcription are not available in the Full build.
 
-This `tts-engine` folder is used by the **Full build** profile only. `npm run sidecar:build` packages it with PyInstaller into `src-tauri/binaries/tts-engine-<target triple>/`.
+The running Python service is used by the **Full build** only. Base builds still use the model/SoX helper scripts here at build time, and debug Base builds use `tts-engine/.data` for local data. Apple Silicon Base builds include native ONNX WebGPU/Metal from v0.2.3; that does not add a Metal, MLX or Audio8 path to this Python service. See [the native Metal guide](../docs/METAL.md). `npm run sidecar:build` packages it with PyInstaller into `src-tauri/binaries/tts-engine-<target triple>/`.
 
 Current scope:
 - HTTP + WebSocket API contract from `docs/IPC_API.md`
@@ -103,7 +103,7 @@ $env:VOICEREADER_QWEN_DEVICE_MAP = "cpu"
 $env:VOICEREADER_QWEN_DTYPE = "float32"
 ```
 
-GPU path:
+Qwen CUDA GPU path (Full sidecar; separate from native macOS Audio8 Metal):
 - reinstall torch in this `.venv` using a CUDA wheel from the official PyTorch index that matches your platform.
 - then re-run with:
 
@@ -128,6 +128,8 @@ sox --version
 ```
 
 If `sox` is still not found, restart terminal. The engine also checks Winget SoX install location automatically.
+
+On macOS, the build helper puts native SoX under `src-tauri/binaries/sox-macos`. The Full Python service currently checks bundled `sox` paths and `PATH`, so set `VOICEREADER_SOX_PATH` to the absolute path of `sox-macos/sox` when testing this sidecar. The Base app already locates that folder automatically.
 
 ## Quick API check
 
@@ -247,6 +249,7 @@ Playback controls (engine-side):
 - `Rate` (`0.25` to `4.0`) uses pitch-preserving time-stretch (faster/slower without raising/lowering voice pitch)
   - preferred path: SoX `tempo` effect when `sox` is available on PATH (better speech quality)
   - fallback path: librosa phase-vocoder (may introduce slight phasing/echo artifacts at high rates)
+  - final fallback: linear resampling, which changes pitch if both preferred paths are unavailable or fail
 - `Volume` (`0.0` to `2.0`) applies gain to PCM
 - `Pitch` is currently reserved (accepted but no-op)
 

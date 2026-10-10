@@ -4,10 +4,13 @@
   },
   "tauri": {
     "bundle": {
-      "icon": ["icons/icon.icns"],
+      "icon": [
+        "icons/icon.icns"
+      ],
       "resources": [
         "binaries/models/**/*",
         "binaries/onnxruntime/**/*",
+        "binaries/audio8-metal/**/*",
         "binaries/sox-macos/**/*",
         "binaries/kyutai-voices/**/*"
       ],

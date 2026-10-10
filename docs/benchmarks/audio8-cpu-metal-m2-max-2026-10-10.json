@@ -1,0 +1,621 @@
+[
+  {
+    "stage": "autoregressive_only",
+    "audio_seconds": 51.08390022675737,
+    "wall_seconds": 13.55464575,
+    "audio_seconds_per_second": 3.7687373885634283,
+    "chunks": 7
+  },
+  {
+    "stage": "streaming",
+    "device": "cpu",
+    "playback_rate": 1.0,
+    "first_frames": 12,
+    "first_audio_seconds": 0.852374417,
+    "wall_seconds": 29.188498333,
+    "audio_seconds": 51.08390022675737,
+    "audio_seconds_per_second": 1.7501380044962032,
+    "chunks": 7,
+    "parallel_chunks": 2,
+    "decoder_threads": 6,
+    "arrivals": [
+      {
+        "time": 0.852374417,
+        "audio_seconds": 0.5572789115646258
+      },
+      {
+        "time": 1.4090483329999999,
+        "audio_seconds": 1.1609977324263039
+      },
+      {
+        "time": 2.148127458,
+        "audio_seconds": 2.136235827664399
+      },
+      {
+        "time": 3.080058458,
+        "audio_seconds": 3.4829931972789114
+      },
+      {
+        "time": 4.178857417,
+        "audio_seconds": 5.201269841269841
+      },
+      {
+        "time": 5.159678417,
+        "audio_seconds": 6.6873469387755105
+      },
+      {
+        "time": 5.780912667,
+        "audio_seconds": 7.801904761904762
+      },
+      {
+        "time": 8.657260167,
+        "audio_seconds": 13.003174603174603
+      },
+      {
+        "time": 9.326358292,
+        "audio_seconds": 14.117732426303855
+      },
+      {
+        "time": 12.594090292,
+        "audio_seconds": 20.01560090702948
+      },
+      {
+        "time": 13.282194417,
+        "audio_seconds": 21.13015873015873
+      },
+      {
+        "time": 16.071925958,
+        "audio_seconds": 26.05278911564626
+      },
+      {
+        "time": 16.700982125,
+        "audio_seconds": 27.16734693877551
+      },
+      {
+        "time": 22.581606292,
+        "audio_seconds": 38.54512471655329
+      },
+      {
+        "time": 23.190145875,
+        "audio_seconds": 39.65968253968254
+      },
+      {
+        "time": 25.54263625,
+        "audio_seconds": 44.07147392290249
+      },
+      {
+        "time": 26.118844917,
+        "audio_seconds": 45.186031746031745
+      },
+      {
+        "time": 29.188478333,
+        "audio_seconds": 51.08390022675737
+      }
+    ],
+    "supply_simulation": {
+      "initial_play_time": 0.852374417,
+      "estimated_refills": 1,
+      "estimated_refill_wait_seconds": 1.0666863085736962,
+      "minimum_start_time_for_uninterrupted_supply": 0.9871297255736959,
+      "estimated_playback_finish": 53.002960952331065
+    }
+  },
+  {
+    "stage": "streaming",
+    "device": "cpu",
+    "playback_rate": 2.0,
+    "first_frames": 33,
+    "first_audio_seconds": 2.56240725,
+    "wall_seconds": 29.001367709,
+    "audio_seconds": 51.08390022675737,
+    "audio_seconds_per_second": 1.7614307276585612,
+    "chunks": 7,
+    "parallel_chunks": 2,
+    "decoder_threads": 6,
+    "arrivals": [
+      {
+        "time": 2.56240725,
+        "audio_seconds": 2.136235827664399
+      },
+      {
+        "time": 3.892501417,
+        "audio_seconds": 4.08671201814059
+      },
+      {
+        "time": 5.218974375,
+        "audio_seconds": 6.222947845804988
+      },
+      {
+        "time": 5.685849875,
+        "audio_seconds": 6.6873469387755105
+      },
+      {
+        "time": 5.685855084,
+        "audio_seconds": 7.801904761904762
+      },
+      {
+        "time": 6.506876459,
+        "audio_seconds": 8.916462585034013
+      },
+      {
+        "time": 8.825471375,
+        "audio_seconds": 13.003174603174603
+      },
+      {
+        "time": 9.436769417,
+        "audio_seconds": 14.117732426303855
+      },
+      {
+        "time": 12.670308584,
+        "audio_seconds": 20.01560090702948
+      },
+      {
+        "time": 13.296193792,
+        "audio_seconds": 21.13015873015873
+      },
+      {
+        "time": 16.278086792,
+        "audio_seconds": 26.05278911564626
+      },
+      {
+        "time": 16.869162959,
+        "audio_seconds": 27.16734693877551
+      },
+      {
+        "time": 22.558021959,
+        "audio_seconds": 38.54512471655329
+      },
+      {
+        "time": 23.134011209,
+        "audio_seconds": 39.65968253968254
+      },
+      {
+        "time": 25.42297725,
+        "audio_seconds": 44.07147392290249
+      },
+      {
+        "time": 26.033743209,
+        "audio_seconds": 45.186031746031745
+      },
+      {
+        "time": 29.001348125,
+        "audio_seconds": 51.08390022675737
+      }
+    ],
+    "supply_simulation": {
+      "initial_play_time": 2.56240725,
+      "estimated_refills": 5,
+      "estimated_refill_wait_seconds": 6.411941239612249,
+      "minimum_start_time_for_uninterrupted_supply": 8.974348489612247,
+      "estimated_playback_finish": 34.51629860299093
+    }
+  },
+  {
+    "stage": "streaming",
+    "device": "webgpu",
+    "playback_rate": 1.0,
+    "first_frames": 12,
+    "first_audio_seconds": 0.612013042,
+    "wall_seconds": 19.134496209,
+    "audio_seconds": 51.08390022675737,
+    "audio_seconds_per_second": 2.669727996430333,
+    "chunks": 7,
+    "parallel_chunks": 2,
+    "decoder_threads": 6,
+    "arrivals": [
+      {
+        "time": 0.612013042,
+        "audio_seconds": 0.5572789115646258
+      },
+      {
+        "time": 0.697721875,
+        "audio_seconds": 0.7430385487528345
+      },
+      {
+        "time": 0.804770292,
+        "audio_seconds": 0.9287981859410431
+      },
+      {
+        "time": 1.03517175,
+        "audio_seconds": 1.3003174603174603
+      },
+      {
+        "time": 1.1709100000000001,
+        "audio_seconds": 1.486077097505669
+      },
+      {
+        "time": 1.329430417,
+        "audio_seconds": 1.7647165532879818
+      },
+      {
+        "time": 1.5075005,
+        "audio_seconds": 1.9969160997732427
+      },
+      {
+        "time": 1.71037025,
+        "audio_seconds": 2.3219954648526078
+      },
+      {
+        "time": 1.9457401669999999,
+        "audio_seconds": 2.693514739229025
+      },
+      {
+        "time": 2.209020584,
+        "audio_seconds": 3.0650340136054424
+      },
+      {
+        "time": 2.509627917,
+        "audio_seconds": 3.5294331065759637
+      },
+      {
+        "time": 2.852040209,
+        "audio_seconds": 4.040272108843538
+      },
+      {
+        "time": 3.234563792,
+        "audio_seconds": 4.551111111111111
+      },
+      {
+        "time": 3.668373792,
+        "audio_seconds": 5.201269841269841
+      },
+      {
+        "time": 4.163134084,
+        "audio_seconds": 5.944308390022676
+      },
+      {
+        "time": 4.713182625,
+        "audio_seconds": 6.6873469387755105
+      },
+      {
+        "time": 4.713186125,
+        "audio_seconds": 7.801904761904762
+      },
+      {
+        "time": 4.909831292,
+        "audio_seconds": 8.916462585034013
+      },
+      {
+        "time": 5.42939875,
+        "audio_seconds": 13.003174603174603
+      },
+      {
+        "time": 5.536455042,
+        "audio_seconds": 14.117732426303855
+      },
+      {
+        "time": 5.748264709,
+        "audio_seconds": 15.418049886621315
+      },
+      {
+        "time": 5.987278667,
+        "audio_seconds": 15.789569160997733
+      },
+      {
+        "time": 6.262420959,
+        "audio_seconds": 16.207528344671204
+      },
+      {
+        "time": 6.575126625,
+        "audio_seconds": 16.718367346938777
+      },
+      {
+        "time": 6.933141,
+        "audio_seconds": 17.2756462585034
+      },
+      {
+        "time": 7.340086375,
+        "audio_seconds": 17.87936507936508
+      },
+      {
+        "time": 7.8054559999999995,
+        "audio_seconds": 18.622403628117915
+      },
+      {
+        "time": 8.338400374999999,
+        "audio_seconds": 19.4118820861678
+      },
+      {
+        "time": 8.912967125,
+        "audio_seconds": 20.01560090702948
+      },
+      {
+        "time": 9.020608792,
+        "audio_seconds": 21.13015873015873
+      },
+      {
+        "time": 9.515887292,
+        "audio_seconds": 26.05278911564626
+      },
+      {
+        "time": 9.623075209,
+        "audio_seconds": 27.16734693877551
+      },
+      {
+        "time": 9.813810334,
+        "audio_seconds": 28.23546485260771
+      },
+      {
+        "time": 10.031455875,
+        "audio_seconds": 28.560544217687074
+      },
+      {
+        "time": 10.28217775,
+        "audio_seconds": 28.978503401360545
+      },
+      {
+        "time": 10.5672295,
+        "audio_seconds": 29.396462585034012
+      },
+      {
+        "time": 10.892373375,
+        "audio_seconds": 29.90730158730159
+      },
+      {
+        "time": 11.264074417,
+        "audio_seconds": 30.464580498866212
+      },
+      {
+        "time": 11.688425792,
+        "audio_seconds": 31.114739229024945
+      },
+      {
+        "time": 12.167930709,
+        "audio_seconds": 31.811337868480727
+      },
+      {
+        "time": 12.717798625,
+        "audio_seconds": 32.69369614512472
+      },
+      {
+        "time": 13.342500959,
+        "audio_seconds": 33.62249433106576
+      },
+      {
+        "time": 14.055417125,
+        "audio_seconds": 34.690612244897956
+      },
+      {
+        "time": 14.863545125,
+        "audio_seconds": 35.851609977324266
+      },
+      {
+        "time": 16.47792175,
+        "audio_seconds": 37.151927437641724
+      },
+      {
+        "time": 17.925175084,
+        "audio_seconds": 38.54512471655329
+      },
+      {
+        "time": 18.034452042,
+        "audio_seconds": 39.65968253968254
+      },
+      {
+        "time": 18.47271375,
+        "audio_seconds": 44.07147392290249
+      },
+      {
+        "time": 18.577239,
+        "audio_seconds": 45.186031746031745
+      },
+      {
+        "time": 19.134426042,
+        "audio_seconds": 51.08390022675737
+      }
+    ],
+    "supply_simulation": {
+      "initial_play_time": 0.612013042,
+      "estimated_refills": 0,
+      "estimated_refill_wait_seconds": 0.0,
+      "minimum_start_time_for_uninterrupted_supply": 0.612013042,
+      "estimated_playback_finish": 51.69591326875738
+    }
+  },
+  {
+    "stage": "streaming",
+    "device": "webgpu",
+    "playback_rate": 2.0,
+    "first_frames": 33,
+    "first_audio_seconds": 1.126202333,
+    "wall_seconds": 19.819944667,
+    "audio_seconds": 51.08390022675737,
+    "audio_seconds_per_second": 2.5773987306741337,
+    "chunks": 7,
+    "parallel_chunks": 2,
+    "decoder_threads": 6,
+    "arrivals": [
+      {
+        "time": 1.126202333,
+        "audio_seconds": 1.5325170068027212
+      },
+      {
+        "time": 1.283584333,
+        "audio_seconds": 1.7647165532879818
+      },
+      {
+        "time": 1.46401025,
+        "audio_seconds": 2.043356009070295
+      },
+      {
+        "time": 1.673069458,
+        "audio_seconds": 2.36843537414966
+      },
+      {
+        "time": 1.909513042,
+        "audio_seconds": 2.7399546485260773
+      },
+      {
+        "time": 2.1791442500000002,
+        "audio_seconds": 3.1579138321995464
+      },
+      {
+        "time": 2.485873083,
+        "audio_seconds": 3.622312925170068
+      },
+      {
+        "time": 2.837924792,
+        "audio_seconds": 4.179591836734694
+      },
+      {
+        "time": 3.238337042,
+        "audio_seconds": 4.783310657596372
+      },
+      {
+        "time": 3.688349583,
+        "audio_seconds": 5.433469387755102
+      },
+      {
+        "time": 4.2035125,
+        "audio_seconds": 6.176507936507937
+      },
+      {
+        "time": 4.751763292,
+        "audio_seconds": 6.6873469387755105
+      },
+      {
+        "time": 4.75176725,
+        "audio_seconds": 7.801904761904762
+      },
+      {
+        "time": 4.948403875,
+        "audio_seconds": 8.916462585034013
+      },
+      {
+        "time": 5.46909825,
+        "audio_seconds": 13.003174603174603
+      },
+      {
+        "time": 5.577800167,
+        "audio_seconds": 14.117732426303855
+      },
+      {
+        "time": 5.799274417,
+        "audio_seconds": 15.557369614512472
+      },
+      {
+        "time": 6.050974042,
+        "audio_seconds": 15.928888888888888
+      },
+      {
+        "time": 6.3399085,
+        "audio_seconds": 16.39328798185941
+      },
+      {
+        "time": 6.670082708,
+        "audio_seconds": 16.904126984126986
+      },
+      {
+        "time": 7.0443180420000004,
+        "audio_seconds": 17.46140589569161
+      },
+      {
+        "time": 7.46521925,
+        "audio_seconds": 18.06512471655329
+      },
+      {
+        "time": 7.944733542,
+        "audio_seconds": 18.808163265306124
+      },
+      {
+        "time": 8.491702,
+        "audio_seconds": 19.59764172335601
+      },
+      {
+        "time": 9.066585875,
+        "audio_seconds": 20.01560090702948
+      },
+      {
+        "time": 9.173829875,
+        "audio_seconds": 21.13015873015873
+      },
+      {
+        "time": 9.671000083,
+        "audio_seconds": 26.05278911564626
+      },
+      {
+        "time": 9.777582792,
+        "audio_seconds": 27.16734693877551
+      },
+      {
+        "time": 9.988301958,
+        "audio_seconds": 28.46766439909297
+      },
+      {
+        "time": 10.226667958,
+        "audio_seconds": 28.83918367346939
+      },
+      {
+        "time": 10.49895025,
+        "audio_seconds": 29.257142857142856
+      },
+      {
+        "time": 10.81051625,
+        "audio_seconds": 29.72154195011338
+      },
+      {
+        "time": 11.161842958,
+        "audio_seconds": 30.232380952380954
+      },
+      {
+        "time": 11.561168583,
+        "audio_seconds": 30.83609977324263
+      },
+      {
+        "time": 12.016182167,
+        "audio_seconds": 31.532698412698412
+      },
+      {
+        "time": 12.535582708,
+        "audio_seconds": 32.275736961451244
+      },
+      {
+        "time": 13.124375625,
+        "audio_seconds": 33.158095238095235
+      },
+      {
+        "time": 13.798977208,
+        "audio_seconds": 34.13333333333333
+      },
+      {
+        "time": 14.564428625,
+        "audio_seconds": 35.15501133786848
+      },
+      {
+        "time": 15.73716725,
+        "audio_seconds": 36.40888888888889
+      },
+      {
+        "time": 17.064844417,
+        "audio_seconds": 38.17360544217687
+      },
+      {
+        "time": 18.540516625,
+        "audio_seconds": 38.54512471655329
+      },
+      {
+        "time": 18.653813667,
+        "audio_seconds": 39.65968253968254
+      },
+      {
+        "time": 19.1166255,
+        "audio_seconds": 44.07147392290249
+      },
+      {
+        "time": 19.22668675,
+        "audio_seconds": 45.186031746031745
+      },
+      {
+        "time": 19.819904208,
+        "audio_seconds": 51.08390022675737
+      }
+    ],
+    "supply_simulation": {
+      "initial_play_time": 1.126202333,
+      "estimated_refills": 1,
+      "estimated_refill_wait_seconds": 1.5357650406326524,
+      "minimum_start_time_for_uninterrupted_supply": 1.6635093237460312,
+      "estimated_playback_finish": 28.20391748701134
+    }
+  }
+]

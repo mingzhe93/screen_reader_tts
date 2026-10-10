@@ -1,6 +1,6 @@
 [package]
 name = "voicereader-desktop"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 
 [build-dependencies]
@@ -44,12 +44,11 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
-# GPU providers for the Audio8 decoder: DirectML on Windows, Core ML on macOS.
+# Audio8 decoding uses DirectML on Windows and the native WebGPU/Metal plugin on Apple Silicon.
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"], optional = true }
 libloading = { version = "0.9", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ort = { version = "=2.0.0-rc.13", default-features = false, features = ["coreml"], optional = true }
 core-graphics = "0.24"
 core-foundation = "0.10"
 objc = "0.2"

@@ -55,7 +55,10 @@ const DECODERS_ENV: &str = "VOICEREADER_AUDIO8_DECODERS";
 const DECODER_THREADS_ENV: &str = "VOICEREADER_AUDIO8_DECODER_THREADS";
 /// Overrides the Compute Device setting for testing: `auto`, `gpu` or `cpu`.
 const DECODER_DEVICE_ENV: &str = "VOICEREADER_AUDIO8_DECODER_DEVICE";
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 const DECODER_DEVICE_CACHE_FILE: &str = "audio8-decoder-device.json";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const DECODER_DEVICE_CACHE_FILE: &str = "audio8-decoder-device-webgpu-fp32.json";
 /// Benchmarking takes a few seconds, so its result is reused for this long. Hardware
 /// rarely changes; deleting the cache file forces a new benchmark.
 const DECODER_DEVICE_CACHE_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -94,9 +97,10 @@ pub fn gpu_provider_available() -> bool {
 fn auto_gpu_device() -> Option<DecoderDevice> {
     if cfg!(target_os = "windows") {
         Some(DecoderDevice::DirectMl)
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some(DecoderDevice::WebGpu)
     } else {
-        // Core ML is wired up but has not been tested on a Mac, so it is opt-in
-        // (VOICEREADER_AUDIO8_DECODER_DEVICE=gpu) until it has.
+        // Intel macOS and other platforms keep the validated CPU path.
         None
     }
 }
@@ -104,8 +108,8 @@ fn auto_gpu_device() -> Option<DecoderDevice> {
 fn forced_gpu_device() -> Option<DecoderDevice> {
     if cfg!(target_os = "windows") {
         Some(DecoderDevice::DirectMl)
-    } else if cfg!(target_os = "macos") {
-        Some(DecoderDevice::CoreMl)
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some(DecoderDevice::WebGpu)
     } else {
         None
     }
@@ -126,7 +130,7 @@ fn unix_now() -> u64 {
 }
 
 fn device_from_label(label: &str) -> Option<DecoderDevice> {
-    [DecoderDevice::Cpu, DecoderDevice::DirectMl, DecoderDevice::CoreMl]
+    [DecoderDevice::Cpu, DecoderDevice::DirectMl, DecoderDevice::WebGpu]
         .into_iter()
         .find(|device| device.label() == label)
 }
@@ -325,7 +329,7 @@ impl LocalAudio8Runtime {
         Ok(runtime)
     }
 
-    /// Where the codec decoder ended up running ("cpu", "directml", "coreml").
+    /// Where the codec decoder ended up running ("cpu", "directml", "webgpu").
     pub fn decoder_device_label(&self) -> &'static str {
         self.model.decoder_device().label()
     }
@@ -568,6 +572,90 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
+    /// Repeatable backend throughput measurements; PCM arrival traces allow analysis
+    /// of playback supply at 1x/2x without conflating it with decoder-only timing.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    #[ignore = "needs the real Audio8 model and Metal; takes several minutes"]
+    fn measure_cpu_and_metal_streaming_throughput() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let model_dir = PathBuf::from(std::env::var("VOICEREADER_AUDIO8_TEST_MODEL_DIR").unwrap());
+        let output_dir = PathBuf::from(std::env::var("VOICEREADER_AUDIO8_BENCHMARK_OUTPUT_DIR").unwrap());
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let text = "VoiceReader turns highlighted text into speech, making longer articles easier to follow. \
+            The application generates small pieces of audio while the earlier words are already playing. \
+            This passage measures how quickly the complete system can supply clear, continuous speech. \
+            At double speed, playback consumes two seconds of generated audio every second. \
+            A faster decoder helps, but the language model still has to predict each audio frame. \
+            We compare the same sentences and the same random seeds on both devices. \
+            The result shows whether the audio buffer grows steadily or needs to pause and refill. \
+            These measurements describe this Mac and this passage rather than every possible voice and computer.";
+        let mut records = Vec::new();
+        let mut expected_samples = None;
+        for (device, preference) in [(DecoderDevice::Cpu, ComputePreference::Cpu), (DecoderDevice::WebGpu, ComputePreference::Gpu)] {
+            let data = output_dir.join(device.label());
+            std::fs::create_dir_all(&data).unwrap();
+            let mut runtime = LocalAudio8Runtime::new(&model_dir, &data, preference).unwrap();
+            assert_eq!(runtime.model.decoder_device(), device, "benchmark fell back");
+            let prefix = runtime.resolve_prefix(BUILTIN_VOICE_ID).unwrap();
+            let model = runtime.model.clone();
+            let sample_rate = model.sample_rate();
+            let hop = model.manifest().codec_hop_length;
+            let plans: Vec<ChunkPlan> = chunk_text(&normalize_for_speech(text), &[80.0, 120.0, 160.0])
+                .into_iter().enumerate().map(|(index, piece)| ChunkPlan {
+                    params: GenParams {
+                        seed: Some(42 + index as u64),
+                        max_new_frames: max_frames_for_text(&piece, sample_rate, hop),
+                        ..GenParams::default()
+                    },
+                    text: piece,
+                }).collect();
+            if device == DecoderDevice::Cpu {
+                let next = AtomicUsize::new(0);
+                let frames = AtomicUsize::new(0);
+                let started = Instant::now();
+                let cancel = AtomicBool::new(false);
+                std::thread::scope(|scope| {
+                    for _ in 0..model.ar_pool_size() {
+                        scope.spawn(|| loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            if index >= plans.len() { break; }
+                            let count = model.generate(&prefix, &plans[index].text, &plans[index].params, &cancel, |_| Ok(())).unwrap();
+                            frames.fetch_add(count, Ordering::Relaxed);
+                        });
+                    }
+                });
+                let audio_seconds = frames.load(Ordering::Relaxed) as f64 * hop as f64 / sample_rate as f64;
+                let elapsed = started.elapsed().as_secs_f64();
+                let row = json!({"stage":"autoregressive_only", "audio_seconds":audio_seconds, "wall_seconds":elapsed, "audio_seconds_per_second":audio_seconds/elapsed, "chunks":plans.len()});
+                println!("BENCHMARK {row}");
+                records.push(row);
+            }
+            for rate in [1.0f32, 2.0] {
+                let first_frames = first_frames_for_rate(rate, hop as f32 / sample_rate as f32, false);
+                let cancel = AtomicBool::new(false);
+                let started = Instant::now();
+                let mut arrivals = Vec::new();
+                let mut samples = 0usize;
+                assert!(model.synthesize_chunks(&prefix, &plans, first_frames, &cancel, |audio| {
+                    // Include the app's PCM conversion work, but omit IPC/audio-device time.
+                    let pcm: Vec<i16> = audio.iter().map(|sample| (sample.clamp(-1.0,1.0)*32767.0) as i16).collect();
+                    samples += pcm.len();
+                    arrivals.push(json!({"time":started.elapsed().as_secs_f64(),"audio_seconds":samples as f64/sample_rate as f64}));
+                    Ok(())
+                }).unwrap());
+                let elapsed = started.elapsed().as_secs_f64();
+                if let Some(expected) = expected_samples { assert_eq!(samples, expected, "generation changed between runs"); }
+                else { expected_samples = Some(samples); }
+                let audio_seconds = samples as f64 / sample_rate as f64;
+                let row = json!({"stage":"streaming", "device":device.label(), "playback_rate":rate, "first_frames":first_frames, "first_audio_seconds":arrivals[0]["time"], "wall_seconds":elapsed, "audio_seconds":audio_seconds, "audio_seconds_per_second":audio_seconds/elapsed,"chunks":plans.len(),"parallel_chunks":model.ar_pool_size(),"decoder_threads":runtime.decoder_threads,"arrivals":arrivals});
+                println!("BENCHMARK {}", json!({"device":device.label(),"playback_rate":rate,"first_audio_seconds":row["first_audio_seconds"],"wall_seconds":elapsed,"audio_seconds":audio_seconds,"audio_seconds_per_second":audio_seconds/elapsed}));
+                records.push(row);
+                std::fs::write(output_dir.join("results.json"), serde_json::to_string_pretty(&records).unwrap()).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn first_frames_grow_with_playback_rate() {
         let frame_seconds = 2048.0 / 44100.0;
@@ -625,6 +713,10 @@ mod tests {
             runtime.model.decoder_device().label(),
             runtime.decoder_note
         );
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if std::env::var(DECODER_DEVICE_ENV).as_deref() == Ok("gpu") {
+            assert_eq!(runtime.model.decoder_device(), DecoderDevice::WebGpu, "GPU trial fell back to CPU");
+        }
         let sample_rate = runtime.model.sample_rate();
         let text = "VoiceReader reads highlighted text aloud. 今天天气很好，我们一起去公园散步吧。";
 
@@ -659,6 +751,16 @@ mod tests {
 
         let (normal_pcm, normal_seconds) = speak(&mut runtime, BUILTIN_VOICE_ID, 4);
         assert!(normal_seconds > 3.0 && normal_seconds < 30.0);
+        if let Some(output_dir) = std::env::var_os("VOICEREADER_AUDIO8_TEST_OUTPUT_DIR") {
+            let output_dir = PathBuf::from(output_dir);
+            std::fs::create_dir_all(&output_dir).unwrap();
+            let path = output_dir.join(format!("speech-{}.wav", runtime.model.decoder_device().label()));
+            let mut wav = hound::WavWriter::create(path, hound::WavSpec {
+                channels: 1, sample_rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int,
+            }).unwrap();
+            for sample in &normal_pcm { wav.write_sample(*sample).unwrap(); }
+            wav.finalize().unwrap();
+        }
         let (_, fast_seconds) = speak(&mut runtime, BUILTIN_VOICE_ID, 6);
         if player_applies_rate() {
             // The player applies the speed, so 1.5x must not shorten the audio here. Stretched

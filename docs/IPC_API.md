@@ -2,7 +2,7 @@ VoiceReader Engine API (Python sidecar, Full build only)
 
 > **This API applies to the Full build (`build-full`) only.** The Base build (`build-base`, the default) has no sidecar and no localhost API. Kyutai Pocket TTS, Audio8 TTS and transcription run inside the Rust process, and the Rust code talks to the frontend through Tauri commands and events. The Base build's interface is those commands and events, described in `docs/DESIGN_SPEC.md` (section 6, and section 15 for transcription). The sidecar has no transcription endpoint. The Full build is kept for future heavier models and is not actively used.
 >
-> This document describes `tts-engine/src/tts_engine/` (`app.py`, `schemas.py`, `jobs.py`, `auth.py`, `errors.py`, `chunking.py`, `config.py`) for engine version 0.2.2. This release changes the version metadata; the sidecar API contract is unchanged.
+> This document describes `tts-engine/src/tts_engine/` (`app.py`, `schemas.py`, `jobs.py`, `auth.py`, `errors.py`, `chunking.py`, `config.py`) for engine version 0.2.3. v0.2.3 changes the sidecar version metadata; its API contract is unchanged. Native macOS Metal support belongs to the Base build and adds no sidecar endpoint or GPU control here. See [DESIGN_SPEC.md](DESIGN_SPEC.md) and [METAL.md](METAL.md).
 
 ## 1. Overview
 The Python sidecar exposes an HTTP and WebSocket API. The desktop app starts it as a child process.
@@ -92,7 +92,7 @@ Codes the sidecar returns:
 ## 4. HTTP API (`/v1`)
 
 ### 4.1 `GET /health`
-Returns runtime health and capabilities: `engine_version` (`"0.2.2"`), `active_model_id`, `device`, `capabilities` (`supports_voice_clone`, `supports_audio_chunk_stream`, `supports_true_streaming_inference`, `languages`) and `runtime` (`backend`, `model_loaded`, `fallback_active`, `detail`, `supports_default_voice`, `supports_cloned_voices`, `warmup`). The `warmup` object has `status`, `runs`, `last_reason`, `last_started_at`, `last_completed_at`, `last_duration_ms` and `last_error`.
+Returns runtime health and capabilities: `engine_version` (`"0.2.3"`), `active_model_id`, `device`, `capabilities` (`supports_voice_clone`, `supports_audio_chunk_stream`, `supports_true_streaming_inference`, `languages`) and `runtime` (`backend`, `model_loaded`, `fallback_active`, `detail`, `supports_default_voice`, `supports_cloned_voices`, `warmup`). The `warmup` object has `status`, `runs`, `last_reason`, `last_started_at`, `last_completed_at`, `last_duration_ms` and `last_error`.
 
 `backend` is one of `kyutai_pocket_tts`, `qwen_custom_voice` or `mock`.
 

@@ -80,6 +80,19 @@ def _package_macos(target_release: Path, product_name: str, version: str, varian
     ).split()
     if arch not in runtime_arch:
         raise RuntimeError(f"App architecture {arch} does not match ONNX Runtime {runtime_arch}.")
+    if arch == "arm64":
+        plugin = resources / "onnxruntime/libonnxruntime_providers_webgpu.dylib"
+        if not plugin.is_file():
+            raise RuntimeError("The Apple Silicon app requires its bundled WebGPU plugin.")
+        plugin_arch = subprocess.check_output(["lipo", "-archs", str(plugin)], text=True).split()
+        if arch not in plugin_arch:
+            raise RuntimeError(f"WebGPU plugin does not support {arch}: {plugin_arch}")
+        for relative in ["audio8-metal/codec_decoder_fp32.onnx", "audio8-metal/codec_decoder_fp16.source.onnx", "audio8-metal/LICENSE", "audio8-metal/NOTICE"]:
+            if not (resources / relative).is_file():
+                raise RuntimeError(f"Required FP32 decoder asset missing: {resources / relative}")
+    # Seal all bundled libraries and resources after Tauri has assembled the app.
+    subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
     zip_path = target_release / "bundle" / "portable" / f"{product_name}_{version}_macos_{arch_label}_portable.zip"
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     # ditto preserves app permissions, symlinks and macOS bundle metadata.

@@ -28,7 +28,7 @@ class EngineConfig:
     port: int
     data_dir: Path
     active_model_id: str = DEFAULT_MODEL_ID
-    engine_version: str = "0.2.2"
+    engine_version: str = "0.2.3"
     synth_backend: str = DEFAULT_SYNTH_BACKEND
     qwen_model_name: str = DEFAULT_QWEN_MODEL_NAME
     qwen_device_map: str = DEFAULT_QWEN_DEVICE_MAP

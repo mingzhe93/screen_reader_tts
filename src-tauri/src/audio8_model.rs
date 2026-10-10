@@ -55,8 +55,8 @@ pub enum DecoderDevice {
     Cpu,
     /// DirectML on Windows: any DirectX 12 GPU (NVIDIA, AMD, Intel, integrated or not).
     DirectMl,
-    /// Core ML on macOS (GPU or Neural Engine).
-    CoreMl,
+    /// Native WebGPU through Dawn's Metal backend (Apple Silicon macOS).
+    WebGpu,
 }
 
 impl DecoderDevice {
@@ -64,7 +64,7 @@ impl DecoderDevice {
         match self {
             DecoderDevice::Cpu => "cpu",
             DecoderDevice::DirectMl => "directml",
-            DecoderDevice::CoreMl => "coreml",
+            DecoderDevice::WebGpu => "webgpu",
         }
     }
 }
@@ -235,6 +235,9 @@ pub struct Audio8Model {
     suffix_tokens: Vec<i64>,
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static WEBGPU_LIBRARY_PATH: OnceLock<PathBuf> = OnceLock::new();
+
 /// Loads the ONNX Runtime shared library. Must succeed once before any model is loaded;
 /// later calls return the first result.
 pub fn init_onnxruntime(library_path: &Path) -> Result<()> {
@@ -261,6 +264,10 @@ pub fn init_onnxruntime(library_path: &Path) -> Result<()> {
         match ort::init_from(library_path) {
             Ok(builder) => {
                 builder.commit();
+                #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+                if let Some(parent) = library_path.parent() {
+                    let _ = WEBGPU_LIBRARY_PATH.set(parent.join("libonnxruntime_providers_webgpu.dylib"));
+                }
                 Ok(())
             }
             Err(err) => Err(format!(
@@ -275,6 +282,51 @@ pub fn init_onnxruntime(library_path: &Path) -> Result<()> {
 
 fn ort_err<E: std::fmt::Display>(err: E) -> anyhow::Error {
     anyhow!("{err}")
+}
+
+/// Register lazily: a missing plugin must not prevent CPU TTS or transcription.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn register_webgpu() -> Result<()> {
+    static REGISTRATION: OnceLock<std::result::Result<ort::ep::ExecutionProviderLibrary, String>> = OnceLock::new();
+    REGISTRATION
+        .get_or_init(|| {
+            let path = WEBGPU_LIBRARY_PATH.get().ok_or("ONNX Runtime must be initialized before WebGPU")?;
+            if !path.is_file() {
+                return Err(format!("WebGPU plugin was not found at {}", path.display()));
+            }
+            ort::environment::Environment::current()
+                .and_then(|env| env.register_ep_library("voicereader_webgpu", path))
+                .map_err(|err| format!("Failed to register WebGPU: {err}"))
+        })
+        .as_ref()
+        .map(|_| ())
+        .map_err(|message| anyhow!("{message}"))
+}
+
+/// The CPU EP promotes this export's math to FP32 internally. Native WebGPU's
+/// FP16 math corrupted speech, so use the validated FP32-compute graph there too.
+/// It is small: weight casts reuse the existing, unchanged FP16 external data.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn webgpu_decoder_path(original: &Path) -> Result<PathBuf> {
+    use crate::bundled_paths::{find_bundled_file, search_roots};
+    static PREPARE: Mutex<()> = Mutex::new(());
+    let _guard = PREPARE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let graph = find_bundled_file(
+        &search_roots(), "audio8-metal", "codec_decoder_fp32.onnx",
+        &["src-tauri/binaries/audio8-metal/codec_decoder_fp32.onnx".to_string()],
+    ).ok_or_else(|| anyhow!("The validated FP32 Metal decoder graph is missing from this app"))?;
+    let expected_source = graph.with_file_name("codec_decoder_fp16.source.onnx");
+    if std::fs::read(original)? != std::fs::read(expected_source)? {
+        bail!("The Audio8 export differs from the one validated for Metal; using CPU is required");
+    }
+    let destination = original.with_file_name("codec_decoder_webgpu_fp32_v1.onnx");
+    let bytes = std::fs::read(&graph)?;
+    if std::fs::read(&destination).ok().as_deref() != Some(bytes.as_slice()) {
+        let temporary = destination.with_extension(format!("onnx.tmp-{}", std::process::id()));
+        std::fs::write(&temporary, &bytes).context("Failed to cache the FP32 Metal decoder graph")?;
+        std::fs::rename(&temporary, &destination).context("Failed to finish caching the FP32 Metal decoder graph")?;
+    }
+    Ok(destination)
 }
 
 fn build_session(path: &Path, intra_threads: usize) -> Result<Session> {
@@ -299,6 +351,15 @@ fn build_decoder_session(path: &Path, device: DecoderDevice, cpu_threads: usize)
     if !path.is_file() {
         bail!("ONNX model was not found: {}", path.display());
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let prepared_path;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let path = if device == DecoderDevice::WebGpu {
+        prepared_path = webgpu_decoder_path(path)?;
+        prepared_path.as_path()
+    } else {
+        path
+    };
     let builder = Session::builder()
         .map_err(ort_err)?
         .with_optimization_level(GraphOptimizationLevel::All)
@@ -319,13 +380,26 @@ fn build_decoder_session(path: &Path, device: DecoderDevice, cpu_threads: usize)
                 .build()
                 .error_on_failure()])
             .map_err(ort_err)?,
-        #[cfg(target_os = "macos")]
-        DecoderDevice::CoreMl => builder
-            .with_execution_providers([ort::ep::CoreML::default().build().error_on_failure()])
-            .map_err(ort_err)?,
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        DecoderDevice::WebGpu => {
+            register_webgpu()?;
+            let env = ort::environment::Environment::current().map_err(ort_err)?;
+            let device = env
+                .devices()
+                .find(|device| device.ep().ok() == Some("WebGpuExecutionProvider"))
+                .ok_or_else(|| anyhow!("WebGPU did not discover a compatible Metal device"))?;
+            // Plugin EPs use the device API, rather than the legacy built-in WebGPU API.
+            builder.with_devices([device], None).map_err(ort_err)?
+        }
         #[allow(unreachable_patterns)]
         other => bail!("The {} decoder device is not available on this platform", other.label()),
     };
+    #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+    if let Some(dir) = std::env::var_os("VOICEREADER_AUDIO8_TEST_OUTPUT_DIR") {
+        builder = builder
+            .with_profiling(PathBuf::from(dir).join(format!("decoder-{}", device.label())))
+            .map_err(ort_err)?;
+    }
     builder
         .commit_from_file(path)
         .map_err(ort_err)
@@ -1486,6 +1560,120 @@ pub fn load_wav_mono(wav_bytes: &[u8], target_rate: u32) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Checks the native Rust/plugin path, including actual GPU kernel placement.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    #[ignore = "needs the Audio8 model, WebGPU plugin and a Metal GPU"]
+    fn webgpu_decodes_reference_audio() {
+        crate::audio8_local::ensure_onnxruntime().unwrap();
+        let model_dir = PathBuf::from(std::env::var("VOICEREADER_AUDIO8_TEST_MODEL_DIR").unwrap());
+        let output_dir = PathBuf::from(std::env::var("VOICEREADER_AUDIO8_TEST_OUTPUT_DIR").unwrap());
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let manifest: Manifest = serde_json::from_str(
+            &std::fs::read_to_string(model_dir.join("runtime_manifest.json")).unwrap(),
+        ).unwrap();
+        let codes = read_codes_npy(&model_dir.join("reference_codes.npy"), manifest.num_codebooks).unwrap();
+        let mut outputs = Vec::new();
+        for device in [DecoderDevice::Cpu, DecoderDevice::WebGpu] {
+            let mut session = build_decoder_session(&model_dir.join("codec_decoder_fp16.onnx"), device, 8).unwrap();
+            let mut pcm = Vec::new();
+            // Warm-up first, then report a repeat of the same full reference clip.
+            for _ in 0..2 {
+                let started = std::time::Instant::now();
+                let result = session.run(ort::inputs![
+                    "codes" => TensorRef::from_array_view((
+                        vec![1i64, manifest.num_codebooks as i64, codes.frames as i64], &codes.data[..]
+                    )).unwrap(),
+                ]).unwrap();
+                pcm = result[0].try_extract_tensor::<f32>().unwrap().1.to_vec();
+                println!("{}: {} frames decoded in {:.0} ms", device.label(), codes.frames, started.elapsed().as_secs_f64() * 1000.0);
+            }
+            assert_eq!(pcm.len(), codes.frames * manifest.codec_hop_length);
+            assert!(pcm.iter().all(|sample| sample.is_finite()));
+            assert!(pcm.iter().any(|sample| sample.abs() > 0.01), "silent output");
+            let profile = session.end_profiling().unwrap();
+            let profile: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(profile).unwrap()).unwrap();
+            if device == DecoderDevice::WebGpu {
+                let gpu_nodes = profile.as_array().unwrap().iter()
+                    .filter(|event| event["args"]["provider"] == "WebGpuExecutionProvider").count();
+                println!("WebGPU kernel events: {gpu_nodes}");
+                assert!(gpu_nodes > 0, "decoder silently ran entirely on CPU");
+            }
+            let mut wav = hound::WavWriter::create(output_dir.join(format!("reference-{}.wav", device.label())), hound::WavSpec {
+                channels: 1, sample_rate: manifest.sample_rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float,
+            }).unwrap();
+            for sample in &pcm { wav.write_sample(*sample).unwrap(); }
+            wav.finalize().unwrap();
+            outputs.push(pcm);
+        }
+        let signal: f64 = outputs[0].iter().map(|sample| (*sample as f64).powi(2)).sum();
+        let difference: f64 = outputs[0].iter().zip(&outputs[1]).map(|(a, b)| (*a as f64 - *b as f64).powi(2)).sum();
+        let relative_rms = (difference / signal).sqrt();
+        println!("CPU/WebGPU relative RMS difference: {:.4}%", relative_rms * 100.0);
+        assert!(relative_rms < 0.001, "Metal decoder differs from CPU by {:.2}%; precision regression", relative_rms * 100.0);
+    }
+
+    /// Same deterministic codes through full CPU decoding and actual GPU streaming.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    #[ignore = "needs the Audio8 model, FP32 decoder assets and a Metal GPU"]
+    fn webgpu_streaming_matches_cpu_for_generated_speech() {
+        crate::audio8_local::ensure_onnxruntime().unwrap();
+        let model_dir = PathBuf::from(std::env::var("VOICEREADER_AUDIO8_TEST_MODEL_DIR").unwrap());
+        let output_dir = PathBuf::from(std::env::var("VOICEREADER_AUDIO8_TEST_OUTPUT_DIR").unwrap());
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let model = Audio8Model::load(&model_dir, 1, 1, 8, DecoderDevice::WebGpu).unwrap();
+        let (reference_codes, reference_text) = model.builtin_voice().unwrap();
+        let prefix = model.build_voice_prefix(&reference_text, &reference_codes).unwrap();
+        let text = "VoiceReader reads highlighted text aloud. 今天天气很好，我们一起去公园散步吧。";
+        let params = GenParams { seed: Some(42), max_new_frames: 256, ..GenParams::default() };
+        let cancel = AtomicBool::new(false);
+        let mut frame_codes = Vec::new();
+        let frames = model.generate(&prefix, text, &params, &cancel, |codes| {
+            frame_codes.extend_from_slice(codes);
+            Ok(())
+        }).unwrap();
+        assert!(frames > 24);
+        let codebooks = model.manifest.num_codebooks;
+        let mut codes = vec![0i64; frame_codes.len()];
+        for book in 0..codebooks {
+            for frame in 0..frames {
+                codes[book * frames + frame] = frame_codes[frame * codebooks + book];
+            }
+        }
+        let mut cpu = build_decoder_session(&model_dir.join("codec_decoder_fp16.onnx"), DecoderDevice::Cpu, 8).unwrap();
+        let result = cpu.run(ort::inputs![
+            "codes" => TensorRef::from_array_view((vec![1i64, codebooks as i64, frames as i64], &codes[..])).unwrap(),
+        ]).unwrap();
+        let cpu_audio = result[0].try_extract_tensor::<f32>().unwrap().1.to_vec();
+        let full_gpu_audio = model.decode(&frame_codes, 0, frames).unwrap();
+        let mut streamed = Vec::new();
+        let started = std::time::Instant::now();
+        let mut first_audio = None;
+        assert!(model.synthesize_chunks(&prefix, &[ChunkPlan { text: text.to_string(), params }], 12, &cancel, |audio| {
+            first_audio.get_or_insert(started.elapsed());
+            streamed.extend_from_slice(audio);
+            Ok(())
+        }).unwrap());
+        println!("FP32 Metal stream: first audio {:.2}s, total {:.2}s, output {:.2}s", first_audio.unwrap().as_secs_f64(), started.elapsed().as_secs_f64(), streamed.len() as f64 / model.sample_rate() as f64);
+        for (name, audio) in [("parity-speech-webgpu-full", &full_gpu_audio), ("parity-speech-webgpu", &streamed)] {
+            assert_eq!(audio.len(), cpu_audio.len(), "samples lost in {name}");
+            assert!(audio.iter().all(|sample| sample.is_finite()));
+            let signal: f64 = cpu_audio.iter().map(|sample| (*sample as f64).powi(2)).sum();
+            let difference: f64 = audio.iter().zip(&cpu_audio).map(|(a, b)| (*a as f64 - *b as f64).powi(2)).sum();
+            let relative_rms = (difference / signal).sqrt();
+            println!("{name} versus CPU: {:.4}% relative RMS difference", relative_rms * 100.0);
+            assert!(relative_rms < 0.001, "{name} differs from CPU by {:.2}%", relative_rms * 100.0);
+        }
+        for (name, audio) in [("parity-speech-cpu", &cpu_audio), ("parity-speech-webgpu", &streamed)] {
+            let mut wav = hound::WavWriter::create(output_dir.join(format!("{name}.wav")), hound::WavSpec {
+                channels: 1, sample_rate: model.sample_rate(), bits_per_sample: 32, sample_format: hound::SampleFormat::Float,
+            }).unwrap();
+            for sample in audio { wav.write_sample(*sample).unwrap(); }
+            wav.finalize().unwrap();
+        }
+    }
 
     #[test]
     fn clean_text_collapses_whitespace_and_cjk_line_breaks() {

@@ -1,6 +1,6 @@
 {
   "name": "voicereader-desktop",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,7 +12,7 @@
     "onnxruntime:fetch": "node scripts/fetch-onnxruntime.js",
     "kyutai-voices:fetch": "node scripts/fetch-kyutai-voices.js",
     "test:player": "node scripts/test-tempo-stretch.mjs",
-    "assets:fetch": "npm run onnxruntime:fetch && npm run kyutai-voices:fetch",
+    "assets:fetch": "npm run onnxruntime:fetch && node scripts/fetch-webgpu-macos.js && npm run kyutai-voices:fetch",
     "predesktop:dev": "node scripts/sync-version.js && npm run assets:fetch",
     "desktop:dev": "tauri dev --features build-base",
     "predesktop:dev:full": "node scripts/sync-version.js",

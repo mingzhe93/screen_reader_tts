@@ -1,11 +1,11 @@
 # VoiceReader
 
-Version 0.2.2. A desktop app that reads highlighted text aloud and turns speech into a transcript with speaker labels.
+Version 0.2.3. A desktop app that reads highlighted text aloud and turns speech into a transcript with speaker labels.
 
 - **Read aloud.** Highlight text in any app, press a hotkey, and hear it spoken. The voices are open-weight text-to-speech models, with voice cloning from a short clip.
 - **Transcribe.** Record from the microphone, or pick a recording, and get a transcript that labels who spoke. It tells up to 8 speakers apart. English only.
 - **Local.** The models run on your own computer. After the one-time model downloads, nothing is sent to a cloud service while you use it.
-- **Platforms.** Windows and macOS (Apple Silicon, macOS 14 or newer) work. Audio8 GPU acceleration is available on Windows; it is not available yet on macOS, where Audio8 runs on the CPU. On Linux the hotkey flow does not work (see [Platform status](#platform-status)).
+- **Platforms.** Windows and macOS (Apple Silicon, macOS 14 or newer) work. Audio8 GPU decoding uses DirectML on Windows and native WebGPU/Metal on Apple Silicon macOS. The FP32 Metal decoder has passed listening and waveform checks on an M2 Max. On Linux the hotkey flow does not work (see [Platform status](#platform-status)).
 - **Stack.** A Tauri 1.x desktop app: a Vite/TypeScript frontend and a Rust backend.
 
 ## How to use
@@ -15,11 +15,30 @@ Version 0.2.2. A desktop app that reads highlighted text aloud and turns speech 
    - **Windows (x64):** `VoiceReader-portable-win-x64.zip`
 2. Extract the ZIP and open VoiceReader. On macOS, open `VoiceReader.app` and allow **Accessibility** access in System Settings > Privacy & Security so it can read highlighted text. Allow **Microphone** access when prompted if you want to record.
 3. To read text aloud, **highlight text in another app and press the hotkey** shown on the Read aloud page. The defaults are **Ctrl+Shift+S on macOS** and **Alt+S on Windows**. Keep the source app focused when you press it. Kyutai's English voices are included, and a floating toolbar appears while reading.
-4. For **Chinese text**, first open **Models** and download **Audio8 TTS**, then select Audio8 on the Read aloud page. **macOS Audio8 uses the CPU; GPU acceleration is not available yet.**
+4. For **Chinese text**, first open **Models** and download **Audio8 TTS**, then select Audio8 on the Read aloud page. On Apple Silicon macOS, Auto benchmarks CPU against Metal decoding; you can also select GPU or CPU in Settings.
 5. For **transcription**, first open **Models** and download **Transcription**. Then open **Transcribe** to record and transcribe your microphone in real time, or choose an existing recording. Transcription currently supports English only.
 6. After transcribing, choose **Copy**, **Transcription** (text, Markdown or SRT), or **Recording & transcription** (a ZIP containing the audio and a text transcript). Stop a live recording before exporting it, and save it before starting another transcription or closing the app.
 
 To build from source, see [Development setup](#development-setup-base-build).
+
+### First launch on macOS
+
+VoiceReader is free to use. The macOS app is ad hoc signed, but is not Developer ID
+signed or notarized by Apple, so macOS may show **“VoiceReader.app Not Opened”** or
+**“Apple could not verify VoiceReader.app is free of malware.”**
+
+If you downloaded VoiceReader from this repository's GitHub release and want to open it:
+
+1. Click **Done** in the warning.
+2. Open **System Settings → Privacy & Security**.
+3. Scroll to the **Security** section and click **Open Anyway** for VoiceReader.
+4. Authenticate if prompted, then confirm **Open**.
+
+This creates an exception for this copy of VoiceReader. A later downloaded version
+may require the same steps again. Keep Gatekeeper enabled; there is no need to
+disable macOS security protections globally.
+
+[Apple's instructions for opening an app from an unidentified developer](https://support.apple.com/en-us/102445).
 
 ## What it can do
 
@@ -28,7 +47,7 @@ To build from source, see [Development setup](#development-setup-base-build).
 - Change the playback speed from `0.25x` to `4.0x` while audio is playing. The change is heard at once, and the pitch stays the same.
 - Clone a voice from a WAV clip, save it, and reuse it. The Transcribe audio button fills in the clip's transcript for you (English only; it uses the transcription model and offers to download it if it is missing). Saved voices can be renamed, annotated and deleted on the Voices page.
 - Choose from 21 preset voices with Kyutai Pocket TTS.
-- Run models on the CPU, and move part of Audio8 to a GPU on Windows when that is faster (see Compute device below).
+- Run models on the CPU, and move Audio8's codec decoder to a GPU when that is faster: DirectML on Windows, or WebGPU/Metal on Apple Silicon macOS (see Compute device below).
 - Transcribe speech on the Transcribe page, with a label per speaker and the transcript shown while it is produced. Press Record to transcribe the microphone live, or choose or drop a WAV, MP3, M4A, MP4, FLAC or OGG Vorbis file. Each of the 8 speakers has its own label colour. Speakers can be renamed, and the transcript can be copied or exported as text, Markdown or SRT subtitles. English only.
 
 The main window has a sidebar with five pages: Read aloud, Voices, Transcribe, Models and Settings.
@@ -57,11 +76,11 @@ Notes on the table:
 
 Runtimes the models run on:
 
-- [ONNX Runtime](https://github.com/microsoft/onnxruntime) runs Audio8 and the transcription models. The app loads its shared library at run time; `scripts/fetch-onnxruntime.js` downloads it.
+- [ONNX Runtime](https://github.com/microsoft/onnxruntime) runs Audio8 and the transcription models. The app loads its shared library at run time; `scripts/fetch-onnxruntime.js` downloads it. Apple Silicon builds also fetch a native WebGPU plugin with `scripts/fetch-webgpu-macos.js`.
 - [`pocket-tts`](https://github.com/babybirdprd/pocket-tts) is the Rust crate that runs Kyutai Pocket TTS.
 - [`parakeet-rs`](https://github.com/altunenes/parakeet-rs) is the Rust crate that runs the transcription models. A patched copy is vendored in `src-tauri/vendor/parakeet-rs` (see Licence).
 
-Speed, memory and measurements for Audio8 are in `docs/learnings.md` section 7, and for transcription in section 12. Kyutai is much faster than Audio8 for English. Audio8 is usable up to about 1.5x playback on the machine it was measured on.
+Speed, memory and measurements are in [the learnings](docs/learnings.md): Audio8 CPU in section 7, Windows GPU in section 11, transcription in section 12, and macOS Metal in section 15. Kyutai is much faster than Audio8 for English. Audio8 CPU playback above about 1.5x can exhaust the buffer on the measured machines. On the M2 Max, Metal supplied about 2.58 seconds of speech per second at the 2x setting, but bursty delivery can still cause early refilling; continuous 2x playback in the packaged app has not been measured.
 
 ## Builds
 
@@ -70,20 +89,21 @@ Two builds exist. They are chosen by Cargo feature, and exactly one must be enab
 - **Base** (`build-base`) is the product and the default for the npm scripts. Everything runs inside the Rust process. There is no Python at run time.
 - **Full** (`build-full`) starts a Python sidecar (`tts-engine/`) and adds the Qwen models. It is kept for future heavier models and is not actively used.
 
+The Base build includes native Metal decoding on Apple Silicon macOS from v0.2.3. It uses the same Rust/ONNX backend, with no Python or MLX runtime in the app.
+
 ## Platform status
 
 | Platform | Status |
 |---|---|
 | Windows | Primary and tested platform. Selection capture sends Ctrl+C with `SendInput`. The source label comes from the foreground window title. Audio8 can decode on any DirectX 12 GPU through DirectML. |
-| macOS | Working on Apple Silicon with macOS 14 or newer. The portable app, model downloads, highlighted-text hotkey and floating playback toolbar have been tested. Selection capture requires Accessibility permission; microphone recording requires Microphone permission. SoX is bundled to preserve pitch when changing speed. Audio8 runs on the CPU: macOS GPU acceleration is not available yet. Intel and universal builds still need verification. |
+| macOS | Working on Apple Silicon with macOS 14 or newer. The portable app, model downloads, highlighted-text hotkey and floating playback toolbar have been tested. Selection capture requires Accessibility permission; microphone recording requires Microphone permission. The player preserves pitch when changing speed; bundled SoX prepares cloning clips and supports the older backend speed path. Audio8 supports FP32 Metal GPU decoding from v0.2.3, validated on an M2 Max running macOS 27.0.1. Other Mac chips/OS versions, and Intel/universal releases, still need verification. Intel uses CPU. |
 | Linux | Not supported for the hotkey flow: simulated copy and source-window lookup are not implemented. `scripts/fetch-onnxruntime.js` has a Linux x64 download, and SoX is looked up on `PATH`, but nothing else about Linux is covered. |
 
 ## Known limitations
 
 - Kyutai is English only. Use Audio8 for Chinese.
-- Audio8 runs generation on the CPU and is close to real time. Playback above about 1.5x can stutter.
-- Audio8 GPU acceleration is not available yet on macOS. Use the CPU; choosing GPU currently falls back to CPU.
-- Speed changes do not raise how fast a model can generate. Audio8 still stutters above about 1.5x.
+- Audio8's autoregressive generation stays on the CPU. Faster playback consumes audio faster without increasing generation throughput; above about 1.5x, the measured CPU setups can stutter. GPU decoding improves overall supply, but does not guarantee continuous playback at every speed.
+- macOS Metal decoding uses FP32 computation with the validated Audio8 export. Load/warm-up failures fall back to CPU. Other model exports and Mac hardware/OS combinations still need validation.
 - SoX is no longer used to change the speed (the player does that itself). It is still bundled, for preparing voice-cloning clips and for the older speed path kept behind `VOICEREADER_RATE_IN_BACKEND`: Windows builds bundle it under `src-tauri/binaries/sox`, macOS builds under `src-tauri/binaries/sox-macos`.
 - The skip-back button does nothing yet.
 - The hotkey is ignored while the VoiceReader window itself is focused. Use Read selection there.
@@ -105,8 +125,8 @@ Two builds exist. They are chosen by Cargo feature, and exactly one must be enab
 - Node.js and npm.
 - Rust (`cargo` and `rustc` on `PATH`). On Windows this also needs the Tauri 1.x prerequisites (C++ build tools and WebView2); see the [Tauri prerequisites guide](https://tauri.app/v1/guides/getting-started/prerequisites).
 - CMake, to build native Rust dependencies.
-- Python 3.10 or newer on `PATH`, only for the helper behind `npm run models:bundle:kyutai`. It copies the bundled Kyutai model into `src-tauri/binaries/models`, and downloads the model first if it is missing. The download needs `huggingface_hub`; the helper uses `tts-engine/.venv` if that exists, otherwise the Python on `PATH`.
-- Internet access the first time you run a Base dev or build script. `npm run assets:fetch` runs automatically and downloads the ONNX Runtime library and the 13 extra Kyutai voice clips. It skips files that are already present.
+- Python 3.10 or newer on `PATH`, only for build helpers. `npm run models:bundle:kyutai` copies the bundled Kyutai model into `src-tauri/binaries/models`, and downloads it first if missing. The download needs `huggingface_hub`; the helper uses `tts-engine/.venv` if that exists, otherwise the Python running the helper. macOS builds also use Python to build/bundle native SoX and package the ZIP; see the macOS instructions below.
+- Internet access the first time you run a Base dev or build script. `npm run assets:fetch` runs automatically and downloads the ONNX Runtime library, the native WebGPU plugin on Apple Silicon macOS, and the 13 extra Kyutai voice clips. It skips files that are already present.
 
 On Windows:
 
@@ -142,9 +162,10 @@ If there is no audio, check the OS output device, then use Refresh health and Re
 | `npm run desktop:build` | Release executable without an installer. Same as `desktop:build:base`. |
 | `npm run desktop:build:standalone` | Installer from the Tauri bundler. Same as `desktop:build:base:installer`. |
 | `npm run desktop:build:portable` | Portable zip: `src-tauri/target/release/bundle/portable/VoiceReader_<version>_x64_portable.zip`. Same as `desktop:build:base:portable`. Windows only. |
-| `npm run assets:fetch` | Fetch the ONNX Runtime library and the extra Kyutai voice clips. Hooked into the Base dev and build scripts. |
-| `npm run onnxruntime:fetch`, `npm run kyutai-voices:fetch` | The two halves of `assets:fetch`. |
-| `npm run models:bundle:kyutai` | Ensure the Kyutai model (and SoX, if found on the build machine) is under `src-tauri/binaries`. Runs inside every Base build. |
+| `npm run desktop:build:macos:portable` | Base macOS `.app` and versioned portable ZIP, including Metal on Apple Silicon. The packager ad hoc signs and verifies the complete app. |
+| `npm run assets:fetch` | Fetch ONNX Runtime, WebGPU/Metal on Apple Silicon, and extra Kyutai voice clips. Hooked into the Base dev and build scripts. |
+| `npm run onnxruntime:fetch`, `node scripts/fetch-webgpu-macos.js`, `npm run kyutai-voices:fetch` | The individual steps of `assets:fetch`; the Metal plugin step skips other platforms. |
+| `npm run models:bundle:kyutai` | Ensure the Kyutai model and platform SoX runtime are under `src-tauri/binaries`. On macOS, builds native SoX and fails if it cannot be bundled. Elsewhere, copies SoX when found and warns if missing. Runs inside every Base build. |
 
 The Base scripts also run `scripts/sync-version.js`, which copies the version from `package.json` into the desktop and Python engine metadata and the app entries in both lockfiles.
 
@@ -170,7 +191,9 @@ What belongs under `src-tauri/binaries` for each build is described in `src-taur
 
 If the saved hotkey cannot be registered, the app falls back to the platform default above and saves that. `Alt+Space` and `Cmd+Space` are refused as OS-reserved.
 
-Compute device controls where Audio8's audio decoder runs. It does not affect transcription, which always runs on the CPU because the GPU measured no faster for it. On Windows, Auto uses the GPU only when a one-time benchmark shows it is at least 1.5 times faster than the CPU. GPU uses it whenever the provider loads. CPU never touches the GPU. **Audio8 GPU acceleration is not available yet on macOS.** Auto uses the CPU, and selecting GPU currently falls back to CPU because the shipped decoder failed Core ML inference. Details are in `docs/learnings.md` section 11.
+Compute device controls where Audio8's codec decoder runs. It does not affect Kyutai, voice registration, Audio8's autoregressive generation or transcription. Transcription stays on CPU; the Windows DirectML test measured no improvement, and Mac GPU transcription has not been benchmarked.
+
+On Windows and Apple Silicon macOS, Auto uses GPU only when a decoder benchmark shows more than a 1.5x speedup over CPU. GPU skips that benchmark; CPU never initializes a GPU decoder. Auto choices are cached for 7 days: `audio8-decoder-device.json` on Windows and `audio8-decoder-device-webgpu-fp32.json` on Apple Silicon. The new Mac cache avoids reusing preview/other-provider measurements. Intel macOS uses CPU. Load/warm-up failures fall back to CPU, but there is no automatic recovery from a GPU failure in the middle of a job. See [learnings](docs/learnings.md) sections 11 and 15.
 
 ### Environment variables
 
@@ -180,7 +203,7 @@ All optional. The Base build reads these:
 |---|---|
 | `VOICEREADER_DATA_DIR` | Data directory for models, voices and caches. |
 | `VOICEREADER_BUNDLED_KYUTAI_MODEL_DIR` | Use this folder as the bundled Kyutai model. It must contain the files listed in `src-tauri/binaries/README.txt`. |
-| `VOICEREADER_SOX_PATH` | Path to the SoX executable. Otherwise SoX is looked up next to the app, then on `PATH`, then in the Windows winget packages folder. |
+| `VOICEREADER_SOX_PATH` | Path to the SoX executable. Otherwise SoX is looked up in bundled `sox-macos`/`sox` folders, then on `PATH`, then in the Windows winget packages folder. Used for cloning clips and the older backend speed path. |
 | `VOICEREADER_ONNXRUNTIME_PATH` | Path to the ONNX Runtime library file. Otherwise it is looked up under `binaries/onnxruntime` next to the app. There is no fallback to the system library. |
 | `VOICEREADER_AUDIO8_DECODER_DEVICE` | `auto`, `gpu` or `cpu`. Overrides the Compute device setting. |
 | `VOICEREADER_AUDIO8_PARALLEL_CHUNKS` | Audio8 chunks generated at once, 1 to 8. Default 2 (1 on machines with fewer than 4 cores). |
@@ -190,6 +213,8 @@ All optional. The Base build reads these:
 | `VOICEREADER_RATE_IN_BACKEND` | Set to `1` to apply the speed in the backend with SoX, as it was up to version 0.2.1, instead of in the player. Speed changes then take effect only on audio not yet generated. For comparing the two. |
 | `VOICEREADER_ENGINE_ROOT` | Location of the `tts-engine` folder. Debug builds use `<root>/.data` as the data directory. |
 | `VOICEREADER_AUDIO8_TEST_MODEL_DIR`, `KYUTAI_TEST_MODEL_DIR`, `KYUTAI_TEST_OUT_DIR`, `VOICEREADER_ASR_TEST_MODELS_DIR`, `VOICEREADER_ASR_TEST_AUDIO`, `VOICEREADER_ASR_TEST_MAX_SPEAKERS` | Used only by the ignored Rust tests. |
+| `VOICEREADER_AUDIO8_TEST_OUTPUT_DIR` | Audio8 test WAVs and ONNX profiling output. Profiling affects timings; unset for throughput comparisons. |
+| `VOICEREADER_AUDIO8_BENCHMARK_OUTPUT_DIR` | Output folder for the ignored CPU/Metal streaming benchmark. See [Metal checks](docs/METAL.md). |
 
 The Full build also reads `VOICEREADER_ENGINE_EXECUTABLE` (release builds: path to the sidecar executable) and sets the sidecar's own variables, which are listed in `tts-engine/README.md`.
 
@@ -208,15 +233,15 @@ npm run desktop:build:macos:portable
 The first build downloads the Kyutai model, preset clips, native ONNX Runtime and
 SoX source. It builds a native SoX executable with static libsox using the Xcode
 Command Line Tools; subsequent builds reuse it. SoX needs no Homebrew libraries
-on the user's Mac. Its minimum macOS version is also 14.0.
+on your Mac. Its minimum macOS version is also 14.0.
 Python is used only while building; users do not need Python, Node or Rust installed.
 The macOS configuration targets macOS 14 or newer. Build on Apple Silicon for an arm64
 release; Intel and universal releases need separate build and runtime verification.
 
-The output is `src-tauri/target/release/bundle/portable/VoiceReader_0.2.2_macos_arm64_portable.zip`
+The output is `src-tauri/target/release/bundle/portable/VoiceReader_0.2.3_macos_arm64_portable.zip`
 on Apple Silicon. Extract it and open `VoiceReader.app`; moving it to Applications is optional.
 The entire `.app` must stay together. Settings, saved voices and downloaded models go
-under the user's application data directory, so portable here means no installer,
+under your application data directory, so portable here means no installer,
 rather than keeping user data beside the app.
 
 Grant the current copy of VoiceReader Accessibility permission in System Settings >
@@ -238,10 +263,18 @@ The source download is checksum-verified and cached under `build/sox-macos`.
 The bundle includes SoX's licence files, source archive, patched header and build
 recipe under `Contents/Resources/binaries/sox-macos`.
 
-The local build is not Developer ID signed or notarized. Verify launch, speech,
-selection capture and recording on a Mac before uploading the ZIP as a release asset.
-For broader distribution, configure Apple Developer signing and notarization;
-downloaded unnotarized apps may be blocked by Gatekeeper.
+The macOS release is ad hoc signed, but is not Developer ID signed or notarized by
+Apple. Downloaded copies may be blocked by Gatekeeper on first launch. Follow the
+first-launch instructions above. Verify launch, speech, selection capture and
+recording on a Mac before uploading the ZIP as a release asset. Include the macOS
+first-launch notice from [the release guide](docs/RELEASING.md) in every macOS release.
+
+The packager validates bundled assets and architecture, signs and verifies the
+complete app, then creates the ZIP. Apple Silicon builds require the WebGPU plugin
+and validated FP32 decoder graphs. See [Metal support](docs/METAL.md) for runtime
+checks and reproducible benchmarks. On the macOS 27 toolchain where stripping produces invalid
+proc-macro dylibs, set `CARGO_PROFILE_RELEASE_STRIP=none` and
+`CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` before building.
 
 ## Full build
 
@@ -277,7 +310,7 @@ To test the sidecar alone, see `tts-engine/README.md`.
 | Path | Contents |
 |---|---|
 | `src/` | Frontend: main window (`main.ts`), the Transcribe page (`transcribe.ts`), floating toolbar (`toolbar.ts`), styles, icons and shared helpers. |
-| `src-tauri/src/` | Rust backend. `voicereader_core.rs` has the Tauri commands, engine lifecycle and job streaming. The Base runtimes are `kyutai_local.rs` and `audio8_local.rs` (with `audio8_model.rs` for ONNX inference), sharing `text_chunking.rs` and `audio_pipeline.rs`. Transcription is `asr_local.rs`, with `audio_decode.rs` reading audio files and `audio_capture.rs` recording the microphone. `model_download.rs`, `settings.rs`, `selection.rs` and `bundled_paths.rs` hold the model downloads, saved settings, selection capture and bundled-file lookup. |
+| `src-tauri/src/` | Rust backend. `voicereader_core.rs` has the Tauri commands, engine lifecycle and job streaming. The Base runtimes are `kyutai_local.rs` and `audio8_local.rs` (with `audio8_model.rs` for ONNX inference), sharing `text_chunking.rs` and `audio_pipeline.rs`. Transcription is `asr_local.rs`, with `audio_decode.rs` reading audio files, `audio_capture.rs` recording the microphone, and `recording_export.rs` retaining/exporting the current session audio. `model_download.rs`, `settings.rs`, `selection.rs` and `bundled_paths.rs` hold the model downloads, saved settings, selection capture and bundled-file lookup. |
 | `src-tauri/vendor/parakeet-rs/` | The `parakeet-rs` crate (0.3.8) with patches to `src/multitalker.rs`. See `VOICEREADER_PATCH.md` in that folder. |
 | `src-tauri/binaries/` | Files bundled with the app. See `src-tauri/binaries/README.txt`. |
 | `tts-engine/` | Python sidecar for the Full build. |
@@ -289,6 +322,9 @@ To test the sidecar alone, see `tts-engine/README.md`.
 | `docs/DECISIONS.md` | Agreed direction, model choices, order of work. |
 | `docs/learnings.md` | Measurements and reasoning behind the playback pipeline, Audio8, chunking, GPU use and transcription. |
 | `docs/IPC_API.md` | The sidecar's HTTP and WebSocket API (Full build only). |
+| [docs/METAL.md](docs/METAL.md) | macOS GPU support, precision fix, listening result and reproducible checks. |
+| [docs/RELEASING.md](docs/RELEASING.md) | Release notes, Mac signing/packaging checks and the first-launch notice. |
+| `docs/benchmarks/`, `docs/images/` | Archived CPU/Metal measurements and the 2x streaming graph linked from the learnings. |
 
 ## Roadmap
 
@@ -301,7 +337,7 @@ Direction and order of work are in `docs/DECISIONS.md`. In short:
 
 Kyutai Pocket TTS stays the default model; Audio8 stays optional.
 
-Not planned right now: running Audio8's generation step on a GPU (it measured slower there) and other languages for Kyutai.
+Not planned right now: running Audio8's generation step on a GPU (it measured slower through Windows DirectML; Mac GPU generation has not been benchmarked) and other languages for Kyutai. macOS decoder support and its validation are documented in [Metal support](docs/METAL.md).
 
 ## Licence
 
@@ -311,3 +347,4 @@ VoiceReader is MIT-licensed. Models and third-party components keep their own li
 - `src-tauri/vendor/parakeet-rs/` is a patched copy of the `parakeet-rs` crate 0.3.8, which is licensed MIT OR Apache-2.0. Its licence file and the list of changes are in that folder.
 - The extra Kyutai voice clips are credited in `src-tauri/binaries/kyutai-voices/ATTRIBUTION.txt`, which the fetch script writes.
 - SoX is bundled for Windows under `src-tauri/binaries/sox` with its own licence files, and for macOS under `src-tauri/binaries/sox-macos` with licence files and corresponding source/build recipe.
+- Apple Silicon macOS builds bundle the WebGPU plugin's licence notices under `binaries/onnxruntime/webgpu-licenses`, and the derived Audio8 decoder graph's Apache-2.0 licence/notice under `binaries/audio8-metal`. It reuses the original downloaded weights.

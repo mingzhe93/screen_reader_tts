@@ -6,11 +6,14 @@ playback pipeline. Sections 7 to 11 cover Audio8, Kyutai voices, buffering, chun
 and GPU use, with measurements. Section 12 covers transcription. Section 13 covers
 moving the speed change into the player; it replaces the SoX approach of sections 1, 3
 and 4 for the Base build. Section 14 is a fault in parallel generation that garbled
-some Kyutai voices.
+some Kyutai voices. Section 15 records the native WebGPU/Metal decoder precision
+fix, Apple Silicon performance measurements and their effect on 2x streaming.
 
 Where the code lives: `kyutai_local.rs` and `audio8_local.rs` are the Base runtimes.
-`audio_pipeline.rs` holds the SoX tempo stream and the rate-controlled emitter that both
-runtimes share. Transcription is in `asr_local.rs`, `audio_decode.rs` and
+`audio_pipeline.rs` holds the shared PCM emitter and optional legacy SoX tempo
+stream. Default Base playback uses `player.ts`, `tempo-worklet.ts` and
+`tempo-stretch.ts` for speed changes. The SoX details below describe the older
+Base path, retained behind `VOICEREADER_RATE_IN_BACKEND=1`, and the Full sidecar. Transcription is in `asr_local.rs`, `audio_decode.rs` and
 `audio_capture.rs`, with the model code in `src-tauri/vendor/parakeet-rs`. Sidecar code
 is under `tts-engine/src/tts_engine/`.
 
@@ -24,7 +27,7 @@ Key lesson:
 - For rate-adjusted playback, batch-oriented chunk processing is more stable
   than token-by-token feeding.
 
-How the current code applies it:
+How the legacy Base speed path and Full sidecar apply it:
 - Kyutai (Base) still generates a whole chunk with `model.generate()` and feeds SoX
   that PCM in one piece.
 - Audio8 (Base) streams: it feeds SoX one decoded window at a time, runs SoX with a
@@ -55,7 +58,7 @@ Python sidecar loop uses a similar pattern:
 
 ## 3. Live rate control architecture
 
-### 3.1 Base build (Rust)
+### 3.1 Legacy Base speed path (Rust; superseded by section 13)
 - The active rate is shared through an `AtomicU32` (`active_rate_steps`) in steps of
   `0.25x`, from 1 (0.25x) to 16 (4.0x).
 - Both runtimes send PCM through `RateEmitter` in `audio_pipeline.rs`. It reads the
@@ -84,7 +87,7 @@ Sidecar fallback order (`tts-engine/src/tts_engine/jobs.py`):
 2. librosa time-stretch
 3. linear resample
 
-Base build (`audio_pipeline.rs`) has only two steps: SoX tempo, then linear resample.
+The legacy Base speed path (`audio_pipeline.rs`) has two steps: SoX tempo, then linear resample. Default Base playback uses the player-side stretcher in section 13.
 SoX is looked up through `VOICEREADER_SOX_PATH`, then next to the app, then `PATH`, then
 the Windows winget packages folder.
 
@@ -145,7 +148,7 @@ One codec frame is 2048 samples at 44.1 kHz, about 46 ms of audio.
   left context, and uses idle time to decode chunks that are generated ahead.
 - Two chunks are generated concurrently. Three or more made latency worse on a
   16-core CPU, because the single decoder is the bottleneck.
-- The first chunks are kept short (80 and 120 units, then the user's chunk size up to
+- The first chunks are kept short (80 and 120 units, then the configured chunk size up to
   160; see section 10.3) so the next chunk is ready when the first finishes playing.
 - Result for a 40 s passage, model only: about 0.75 s to first audio and no underruns
   at 1.0x; occasional short underruns (0.1 to 0.4 s) at 1.5x. Overall the pipeline
@@ -310,7 +313,9 @@ through ONNX Runtime's DirectML provider.
 - The decoder is a large feed-forward network called a few times per chunk: about 25
   to 30 times faster on the discrete GPU.
 - The AR graphs are called once per token with small inputs and INT8 weights. They
-  are slower on any GPU, so they stay on the CPU.
+  were slower on both GPUs in these DirectML measurements, so they stay on the CPU.
+  The macOS Metal work in section 15 also keeps them on the CPU; GPU AR performance
+  has not been measured on the Mac.
 - The integrated GPU in this desktop CPU is slower than the CPU for everything. A
   GPU being present is not a reason to use it; it has to be measured.
 
@@ -348,15 +353,17 @@ through ONNX Runtime's DirectML provider.
 - The same library also contains the CPU provider, so one file serves both.
 
 ### 11.5 Not done or not verified
-- macOS (updated 2026-10-05): Core ML inference was tested on Apple Silicon with
-  ONNX Runtime 1.24.4 and the shipped Audio8 decoder, but failed and fell back to
-  CPU. Auto uses the CPU. Audio8 GPU acceleration is not available yet on macOS.
+- macOS (updated 2026-10-10): the earlier Core ML route failed and fell back to CPU.
+  Native WebGPU/Metal now works on the M2 Max with FP32 decoder computation; the
+  initial FP16 attempt garbled speech. After listening and stability acceptance,
+  I decided to include it in the standard Apple Silicon Base build for
+  v0.2.3. See section 15 for the fix, measurements and remaining follow-ups.
 - Laptop integrated GPUs (Intel Iris Xe or Arc, Radeon 780M) are far stronger than
   the one measured here, and laptop CPUs are weaker, so the outcome there may differ.
   The benchmark handles either case.
-- Linux GPUs are not covered. ONNX Runtime also has a native WebGPU provider that
-  would cover Windows, macOS and Linux with one code path; official prebuilt
-  libraries for it were not found, so it was not tried.
+- Linux GPU integration is not covered or validated here. A prebuilt native WebGPU
+  plugin was subsequently found and used on macOS (section 15); availability of a
+  plugin for another platform does not establish model compatibility or performance.
 - WebGPU inside the app window works at the engine level on Windows (the Edge 154
   engine found the RTX 5090), but it would mean a second inference stack in
   JavaScript, so the native route was taken.
@@ -409,7 +416,7 @@ The first tests were synthetic: clips of four real speakers from the bundled voi
 - A Bluetooth headset microphone took 0.9 to 1.2 seconds to deliver its first audio after the stream was opened. The page therefore says "Starting the microphone" until audio actually arrives, and only then "Listening".
 - The model is loaded before the stream is opened. Opening first would record three seconds of speech during the load and then transcribe it late.
 - Text trails the speaker by the 1.12-second chunk plus processing time (about 0.25 s per chunk on the 9950X).
-- The automated check runs in a silent room: capture, level updates, stop and the final flush work end to end. The user's first live test, before the fix in 12.6, dropped a few words here and there, the same symptom as with files. Live accuracy has not been measured since.
+- The automated check runs in a silent room: capture, level updates, stop and the final flush work end to end. In my first live test, before the fix in 12.6, a few words were dropped here and there, the same symptom as with files. Live accuracy has not been measured since.
 
 ### 12.6 Words lost at pauses and speaker changes (fixed by a speaker hold)
 
@@ -505,7 +512,7 @@ Two minutes of a news report (16 kHz, 328 words):
 | 3.0x | 82.6% | 79.6% | 89.3% | 84.1% |
 
 - Two stages was the best or close to it everywhere, and at least as good as the SoX chain at every speed, so two stages it is. The differences between one, two and three stages are small next to the difference from SoX.
-- The recognizer was trained on normal speech and falls apart above 2x whatever the stretcher, so the high-speed rows compare stretchers, not what a person can follow. The user has since listened to the player-side speed control on Windows and accepted it (2026-10-09).
+- The recognizer was trained on normal speech and falls apart above 2x whatever the stretcher, so the high-speed rows compare stretchers, not what a person can follow. I have since listened to the player-side speed control on Windows and accepted it (2026-10-09).
 - The number of stages is fixed, so changing the speed only changes each stage's factor. A scheme with a varying number of stages (as SoX was driven) would have to flush and rebuild on every change.
 - At exactly 1.0x the best continuation is always the audio's own next sample, so the stretcher passes the audio through bit for bit. No bypass switch is needed, and none of the clicks one would cause.
 - Cost is negligible: several hundred times faster than real time in JavaScript.
@@ -520,15 +527,20 @@ Two minutes of a news report (16 kHz, 328 words):
 
 ### 13.4 Not verified
 
-- By ear, at any speed, with either model.
-- In the app itself: the tests above ran in a browser preview with generated tones, not with the backend.
-- On macOS (WKWebView): AudioWorklet and an audio context at 24 or 44.1 kHz.
+- I accepted player-side speed control on Windows (2026-10-09, section 13.2)
+  and the Audio8 FP32 Metal preview's speech on macOS (2026-10-10, section 15).
+  Exhaustive listening across voices and playback speeds has not been done.
+- The speed-control numbers above came from a browser preview. The macOS Audio8
+  preview also ran through the packaged app's WKWebView/AudioWorklet at 44.1 kHz;
+  equivalent macOS validation of Kyutai at 24 kHz is not recorded here.
+- The 2x refill counts in section 15 are calculated from backend arrival traces,
+  rather than observed speaker output or app rebuffer events.
 
 ## 14. Kyutai voices that repeated and skipped words (2026-10-09)
 
 ### 14.1 Symptom
 
-With 11 of the 21 preset voices, a read of more than one chunk came out wrong: the opening words missing, phrases repeated, the ending cut. The user's example, voice "fantine", for "Welcome to VoiceReader. Highlight any text, press your hotkey, and hear it read aloud in the voice you choose.": "Highlight any text, press your hotkey, ands hear it read aloud aloud, in, hear it read aloud aloud in". The other ten voices were fine, every time.
+With 11 of the 21 preset voices, a read of more than one chunk came out wrong: the opening words missing, phrases repeated, the ending cut. My example, voice "fantine", for "Welcome to VoiceReader. Highlight any text, press your hotkey, and hear it read aloud in the voice you choose.": "Highlight any text, press your hotkey, ands hear it read aloud aloud, in, hear it read aloud aloud in". The other ten voices were fine, every time.
 
 ### 14.2 What it was not
 
@@ -550,7 +562,7 @@ Whether a voice was affected depended on one number: how much room its prompt le
 | 22 (of 128) | caro_davy, stuart_bell | Fine in the test, but at risk when two chunks of under 22 tokens run together |
 | 53 to 124 (of 128 or 256) | fantine, eponine, azelma, anna, vera, jane, eve, paul, michael, bill_boerst, peter_yearsley | Garbled |
 
-The table was read from the voice states, and the last row is exactly the list of voices the user had found to be bad. A voice cloned by the user lands in one row or another by the length of its clip, so cloned voices were affected at random.
+The table was read from the voice states, and the last row is exactly the list of voices I had found to be bad. A cloned voice lands in one row or another by the length of its clip, so cloned voices were affected at random.
 
 The fault is as old as parallel generation: fantine, eponine and azelma were among the original eight presets.
 
@@ -570,3 +582,341 @@ Recognizer errors on the example sentence through the app's generation path, two
 ### 14.5 Audio8
 
 Checked for the same fault, since it also generates two chunks at once. It does not have it: each generation copies the voice prefix into the state of the session it has checked out, so nothing is shared. Reading the same sentence and a 114-word passage through the app path, with the built-in voice and with a cloned voice, gave 1 to 4 recognizer errors per reading, the same level as Kyutai's good voices.
+
+## 15. Native WebGPU/Metal for Audio8: FP32 fixes the decoder (2026-10-10)
+
+Measured and listened to on an Apple Silicon M2 Max with macOS 27.0.1, using
+VoiceReader v0.2.2 plus the then-separate Metal preview changes. Those benchmark
+results remain attributed to that build. After confirming stable playback,
+I decided to include the validated FP32 implementation in the main app for **v0.2.3**.
+The standard Apple Silicon Base build now fetches/bundles the plugin and graphs,
+uses WebGPU for Auto/GPU, and packages a signed `VoiceReader.app`. The preview-only
+feature, build command and configuration have been removed; Intel macOS stays on CPU. These results describe this model export and
+machine; other Apple Silicon chips, Intel Macs and older macOS releases have not
+been validated.
+
+### 15.1 What runs where
+
+Audio8 has two distinct workloads:
+
+| Stage | CPU-only build | Corrected Metal preview |
+|---|---|---|
+| Slow/fast autoregressive models: predict codec codes from text | CPU, INT8 graphs | Same CPU, INT8 graphs |
+| Codec decoder: turn codes into a waveform | CPU | Native WebGPU EP through Dawn's Metal backend, FP32 computation |
+| Voice registration, transcription and Kyutai | Existing CPU paths | Existing CPU paths |
+| Playback speed | Player-side time stretching | Same player-side time stretching |
+
+The native route keeps inference in the Rust backend and shares the existing
+ONNX Runtime library. It uses core ONNX Runtime **1.24.4**, the **0.4.0 WebGPU
+plugin**, and the `ort` crate's plugin registration/device APIs. The provider
+library is about 14 MiB and is bundled with its license notices. It is registered
+lazily when a WebGPU decoder is requested, so a missing plugin does not prevent
+CPU TTS or transcription from starting.
+
+The slow/fast AR graphs were not moved to Metal, and their GPU performance on
+macOS was not benchmarked. The DirectML results in section 11 motivate keeping
+these small, repeated token steps on CPU, but they are not Mac GPU measurements.
+
+### 15.2 Why the first Metal preview produced unusable speech
+
+The first preview loaded `codec_decoder_fp16.onnx` directly on WebGPU. It was fast
+and returned finite samples with the expected length, but I heard missing
+words and speech blurred into a mess. The decoder was producing a damaged waveform
+from the codes, so successful inference and correctly sized output did not establish
+audio correctness.
+
+The important distinction was **stored precision versus execution precision**.
+Although the downloaded decoder stores FP16 weights, CPU profiling showed FP32
+inputs/outputs for important operations including `Conv`, `MatMul`, `Sin`,
+`Softmax` and `ConvTranspose`. The first Metal path actually executed FP16
+calculations. Returning a final FP32 waveform did not undo errors already produced
+inside those calculations.
+
+Controlled comparisons used exactly the same reference codec codes on each provider,
+excluding token sampling and text chunking as sources of the difference:
+
+| Experiment | Relative RMS waveform difference from the original CPU decode |
+|---|---:|
+| Native FP16 WebGPU, 24 reference frames | 43.5% |
+| Native FP16 WebGPU, 110 reference frames | 85.6% |
+| FP16 with graph optimizations disabled, 110 frames | About 85.6% |
+| FP16 with preferred layout changed to NHWC, 110 frames | About 85.6% |
+| FP32 computation on WebGPU, 110 frames | **0.0321%** |
+
+Relative RMS here is `sqrt(sum((GPU - CPU)^2) / sum(CPU^2))`, expressed as a
+percentage. It measures numerical waveform error; it is not a word error rate or
+the percentage of words lost.
+
+Changing optimizations or layout did not fix the tested failure. Promoting
+computation to FP32 did. This identifies the FP16 execution path in this
+decoder/provider combination as the problem. The individual sensitive operator,
+and whether its error is accumulated rounding or a particular FP16 kernel defect,
+have not been isolated. Do not generalize this result to every FP16 model or GPU.
+
+### 15.3 The fix preserves the downloaded weights
+
+The initial diagnostic converted the full decoder to FP32, doubling its external
+weight file from about 249 MiB to 497 MiB. That verified the precision hypothesis,
+but the shipped fix only needs a small derived graph:
+
+1. Keep the original FP16 initializer storage and external weight-file offsets.
+2. Insert FP16-to-FP32 casts for the 214 stored weight tensors. ONNX Runtime folds
+   these casts when loading the graph.
+3. Promote the graph's FP16 computation casts and floating-point constants to
+   FP32, and update floating-point type annotations where present.
+4. Reuse the existing `codec_decoder_fp16.onnx.data` download. The weight values
+   are unchanged; promoting them does not recover precision lost when the original
+   export was made. It gives the intermediate calculations more precision.
+
+The derived graph is about **624 KB**. It is bundled under
+`src-tauri/binaries/audio8-metal/`, together with the original graph for validation
+and the upstream Apache-2.0 license/notice. The portable ZIP grew from about
+215.70 MiB to 215.85 MiB. There is no new large model download or Python dependency
+inside the app. FP32 computation increases decoder weight memory compared with
+FP16 computation; total process/GPU peak memory has not been quantified for this
+Mac comparison.
+
+The preparation recipe is
+[`prepare_audio8_metal_decoder.py`](../scripts/prepare_audio8_metal_decoder.py).
+It requires `numpy` and `onnx` only when regenerating these assets. It rejects an
+unreviewed source graph checksum. The validated original graph SHA-256 is:
+
+```text
+25379b866ad555b9a55226c46325344d2ebfafea1b474c29de5223a9d01ea533
+```
+
+At runtime, `webgpu_decoder_path` in `audio8_model.rs` compares the installed
+original graph byte for byte with the bundled original, then atomically caches the
+derived graph next to the original weight file as
+`codec_decoder_webgpu_fp32_v1.onnx`. CPU decoding continues to load the original
+graph. A missing prepared graph, mismatched export, cache write failure or GPU
+initialization/warm-up failure returns through the existing CPU fallback. The
+runtime fallback does not provide automatic recovery from a mid-job GPU failure.
+
+Auto mode requires more than a 1.5x decoder benchmark improvement. v0.2.3 uses
+`audio8-decoder-device-webgpu-fp32.json`, a fresh cache separate from both preview
+caches and other providers, so the release benchmarks again rather than inheriting
+the preview choice. A stored GPU choice remains a performance decision;
+it does not replace waveform and listening validation of the export.
+
+### 15.4 Validation now checks waveform agreement and actual streaming
+
+The first preview's checks established execution, timing, output length and finite
+samples. They were insufficient to detect the audible corruption. The corrected
+preview adds numerical regression checks against the working CPU decode:
+
+| Check | Result |
+|---|---|
+| Native reference-code decode | 0.0321% relative RMS difference from CPU |
+| Deterministic generated English/Chinese speech, full Metal decode | 0.0257% difference from CPU |
+| Same generated speech through the actual Metal streaming path | 0.0257% difference from CPU, identical sample count |
+| Controlled prefix-window streaming versus full Metal decode | About 0.000223% difference |
+| Profiling | WebGPU kernel execution confirmed; supported work did not silently run entirely on CPU |
+| Complete app-side runtime | Streaming, 1x/1.5x rate handling, voice cloning and saved-voice re-encoding passed |
+| Native unit suites | 48 passed with the preview enabled, and 48 with it disabled |
+| Packaged app | Audio8 reported WebGPU active with no CPU fallback; ad-hoc signature verified |
+| Listening | I accepted Preview 2 and could not distinguish it from the original CPU run |
+
+The decoder and deterministic streaming checks require **under 0.1% relative RMS
+error**, finite samples and matching lengths. The native decoder check also
+asserts that profiling contains GPU kernel events. The first FP16 preview would
+fail this numerical gate.
+
+GPU streaming retains the existing full-prefix decoding path: each update decodes
+from the start of its text chunk, releases the new stable samples, holds the guard
+frame back and blends the boundary. CPU streaming uses limited left context
+(section 7.2). The FP32 fix changes decoder arithmetic, not this scheduling or the
+player's time-stretching algorithm. Re-decoding full prefixes costs additional
+work, so a fast isolated decoder still does not make streaming decoding free.
+
+After promotion, the standard v0.2.3 Base build passed **48 unit tests**, both
+waveform/streaming parity checks and the real-runtime streaming/cloning check,
+using its packaged ONNX Runtime and WebGPU plugin. Reference waveform error was
+0.0321%; deterministic streamed speech error was 0.0257%. A fresh Auto benchmark
+selected Metal (551 ms CPU versus 98 ms WebGPU for the short decoder input).
+Voice registration and re-encoding of a saved voice without cached codes passed.
+These checks validate the release integration; the full throughput figures below
+remain the earlier profiling-disabled benchmark, not a new timing batch.
+
+Numerical agreement checks provider correctness for the tested inputs. My
+listening acceptance adds evidence of usability, while broader listening across
+languages, cloned voices, text lengths and playback rates remains useful.
+
+### 15.5 Isolated decoder speed and complete pipeline speed are different
+
+A warm decode of the 110-frame reference clip (5.108 s of source audio) took about
+**2.1 to 2.3 s on CPU**, versus **0.47 to 0.49 s on corrected FP32 Metal**: roughly
+4 to 5 times faster for that decoder call. The faster but unusable FP16 result is
+not an acceptable performance target.
+
+The complete pipeline benchmark used:
+
+- The same fixed English passage, split into seven text chunks with the app's
+  80/120/160-unit ramp budgets and fixed per-chunk seeds `42 + chunk_index`.
+- The same built-in voice, already loaded model and prepared voice prefix.
+- Two parallel CPU AR generators, one decoder and six CPU decoder threads, matching
+  this Mac's normal runtime layout.
+- All four runs producing **51.0839 seconds** of normal-speed source audio, with
+  identical sample counts.
+- The actual streaming scheduler and PCM16 conversion, with first-window sizing
+  chosen for 1x or 2x playback.
+- ONNX profiling disabled to avoid measurement overhead. Model loading,
+  WebSocket/IPC, frontend DSP, audio-device opening and speaker timing excluded.
+
+These are individual measurements, not medians from repeated benchmark batches.
+"First audio" below is the first backend PCM becoming available, rather than the
+first audible sample at the speakers.
+
+| Backend | Playback setting | Synthesis wall time | Source audio per wall second | First backend audio |
+|---|---:|---:|---:|---:|
+| CPU only | 1x | 29.19 s | 1.75x real time | 0.85 s |
+| CPU only | 2x | 29.00 s | 1.76x real time | 2.56 s |
+| CPU + FP32 Metal | 1x | 19.13 s | 2.67x real time | 0.61 s |
+| CPU + FP32 Metal | 2x | 19.82 s | 2.58x real time | 1.13 s |
+
+At the 2x setting, this is **1.46x higher complete-pipeline throughput**, or about
+**32% less generation time**. Applying the isolated decoder's 4-to-5x improvement
+to the whole pipeline would substantially overstate the gain.
+
+An AR-only measurement, with two workers generating the same passage's codes and
+no decoding, took **13.55 s**, equivalent to **3.77 source-audio seconds per wall
+second**. That indicates remaining opportunity in decoding/scheduling, but is a
+component measurement, not a prediction or guarantee for the complete app. AR
+work, repeated prefix decoding and synchronization still consume time.
+
+### 15.6 What this means for 2x playback
+
+The player consumes normal-speed PCM and applies the speed itself (section 13).
+At 2x, it needs **two seconds of source audio for every wall-clock second**:
+
+- CPU's 1.76x supply rate is below that requirement. A finite initial reserve can
+  cover some periods, but a sufficiently long read tends to exhaust it.
+- Metal's 2.58x average supply rate is above it, giving about **29% supply
+  headroom** for this passage. That supports 2x, but bursts and temporary gaps still
+  matter. Averages alone cannot establish uninterrupted playback.
+- 3x playback would exceed the measured complete Metal pipeline's supply rate.
+  The 3.77x AR-only figure does not establish 3x playback feasibility.
+
+The current player uses a **0.69 s initial listening-time reserve at 2x**, equal to
+1.38 s of normal-speed source audio. The backend adds 0.05 s of allowance, applies
+the playback multiplier and rounds to codec frames: `first_frames_for_rate`
+requests 33 frames at 2x versus 12 at 1x. This explains why faster playback takes
+longer to receive its first audio, even though its eventual speech output is the
+same length. After starvation, the player waits for a 1 s reserve, then up to
+2 s on later refills.
+
+The graph uses the recorded **2x-setting** arrival traces. The solid line is
+cumulative source audio supplied by the backend. The dashed line is the demand
+from uninterrupted 2x playback starting at that run's first audio arrival. Red
+areas mark supply shortfalls; the dashed line deliberately does not pause to refill.
+
+![Recorded CPU and FP32 Metal audio supply versus uninterrupted 2x playback demand](images/audio8-metal-2x-streaming.png)
+
+[Vector graph](images/audio8-metal-2x-streaming.svg) ·
+[Recorded arrivals and analysis](benchmarks/audio8-cpu-metal-m2-max-2026-10-10.json)
+
+A separate source-buffer simulation replayed these arrivals with the current
+initial/refill thresholds and paused consumption when audio ran out:
+
+| Backend | Predicted refill pauses | Predicted total refill waiting | Earliest start avoiding all supply shortfalls in this trace |
+|---|---:|---:|---:|
+| CPU only | 5 | 6.41 s | 8.97 s after the request |
+| CPU + FP32 Metal | 1 early pause | 1.54 s | 1.66 s after the request |
+
+These are **simulated supply pauses**, not observed app rebuffer events or speaker
+measurements. The model consumes at the selected speed and omits WSOLA internal
+lookahead, browser scheduling, IPC and device-wake silence. Those can change actual
+pause counts and durations.
+
+For this recorded Metal trace, starting at **1.66 s rather than 1.13 s** would
+avoid all modeled shortfalls: approximately half a second more initial wait.
+This is evidence for exploring a larger or adaptive 2x startup reserve. No buffer
+policy change was made as part of the FP32 fix, and the calculated delay is not a
+universal setting for other text, voices, machine load or hardware.
+
+The no-shortfall start time can be reproduced from each arrival `(t_i, A_i)`, where
+`A_i` is cumulative source-audio seconds. At playback rate `r`, the earliest
+continuous start must satisfy `start >= t_i - A_(i-1) / r` for every arrival,
+with cumulative audio zero before the first piece. Taking the maximum gives the values
+above; the adaptive refill simulation adds the actual wait-threshold policy.
+
+### 15.7 Reproducing the checks
+
+See [METAL.md](METAL.md) for build and first-launch instructions.
+Regenerate the small decoder assets, when needed, with the pinned source export:
+
+```sh
+python3 scripts/prepare_audio8_metal_decoder.py --source-decoder /path/to/codec_decoder_fp16.onnx
+```
+
+Run the model-dependent numerical and runtime checks with profiling enabled:
+
+```sh
+export VOICEREADER_AUDIO8_TEST_MODEL_DIR="/path/to/Edge0/audio8-TTS-0.1B-ONNX-INT8"
+export VOICEREADER_AUDIO8_TEST_OUTPUT_DIR="/tmp/voicereader-metal-validation"
+mkdir -p "$VOICEREADER_AUDIO8_TEST_OUTPUT_DIR"
+cargo test --manifest-path src-tauri/Cargo.toml --release --features build-base webgpu_ -- --ignored --nocapture --test-threads=1
+VOICEREADER_AUDIO8_DECODER_DEVICE=gpu cargo test --manifest-path src-tauri/Cargo.toml --release --features build-base speaks_and_clones_with_the_real_model -- --ignored --nocapture
+```
+
+For throughput measurement, disable profiling and remove device/thread overrides
+so the benchmark can select and verify both providers with the normal layout:
+
+```sh
+unset VOICEREADER_AUDIO8_TEST_OUTPUT_DIR
+unset VOICEREADER_AUDIO8_DECODER_DEVICE
+unset VOICEREADER_AUDIO8_PARALLEL_CHUNKS
+unset VOICEREADER_AUDIO8_DECODERS
+unset VOICEREADER_AUDIO8_DECODER_THREADS
+export VOICEREADER_AUDIO8_BENCHMARK_OUTPUT_DIR="/tmp/voicereader-cpu-metal-benchmark"
+cargo test --manifest-path src-tauri/Cargo.toml --release --features build-base measure_cpu_and_metal_streaming_throughput -- --ignored --nocapture
+```
+
+That ignored test writes `results.json` with cumulative PCM arrivals and component
+timings. The archived JSON linked above also includes the supply simulation.
+`VOICEREADER_ONNXRUNTIME_PATH` can point to the packaged app's core dylib when
+checking the exact distributed runtime. On the macOS 27 toolchain where stripping
+produces invalid proc-macro dylibs, set `CARGO_PROFILE_RELEASE_STRIP=none` and
+`CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none` before compiling.
+
+Implementation references:
+
+- [`audio8_model.rs`](../src-tauri/src/audio8_model.rs): lazy registration,
+  validated graph selection/cache, decoder session construction and waveform tests.
+- [`audio8_local.rs`](../src-tauri/src/audio8_local.rs): device selection,
+  benchmark cache, first-window sizing and complete-pipeline benchmark.
+- [`playback.ts`](../src/playback.ts) and [`player.ts`](../src/player.ts):
+  initial/refill reserves and player-side supply decisions.
+
+### 15.8 Remaining work and lessons
+
+- Keep FP32 as the validated baseline. Any future mixed-precision optimization
+  should retain sensitive operations in FP32 and pass the same waveform, streaming
+  and listening checks before being accepted.
+- Investigate the exact FP16 failure if pursuing lower memory use or faster
+  kernels; the current fix does not identify that operation.
+- Measure more passages, languages, cloned voices and Apple Silicon devices, and
+  repeat timing batches before drawing general performance conclusions.
+- Validate actual 2x playback/rebuffer events in the packaged app, then evaluate
+  startup-buffer tuning against the traced supply gaps.
+- Native Metal checks need host GPU access. The restricted runner could not
+  discover an adapter and the provider aborted with a C++ exception. That abort
+  is not recoverable through the Rust CPU fallback; the same checks passed on
+  the host. This is a validation-environment limitation observed during release
+  testing, not evidence of a failure in the normally launched app.
+- The plugin logs `ReleaseEpFactory failed ... Unknown exception` during native
+  test process teardown. Tests exit successfully and inference completes, but this
+  separate shutdown diagnostic remains a follow-up. I accepted the current
+  quality/stability for the main v0.2.3 release; promotion does not claim this log
+  or the broader device/performance questions have been resolved.
+- The native route is viable with the existing model/backend, but provider
+  availability, successful inference and a fast benchmark are each insufficient
+  evidence of usable speech. Validate arithmetic, the complete stream and listening.
+
+Main-release build and validation instructions are in [METAL.md](METAL.md).
+
+Primary references:
+
+- [ONNX Runtime native WebGPU provider](https://onnxruntime.ai/docs/execution-providers/WebGPU-ExecutionProvider.html).
+- [ONNX Runtime float16 and mixed precision](https://onnxruntime.ai/docs/performance/model-optimizations/float16.html).
+- [Audio8 ONNX model export](https://huggingface.co/Edge0/audio8-TTS-0.1B-ONNX-INT8).
