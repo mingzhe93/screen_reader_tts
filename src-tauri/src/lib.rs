@@ -28,3 +28,21 @@ mod text_chunking;
 
 #[cfg(feature = "build-base")]
 mod recording_export;
+
+// The optional Assistant: a managed llama-server and the chat page (docs/assistant/README.md).
+#[cfg(feature = "build-base")]
+mod assistant_backend;
+#[cfg(feature = "build-base")]
+mod assistant_catalogue;
+#[cfg(feature = "build-base")]
+mod assistant_chat;
+#[cfg(feature = "build-base")]
+mod assistant_commands;
+#[cfg(feature = "build-base")]
+mod assistant_voice;
+#[cfg(feature = "build-base")]
+mod assistant_turn;
+#[cfg(feature = "build-base")]
+mod assistant_phrases;
+#[cfg(feature = "build-base")]
+mod assistant_conversation;

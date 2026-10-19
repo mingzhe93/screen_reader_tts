@@ -320,6 +320,7 @@ To test the sidecar alone, see `tts-engine/README.md`.
 |---|---|
 | `docs/DESIGN_SPEC.md` | Architecture: builds, runtimes, event flow, chunking, playback, storage, transcription. |
 | `docs/DECISIONS.md` | Agreed direction, model choices, order of work. |
+| [docs/v0.3.0_assistant_plan.md](docs/v0.3.0_assistant_plan.md) | Settled v0.3.0 Assistant plan: chat page and conversation mode, pinned llama.cpp backend, model tiers and memory rules, queued speech, push-to-talk and auto-send experiment, order of work and review history; not implemented. |
 | `docs/learnings.md` | Measurements and reasoning behind the playback pipeline, Audio8, chunking, GPU use and transcription. |
 | `docs/IPC_API.md` | The sidecar's HTTP and WebSocket API (Full build only). |
 | [docs/METAL.md](docs/METAL.md) | macOS GPU support, precision fix, listening result and reproducible checks. |

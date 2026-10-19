@@ -1777,3 +1777,1171 @@ td:last-child {
     transition: none !important;
   }
 }
+
+/* --------------------------------------------------------------------------
+   Assistant page (src/assistant.ts and its src/assistant-*.ts modules)
+   Layout like LM Studio, inside the app shell:
+   .assistant-shell        fills the content area (the page gets the full width and height)
+     .assistant-topbar     one row: model picker, status pill, Load/Eject, Chat | Voice, panel toggle
+     .assistant-body       conversation + right panel
+       .assistant-main     .assistant-messages (scrolls) above .assistant-composer-wrap (pinned);
+                           in voice mode .assistant-voice (talk button + transcript) instead
+       .assistant-panel    settings, 320px, scrolls on its own; overlays below 1000px
+   .is-panel-open / .is-voice-mode on the shell.
+   .md                     safe Markdown output inside an answer
+   -------------------------------------------------------------------------- */
+
+.content-inner:has(> .page[data-page="assistant"].active) {
+  max-width: none;
+  height: 100%;
+  padding: 0;
+}
+
+.page[data-page="assistant"].active {
+  height: 100%;
+}
+
+#assistant-root {
+  height: 100%;
+}
+
+.assistant-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 360px;
+}
+
+.assistant-error {
+  color: var(--danger);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* Top bar */
+.assistant-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 52px;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.assistant-topbar-model,
+.assistant-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.assistant-topbar-model {
+  flex: 1 1 auto;
+}
+
+.assistant-topbar-actions {
+  flex: none;
+}
+
+.assistant-topbar .assistant-model-select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 140px;
+  max-width: 300px;
+  height: 32px;
+  font-weight: 500;
+}
+
+.assistant-no-model {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Inline-block rather than flex so a long status ends in an ellipsis. */
+.assistant-pill {
+  display: inline-block;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 280px;
+  height: 28px;
+  padding: 0 12px;
+  line-height: 26px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assistant-pill::before {
+  content: "";
+  display: inline-block;
+  margin: -2px 8px 0 0;
+  vertical-align: middle;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.assistant-pill.ok {
+  border-color: transparent;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.assistant-pill.ok::before {
+  background: var(--accent);
+}
+
+.assistant-pill.busy::before {
+  background: var(--accent);
+  animation: assistant-pulse 1.2s ease-in-out infinite;
+}
+
+.assistant-pill.warn {
+  color: var(--ink);
+}
+
+.assistant-pill.warn::before {
+  background: var(--s3-ink);
+}
+
+.assistant-pill.error {
+  border-color: transparent;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.assistant-pill.error::before {
+  background: var(--danger);
+}
+
+@keyframes assistant-pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.assistant-load-toggle {
+  min-width: 72px;
+}
+
+/* Chat | Voice segmented switch */
+.assistant-mode-switch {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  background: var(--surface-raised);
+}
+
+.assistant-mode-wrap {
+  display: inline-flex;
+}
+
+.assistant-mode-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.assistant-mode-btn:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+.assistant-mode-btn.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.assistant-mode-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.assistant-mode-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.assistant-panel-toggle,
+.assistant-panel-close {
+  width: 32px;
+  padding: 0;
+}
+
+.assistant-panel-toggle.is-active {
+  background: var(--surface-hover);
+  color: var(--accent-text);
+}
+
+.assistant-notice {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--danger-soft);
+}
+
+/* Body: conversation and panel */
+.assistant-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.assistant-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.assistant-state {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4) var(--space-3);
+  overflow-y: auto;
+}
+
+.assistant-state .empty-state {
+  width: min(480px, 100%);
+}
+
+/* The side padding centres a 760px column while the scrollbar stays at the edge. */
+.assistant-messages {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-4) max(var(--space-3), calc((100% - 760px) / 2));
+  overflow-y: auto;
+}
+
+.assistant-empty {
+  margin: auto;
+  max-width: 420px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.assistant-msg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.assistant-msg-user {
+  align-items: flex-end;
+}
+
+.assistant-bubble {
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: var(--radius-card);
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+
+.assistant-user-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.assistant-bubble .assistant-thumbs {
+  margin-top: var(--space-2);
+}
+
+.assistant-thumb {
+  display: block;
+  max-width: 120px;
+  max-height: 120px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-ctl);
+  object-fit: cover;
+}
+
+.assistant-thumb-wrap {
+  position: relative;
+}
+
+.assistant-thumb-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.assistant-thumb-remove:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.assistant-answer {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.assistant-answer.is-streaming:empty::after,
+.assistant-answer.is-streaming > :last-child:not(pre)::after {
+  content: "\258B";
+  margin-left: 2px;
+  color: var(--accent);
+  animation: assistant-pulse 1s steps(2, start) infinite;
+}
+
+.assistant-thinking {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.assistant-thinking summary {
+  cursor: pointer;
+}
+
+.assistant-thinking-text {
+  margin-top: var(--space-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant-msg-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: -12px;
+}
+
+.assistant-turn-note {
+  font-style: italic;
+}
+
+/* Composer, pinned under the messages */
+.assistant-composer-wrap {
+  flex: none;
+  width: min(760px, calc(100% - 2 * var(--space-3)));
+  margin: 0 auto;
+  padding: var(--space-2) 0 var(--space-3);
+}
+
+.assistant-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.assistant-composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.assistant-composer.is-dragging {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.assistant-composer > .assistant-thumbs {
+  padding: var(--space-1) var(--space-1) 0;
+}
+
+.assistant-composer .assistant-input {
+  min-height: 44px;
+  max-height: 200px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  resize: none;
+}
+
+.assistant-composer .assistant-input:hover,
+.assistant-composer .assistant-input:focus {
+  border: 0;
+  box-shadow: none;
+}
+
+.assistant-composer-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+/* Push-to-talk lives in this slot (src/assistant-voice.ts). */
+.assistant-ptt-slot:empty {
+  display: none;
+}
+
+.assistant-ptt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.assistant-ptt-btn {
+  width: 32px;
+  padding: 0;
+  touch-action: none;
+  user-select: none;
+}
+
+.assistant-ptt-btn.is-recording {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.assistant-ptt-btn.is-recording .icon {
+  animation: assistant-pulse 1.2s ease-in-out infinite;
+}
+
+.assistant-ptt-meter {
+  position: relative;
+  width: 56px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.assistant-ptt-meter-fill {
+  position: absolute;
+  inset: 0;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 60ms linear;
+}
+
+.assistant-composer-wrap .assistant-ptt-status {
+  margin: var(--space-2) var(--space-1) 0;
+  overflow-wrap: anywhere;
+}
+
+.assistant-composer-wrap .assistant-error,
+.assistant-hint {
+  margin: var(--space-2) var(--space-1) 0;
+}
+
+/* Right panel */
+.assistant-panel {
+  flex: none;
+  width: 320px;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  overflow-y: auto;
+}
+
+.assistant-shell:not(.is-panel-open) .assistant-panel {
+  display: none;
+}
+
+.assistant-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.assistant-panel-section {
+  border-bottom: 1px solid var(--line);
+}
+
+.assistant-panel-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 12px var(--space-3);
+  font-size: 13px;
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.assistant-panel-summary::-webkit-details-marker {
+  display: none;
+}
+
+.assistant-panel-summary::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.assistant-panel-section[open] > .assistant-panel-summary::before {
+  transform: rotate(45deg);
+}
+
+.assistant-panel-summary:hover {
+  background: var(--surface-hover);
+}
+
+.assistant-panel-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.assistant-section-body {
+  display: grid;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+.assistant-field {
+  display: grid;
+  gap: 6px;
+}
+
+.assistant-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.assistant-field-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.assistant-ctx-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.assistant-panel .assistant-ctx-select {
+  flex: 1;
+  height: 32px;
+}
+
+.assistant-panel .assistant-field input[type="number"].assistant-num {
+  width: 84px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.assistant-panel .assistant-num::placeholder {
+  font-size: 12px;
+}
+
+.assistant-advanced {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.assistant-advanced > summary {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.assistant-advanced[open] > summary {
+  margin-bottom: var(--space-1);
+}
+
+.assistant-sampling {
+  display: grid;
+  gap: var(--space-3);
+}
+
+/* Memory fit: text in the panel, a dot on the Models page */
+.assistant-fit-block {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  background: var(--surface-raised);
+}
+
+.assistant-fit {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.assistant-fit.fit-fits {
+  color: var(--accent-text);
+}
+
+.assistant-fit.fit-tight {
+  color: var(--s3-ink);
+}
+
+.assistant-fit.fit-over {
+  color: var(--danger);
+}
+
+.assistant-fit-dot {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  cursor: help;
+}
+
+.assistant-fit-dot.fit-fits {
+  background: var(--accent);
+}
+
+.assistant-fit-dot.fit-tight {
+  background: var(--s3-ink);
+}
+
+.assistant-fit-dot.fit-over {
+  background: var(--danger);
+}
+
+.assistant-fit-dot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.assistant-think {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.assistant-think input {
+  accent-color: var(--accent);
+}
+
+/* System prompt tabs */
+.assistant-tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--line);
+}
+
+.assistant-tab {
+  height: 30px;
+  margin-bottom: -1px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.assistant-tab:hover {
+  color: var(--ink);
+}
+
+.assistant-tab.is-active {
+  border-bottom-color: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.assistant-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.assistant-panel .assistant-prompt-input {
+  min-height: 120px;
+  max-height: 360px;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.assistant-prompt-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.assistant-counter {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Voice mode: talk button and state on one side, transcript on the other; they wrap into a
+   column when the main area is too narrow for both. --level (0..1) is the microphone level. */
+.assistant-voice {
+  --level: 0;
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-3);
+  overflow-y: auto;
+}
+
+.assistant-voice-stage {
+  display: flex;
+  flex: 1 1 300px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: 300px;
+  padding: var(--space-3);
+  text-align: center;
+}
+
+.assistant-talk {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 176px;
+  height: 176px;
+  margin-bottom: var(--space-2);
+}
+
+.assistant-talk-ring {
+  position: absolute;
+  inset: 16px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  transform: scale(calc(1 + var(--level) * 0.3));
+  transition: transform 80ms linear;
+}
+
+.assistant-talk:has(.is-speaking) .assistant-talk-ring {
+  animation: assistant-talk-breathe 1.6s ease-in-out infinite;
+}
+
+.assistant-talk-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 128px;
+  height: 128px;
+  padding: 0;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--accent-text);
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.assistant-talk-btn:hover:not(.is-inert) {
+  background: var(--surface-raised);
+}
+
+.assistant-talk-btn:focus-visible {
+  outline: 3px solid var(--accent-ring);
+  outline-offset: 4px;
+}
+
+.assistant-talk-btn.is-recording {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.assistant-talk-btn.is-recording:hover {
+  background: var(--accent-hover);
+}
+
+.assistant-talk-btn.is-speaking {
+  background: var(--accent-soft);
+}
+
+.assistant-talk-btn.is-thinking::after {
+  content: "";
+  position: absolute;
+  inset: -9px;
+  border: 2px solid transparent;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: assistant-spin 1s linear infinite;
+}
+
+.assistant-talk-btn.is-paused {
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+.assistant-talk-btn.is-inert {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@keyframes assistant-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes assistant-talk-breathe {
+  50% {
+    transform: scale(1.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-talk-ring,
+  .assistant-talk:has(.is-speaking) .assistant-talk-ring,
+  .assistant-talk-btn.is-thinking::after {
+    animation: none;
+    transition: none;
+  }
+}
+
+.assistant-talk-state {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.assistant-talk-state.tone-busy {
+  color: var(--accent-text);
+}
+
+.assistant-talk-state.tone-error {
+  color: var(--danger);
+}
+
+.assistant-talk-partial {
+  max-width: 460px;
+  color: var(--muted);
+  font-size: 13px;
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+
+.assistant-talk-error {
+  max-width: 460px;
+}
+
+.assistant-voice-transcript {
+  display: flex;
+  flex: 1 1 340px;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 260px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+
+.assistant-vt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.assistant-vt-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.assistant-vt-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-3);
+  overflow-y: auto;
+}
+
+.assistant-vt-exchange {
+  display: grid;
+  gap: 6px;
+}
+
+.assistant-vt-user,
+.assistant-vt-assistant {
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistant-vt-user {
+  padding: 8px 12px;
+  border-radius: var(--radius-ctl);
+  background: var(--accent-soft);
+}
+
+.assistant-vt-assistant {
+  padding: 0 12px;
+}
+
+.assistant-vt-who {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Text not heard yet (still to be spoken), or never heard (cut short). */
+.assistant-vt-rest {
+  color: var(--muted);
+}
+
+.assistant-vt-exchange.is-cut .assistant-vt-rest {
+  text-decoration: line-through;
+}
+
+.assistant-vt-exchange.is-active .assistant-vt-assistant::after {
+  content: "\258B";
+  margin-left: 2px;
+  color: var(--accent);
+  animation: assistant-pulse 1s steps(2, start) infinite;
+}
+
+.assistant-vt-mark {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.assistant-vt-exchange > .caption,
+.assistant-vt-exchange > .assistant-error {
+  padding: 0 12px;
+}
+
+/* Narrow windows: the panel floats over the conversation instead of squeezing it. */
+@media (max-width: 1000px) {
+  .assistant-panel {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 4;
+    max-width: calc(100% - var(--space-4));
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.28);
+  }
+
+}
+
+/* Very narrow: the actions move to a second row. */
+@media (max-width: 640px) {
+  .assistant-topbar {
+    flex-wrap: wrap;
+  }
+}
+
+/* Safe Markdown output */
+.md > * + * {
+  margin-top: var(--space-2);
+}
+
+.md p {
+  white-space: pre-wrap;
+}
+
+.md .md-heading {
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.md ul,
+.md ol {
+  padding-left: var(--space-4);
+}
+
+.md li > ul,
+.md li > ol {
+  margin-top: var(--space-1);
+}
+
+.md li {
+  white-space: pre-wrap;
+}
+
+.md blockquote {
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--line-strong);
+  color: var(--muted);
+}
+
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line-strong);
+}
+
+.md .md-code {
+  max-width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+  background: var(--log-bg);
+  color: var(--log-ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.md .md-code code {
+  font: inherit;
+}
+
+.md .md-code-inline {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-hover);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.md .md-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text);
+  font: inherit;
+  text-align: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.md .md-link:hover {
+  color: var(--accent-hover);
+}
+
+/* Models page: Assistant section, memory tooltips and two-step Delete */
+.badge-hint {
+  cursor: help;
+  border-style: dashed;
+}
+
+.badge-hint:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn-quiet-danger.is-armed {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  font-weight: 600;
+}
+
+.assistant-models-card {
+  padding-bottom: var(--space-2);
+}
+
+.assistant-models-card > .model-main {
+  padding: var(--space-3) var(--space-4) var(--space-2);
+}
+
+.assistant-model-entry {
+  border-top: 1px solid var(--line);
+}
+
+.assistant-models-card > .model-main .model-desc {
+  margin-top: 0;
+}
+
+.assistant-models-planned {
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  border-top: 1px solid var(--line);
+}
+
+.assistant-model-entry .model-name {
+  font-size: 15px;
+}
+
+.model-action {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* Settings: Assistant diagnostics */
+.assistant-diagnostics {
+  margin-top: var(--space-3);
+}
+
+.assistant-log-box {
+  max-height: 260px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Models page: group headings (Text to speech, Speech recognition, Assistant) */
+.models-group-title {
+  margin: var(--space-3) 0 calc(var(--space-2) * -0.5);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.models-group-title:first-child {
+  margin-top: 0;
+}

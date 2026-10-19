@@ -14,7 +14,11 @@ import {
   rateFromPayload,
 } from "./shared";
 import { brandMark, icon } from "./icons";
+import { initAssistant } from "./assistant";
 import { asrModelStatus, downloadAsrModel, initTranscribe } from "./transcribe";
+import { initAssistantModels } from "./assistant-models-page";
+import { initAssistantDiagnostics } from "./assistant-diagnostics";
+import { makeConfirmButton } from "./confirm-button";
 import "./styles.css";
 import type {
   Audio8DownloadResult,
@@ -90,6 +94,12 @@ app.innerHTML = `
           <p class="nav-label">Listen</p>
           <button class="nav-item" type="button" data-nav="transcribe" title="Transcribe">
             ${icon("mic")}<span class="nav-text">Transcribe</span>
+          </button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-label">Assist</p>
+          <button class="nav-item" type="button" data-nav="assistant" title="Assistant">
+            ${icon("assistant")}<span class="nav-text">Assistant</span>
           </button>
         </div>
         <div class="nav-group">
@@ -249,11 +259,22 @@ app.innerHTML = `
           </div>
         </section>
 
+        <section class="page" data-page="assistant" aria-labelledby="assistant-title">
+          <h1 class="sr-only" id="assistant-title">Assistant</h1>
+          <div id="assistant-root">
+            <article class="card empty-state">
+              <span class="empty-icon">${icon("assistant", 24)}</span>
+              <p class="empty-text">The Assistant is being set up in this build.</p>
+            </article>
+          </div>
+        </section>
+
         <section class="page" data-page="models" aria-labelledby="models-title">
           <header class="page-header">
             <h1 class="page-title" id="models-title">Models</h1>
           </header>
           <div class="stack">
+            <h2 class="models-group-title">Text to speech</h2>
             <article class="card model-row">
               <div class="model-main">
                 <div class="model-title">
@@ -277,6 +298,7 @@ app.innerHTML = `
               </div>
               <div class="model-action">
                 <button class="btn btn-primary" id="download-audio8-btn" type="button">Download model</button>
+                <button class="btn btn-quiet-danger is-hidden" id="delete-audio8-btn" type="button">Delete</button>
               </div>
               <div class="model-progress">
                 <progress id="audio8-progress" class="download-progress is-hidden" max="100" value="0"></progress>
@@ -284,8 +306,7 @@ app.innerHTML = `
               </div>
             </article>
 
-            <div id="asr-models-slot"></div>
-
+            <!-- Full build only (Python sidecar, deprecated); hidden in the Base build. -->
             <article class="card model-row" id="model-downloads-card">
               <div class="model-main">
                 <div class="model-title">
@@ -301,6 +322,13 @@ app.innerHTML = `
                 <button class="btn" id="download-qwen-all-btn" type="button">Download both</button>
               </div>
             </article>
+
+            <h2 class="models-group-title">Speech recognition</h2>
+            <div id="asr-models-slot"></div>
+
+            <h2 class="models-group-title">Assistant</h2>
+            <div id="assistant-models-slot" class="is-hidden"></div>
+
 
             <p class="caption mono storage-line" id="model-storage-paths">Storage: loading...</p>
           </div>
@@ -381,6 +409,8 @@ app.innerHTML = `
                 <div id="log" class="log"></div>
               </div>
             </article>
+
+            <div id="assistant-diagnostics-slot"></div>
           </div>
         </section>
 
@@ -433,6 +463,7 @@ const audio8Status = document.querySelector<HTMLParagraphElement>("#audio8-statu
 const audio8Progress = document.querySelector<HTMLProgressElement>("#audio8-progress")!;
 const audio8ProgressText = document.querySelector<HTMLParagraphElement>("#audio8-progress-text")!;
 const downloadAudio8Btn = document.querySelector<HTMLButtonElement>("#download-audio8-btn")!;
+const deleteAudio8Btn = document.querySelector<HTMLButtonElement>("#delete-audio8-btn")!;
 const cloneHint = document.querySelector<HTMLParagraphElement>("#clone-hint")!;
 
 const rateInput = document.querySelector<HTMLInputElement>("#rate")!;
@@ -468,10 +499,37 @@ let activeToolbarJobId = "";
 // sidecar build), in which case the player must not stretch it again.
 let playerAppliesRate = false;
 const player = new SpeechPlayer({
-  onFinished: () => hideToolbar(),
+  onFinished: () => {
+    hideToolbar();
+    reportAssistantPlayback({ drained: true });
+  },
   onRebuffer: (count, waitSeconds) => log(`playback_rebuffer count=${count} wait_for=${waitSeconds.toFixed(2)}s`),
   onError: (message) => log(message, "error"),
+  onPhrasePlayed: (seq) => reportAssistantPlayback({ playedSeq: seq }),
+  onProgress: (bufferedSeconds) => reportAssistantPlayback({ bufferedSeconds }),
 });
+// Set while the job playing is an Assistant voice answer. Its playback is reported back
+// (plan §6.1): seconds still queued (backpressure in Rust), each phrase once it has been
+// heard (history keeps an interrupted answer up to there), and when it has drained.
+let assistantPlaybackJobId = "";
+let lastPlaybackReport = 0;
+let lastBufferedSeconds = 0;
+
+function reportAssistantPlayback(update: { bufferedSeconds?: number; playedSeq?: number; drained?: boolean }): void {
+  if (!assistantPlaybackJobId) return;
+  if (update.bufferedSeconds !== undefined) {
+    lastBufferedSeconds = update.bufferedSeconds;
+    const now = performance.now();
+    if (now - lastPlaybackReport < 250) return;
+    lastPlaybackReport = now;
+  }
+  void emit("assistant:playback", {
+    job_id: assistantPlaybackJobId,
+    buffered_secs: update.drained ? 0 : lastBufferedSeconds,
+    played_seq: update.playedSeq ?? null,
+    drained: update.drained === true,
+  });
+}
 // The newest job the backend announced. Audio and end-of-job events from any other
 // job are stale: that job was replaced, and its output must not reach the speakers.
 let currentPlaybackJobId = "";
@@ -1086,6 +1144,7 @@ function renderAudio8Card(): void {
   if (!audio8Supported) {
     return;
   }
+  deleteAudio8Btn.classList.toggle("is-hidden", !audio8Downloaded || audio8Downloading);
   if (audio8Downloading) {
     downloadAudio8Btn.disabled = true;
     return;
@@ -1644,6 +1703,34 @@ async function bindActions(): Promise<void> {
     });
   }
 
+  makeConfirmButton(deleteAudio8Btn, {
+    label: "Delete",
+    confirmLabel: "Delete 860 MB?",
+    busyLabel: "Deleting...",
+    onConfirm: async () => {
+      let failure = "";
+      try {
+        const result = await invoke<{ ok: boolean; message: string }>("delete_audio8_model");
+        log(result.message);
+      } catch (error) {
+        failure = String(error);
+        log(`Deleting Audio8 failed: ${failure}`, "error");
+      }
+      audio8Downloaded = false;
+      await refreshAudio8Status();
+      try {
+        // Read aloud's model list shows whether Audio8 is ready, so it changes too.
+        await refreshModelOptionsFromBootstrap();
+      } catch (refreshError) {
+        log(`Failed to refresh model list: ${String(refreshError)}`, "error");
+      }
+      if (failure) {
+        audio8Status.classList.remove("ok");
+        audio8Status.textContent = failure;
+      }
+    },
+  });
+
   downloadAudio8Btn.addEventListener("click", async () => {
     if (!audio8Supported || audio8Downloading || audio8Downloaded) {
       return;
@@ -1756,6 +1843,11 @@ async function bindEvents(): Promise<void> {
       return;
     }
 
+    if (eventType === "PHRASE_DONE") {
+      if (typeof payload.phrase_seq === "number") player.markPhraseEnd(payload.phrase_seq);
+      return;
+    }
+
     if (eventType === "JOB_CANCELED") {
       suppressedJobIds.delete(jobId);
       stopAllPlayback();
@@ -1786,9 +1878,18 @@ async function bindEvents(): Promise<void> {
       }
       currentPlaybackJobId = jobId;
       suppressedJobIds.delete(jobId);
-      activeToolbarJobId = jobId;
       playerAppliesRate = payload.rate_applied_by_player === true;
       player.setTempo(playerAppliesRate ? toolbarRate : 1);
+      const assistantVoice = payload.kind === "assistant";
+      player.setStreaming(assistantVoice);
+      assistantPlaybackJobId = assistantVoice ? jobId : "";
+      lastBufferedSeconds = 0;
+      if (assistantVoice) {
+        // Voice answers are controlled from the Assistant page, not the read-aloud toolbar.
+        log(`job_started id=${jobId} (assistant voice)`);
+        return;
+      }
+      activeToolbarJobId = jobId;
     }
     void showToolbar(sourceWindow, toolbarRate);
     log(`job_started id=${jobId}`);
@@ -1851,6 +1952,21 @@ initTranscribe({
   isPageActive: () => document.querySelector('.page[data-page="transcribe"]')?.classList.contains("active") ?? false,
 }).catch((error) => {
   log(`Transcribe setup failed: ${String(error)}`, "error");
+});
+initAssistant({
+  log,
+  isPageActive: () => document.querySelector('.page[data-page="assistant"]')?.classList.contains("active") ?? false,
+}).catch((error) => {
+  log(`Assistant setup failed: ${String(error)}`, "error");
+});
+initAssistantModels({ log }).catch((error) => {
+  log(`Assistant models setup failed: ${String(error)}`, "error");
+});
+initAssistantDiagnostics({
+  log,
+  isPageActive: () => document.querySelector('.page[data-page="settings"]')?.classList.contains("active") ?? false,
+}).catch((error) => {
+  log(`Assistant diagnostics setup failed: ${String(error)}`, "error");
 });
 bootstrap()
   .then(bindActions)

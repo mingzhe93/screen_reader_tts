@@ -77,6 +77,11 @@ const AUDIO8_DEFAULT_SPEAKER: &str = "default";
 pub(crate) const AUDIO8_DOWNLOAD_SIZE_BYTES: u64 = 858_086_392;
 #[cfg(feature = "build-base")]
 static AUDIO8_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Audio8 runtimes being built. A delete refuses while one is, and a load refuses while a
+/// delete (or download) holds `AUDIO8_DOWNLOAD_ACTIVE`: each side raises its own flag
+/// before checking the other's, so at least one of them always sees the conflict.
+#[cfg(feature = "build-base")]
+static AUDIO8_LOADING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// The speech-to-text models (multitalker Parakeet and the Nemotron-3 diarizer) share one download.
 #[cfg(feature = "build-base")]
 const MODEL_ASR: &str = "parakeet_multitalker";
@@ -87,6 +92,24 @@ static ASR_DOWNLOAD_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// The running transcription: its job id and the flag that stops it.
 #[cfg(feature = "build-base")]
 static ASR_JOB: Mutex<Option<(String, Arc<AtomicBool>)>> = Mutex::new(None);
+/// `ASR_JOB`'s id while the Assistant's microphone session holds the ASR slot (plan §7.1).
+#[cfg(feature = "build-base")]
+const ASSISTANT_MIC_JOB: &str = "assistant-mic";
+/// The Assistant's open microphone session, if any. It holds `ASR_JOB` for its lifetime.
+#[cfg(feature = "build-base")]
+static ASSISTANT_MIC: Mutex<Option<crate::assistant_voice::VoiceSession>> = Mutex::new(None);
+/// Bumped by every close. An open that finishes after a close (or a session error) sees a
+/// changed value and closes what it opened instead of publishing it (Codex F6).
+#[cfg(feature = "build-base")]
+static ASSISTANT_MIC_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Bumped by every change of automatic turn-taking, so an enable still loading its models
+/// when a disable arrives does not switch it back on (Codex F7).
+#[cfg(feature = "build-base")]
+static ASSISTANT_MIC_AUTO_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The microphone generation whose session has a detector installed, if any: switching
+/// automatic turn-taking off and on then pauses and resumes it instead of reloading.
+#[cfg(feature = "build-base")]
+static ASSISTANT_MIC_AUTO_LOADED: Mutex<Option<u64>> = Mutex::new(None);
 const QWEN_CUSTOM_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 const QWEN_BASE_REPO: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
 const KYUTAI_REPO: &str = "Verylicious/pocket-tts-ungated";
@@ -368,6 +391,9 @@ struct JobStartedPayload {
     rate: f32,
     /// True when the audio is sent at normal speed and the player applies `rate`.
     rate_applied_by_player: bool,
+    /// "assistant" for an Assistant voice answer; read-aloud leaves it out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'static str>,
 }
 
 #[derive(Clone, Serialize)]
@@ -609,6 +635,88 @@ const AUDIO8_VOICE_PRESETS: [SpeakerPresetRow; 1] = [SpeakerPresetRow {
     native_language: "Chinese",
 }];
 
+/// Every command the pages can invoke. `extra` appends build-specific commands, because
+/// `generate_handler!` cannot take individual commands behind `#[cfg]`.
+macro_rules! app_commands {
+    ($($extra:tt)*) => {
+        tauri::generate_handler![
+            app_bootstrap,
+            engine_health,
+            engine_list_voices,
+            engine_runtime_status,
+            engine_storage_paths,
+            prefetch_models,
+            audio8_model_status,
+            download_audio8_model,
+            asr_model_status,
+            download_asr_model,
+            delete_audio8_model,
+            delete_asr_model,
+            assistant_mic_open,
+            assistant_mic_begin,
+            assistant_mic_end,
+            assistant_mic_cancel,
+            assistant_mic_close,
+            transcribe_audio_file,
+            cancel_transcription,
+            transcribe_microphone_input,
+            transcribe_reference_clip,
+            list_audio_inputs,
+            save_text_file,
+            export_recording_transcript,
+            get_compute_device,
+            set_compute_device,
+            restart_engine,
+            select_model,
+            set_selected_voice,
+            clone_voice_from_audio,
+            update_saved_voice,
+            delete_saved_voice,
+            set_preset_speaker,
+            set_speak_settings,
+            cycle_speak_rate,
+            set_hotkey,
+            speak_text,
+            trigger_read_selection,
+            selection_access,
+            show_playback_toolbar,
+            hide_playback_toolbar,
+            cancel_active_job,
+            $($extra)*
+        ]
+    };
+}
+
+/// The Base build adds the Assistant's commands (docs/assistant/README.md).
+#[cfg(feature = "build-base")]
+fn app_command_handler() -> impl Fn(tauri::Invoke) + Send + Sync + 'static {
+    app_commands!(
+        crate::assistant_backend::assistant_status,
+        crate::assistant_backend::assistant_install_backend,
+        crate::assistant_backend::assistant_download_model,
+        crate::assistant_backend::assistant_cancel_download,
+        crate::assistant_backend::assistant_load,
+        crate::assistant_backend::assistant_unload,
+        crate::assistant_backend::assistant_delete_model,
+        crate::assistant_backend::assistant_diagnostics,
+        crate::assistant_backend::assistant_list_devices,
+        crate::assistant_backend::assistant_hardware,
+        crate::assistant_commands::assistant_get_prompts,
+        crate::assistant_commands::assistant_set_prompts,
+        crate::assistant_conversation::assistant_voice_respond,
+        crate::assistant_conversation::assistant_voice_cancel,
+        assistant_mic_set_auto,
+        crate::assistant_commands::assistant_chat_start,
+        crate::assistant_commands::assistant_chat_cancel,
+        crate::assistant_commands::assistant_read_dropped_image,
+    )
+}
+
+#[cfg(not(feature = "build-base"))]
+fn app_command_handler() -> impl Fn(tauri::Invoke) + Send + Sync + 'static {
+    app_commands!()
+}
+
 pub fn run_app() {
     let state = SharedState {
         inner: Arc::new(Mutex::new(EngineState::default())),
@@ -628,6 +736,22 @@ pub fn run_app() {
                 if let Ok(mut guard) = state.inner.lock() {
                     guard.compute_device = saved_compute_device;
                 }
+            }
+            // The Assistant keeps its backend, models and run record beside the other models.
+            // Nothing starts here: the server loads only when the Assistant page asks for it.
+            #[cfg(feature = "build-base")]
+            {
+                let assistant_root = resolve_engine_data_dir(&handle, find_engine_root().ok().as_deref())
+                    .unwrap_or_else(|err| {
+                        eprintln!("Assistant data dir fell back to app data: {err:#}");
+                        handle.path_resolver().app_local_data_dir().unwrap_or_else(std::env::temp_dir)
+                    })
+                    .join("assistant");
+                app.manage(crate::assistant_backend::AssistantState::new(assistant_root));
+                // The page reports voice-answer playback; synthesis uses it for backpressure.
+                app.listen_global("assistant:playback", |event| {
+                    crate::assistant_conversation::on_playback_event(event.payload());
+                });
             }
             let init_result = tauri::async_runtime::block_on(async {
                 initialize_engine_if_needed(&handle, &state.inner).await
@@ -663,43 +787,7 @@ pub fn run_app() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            app_bootstrap,
-            engine_health,
-            engine_list_voices,
-            engine_runtime_status,
-            engine_storage_paths,
-            prefetch_models,
-            audio8_model_status,
-            download_audio8_model,
-            asr_model_status,
-            download_asr_model,
-            transcribe_audio_file,
-            cancel_transcription,
-            transcribe_microphone_input,
-            transcribe_reference_clip,
-            list_audio_inputs,
-            save_text_file,
-            export_recording_transcript,
-            get_compute_device,
-            set_compute_device,
-            restart_engine,
-            select_model,
-            set_selected_voice,
-            clone_voice_from_audio,
-            update_saved_voice,
-            delete_saved_voice,
-            set_preset_speaker,
-            set_speak_settings,
-            cycle_speak_rate,
-            set_hotkey,
-            speak_text,
-            trigger_read_selection,
-            selection_access,
-            show_playback_toolbar,
-            hide_playback_toolbar,
-            cancel_active_job,
-        ])
+        .invoke_handler(app_command_handler())
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| panic!("Failed to build VoiceReader app: {err}"));
 
@@ -1261,6 +1349,338 @@ async fn download_asr_model(app: AppHandle, state: State<'_, SharedState>) -> Re
     }
 }
 
+/// Deletes the downloaded Audio8 model. Refused while it downloads, while Read aloud uses it
+/// as the selected model, or while a read-aloud job still holds the loaded runtime.
+#[tauri::command]
+async fn delete_audio8_model(app: AppHandle, state: State<'_, SharedState>) -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    {
+        ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+        // Claiming the download flag keeps a download from starting while files are removed.
+        if AUDIO8_DOWNLOAD_ACTIVE.swap(true, Ordering::SeqCst) {
+            return Err("The Audio8 model is downloading. Wait for it to finish, then delete it.".to_string());
+        }
+        let result = (|| {
+            if AUDIO8_LOADING.load(Ordering::SeqCst) > 0 {
+                return Err("Audio8 is loading. Wait for it to finish, then delete it.".to_string());
+            }
+            let mut guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+            if guard.selected_model == MODEL_AUDIO8 {
+                return Err("Audio8 is the selected Read aloud model. Switch Read aloud to Kyutai Pocket TTS first.".to_string());
+            }
+            if let Some(runtime) = guard.local_audio8.as_ref() {
+                // Another holder means a read-aloud job is still using it.
+                if Arc::strong_count(runtime) > 1 {
+                    return Err("Audio8 is still reading aloud. Stop it, then delete the model.".to_string());
+                }
+            }
+            guard.local_audio8 = None;
+            Ok(PathBuf::from(&guard.models_dir))
+        })()
+        .and_then(|models_dir| delete_repo_dir(&models_dir, AUDIO8_REPO));
+        AUDIO8_DOWNLOAD_ACTIVE.store(false, Ordering::SeqCst);
+        result?;
+        return Ok(GenericResult { ok: true, message: "Audio8 TTS model deleted.".to_string() });
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state);
+        Err("Audio8 TTS is available in the Base build only.".to_string())
+    }
+}
+
+/// Deletes the downloaded transcription models (speech recogniser and diarizer). Refused
+/// while they download or while any transcription, including a voice-clip one, is running.
+#[tauri::command]
+async fn delete_asr_model(app: AppHandle, state: State<'_, SharedState>) -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    {
+        ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+        let models_dir = {
+            let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+            PathBuf::from(&guard.models_dir)
+        };
+        if ASR_DOWNLOAD_ACTIVE.swap(true, Ordering::SeqCst) {
+            return Err("The transcription model is downloading. Wait for it to finish, then delete it.".to_string());
+        }
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            // Held for the whole delete, so no transcription can start meanwhile.
+            let job = ASR_JOB.lock().map_err(|_| "Transcription state lock poisoned".to_string())?;
+            match job.as_ref() {
+                Some((id, _)) if id == ASSISTANT_MIC_JOB => {
+                    return Err("The Assistant is listening with this model. Close its microphone, then delete the model.".to_string())
+                }
+                Some(_) => return Err("A transcription is running. Stop it, then delete the model.".to_string()),
+                None => {}
+            }
+            delete_repo_dir(&models_dir, ASR_REPO)?;
+            delete_repo_dir(&models_dir, DIARIZER_REPO)
+        })
+        .await
+        .map_err(|err| format!("Deleting the transcription model failed: {err}"))
+        .and_then(|result| result);
+        ASR_DOWNLOAD_ACTIVE.store(false, Ordering::SeqCst);
+        result?;
+        return Ok(GenericResult { ok: true, message: "Transcription model deleted.".to_string() });
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state);
+        Err("Transcription is available in the Base build only.".to_string())
+    }
+}
+
+/// Sends the Assistant's microphone session events to the page.
+#[cfg(feature = "build-base")]
+struct TauriMicEvents {
+    app: AppHandle,
+}
+
+#[cfg(feature = "build-base")]
+impl crate::assistant_voice::VoiceEvents for TauriMicEvents {
+    fn level(&self, rms: f32) {
+        let _ = self.app.emit_all("assistant:mic-level", json!({ "rms": rms }));
+    }
+
+    fn partial(&self, turn_id: u64, text: &str) {
+        let _ = self.app.emit_all("assistant:mic-partial", json!({ "turn_id": turn_id, "text": text }));
+    }
+
+    fn final_text(&self, turn_id: u64, text: &str) {
+        let _ = self.app.emit_all("assistant:mic-final", json!({ "turn_id": turn_id, "text": text }));
+    }
+
+    fn auto_turn(&self, turn_id: u64, started: bool) {
+        let state = if started { "started" } else { "ended" };
+        let _ = self.app.emit_all("assistant:mic-turn", json!({ "turn_id": turn_id, "state": state }));
+    }
+
+    fn auto_failed(&self, message: &str) {
+        // The capture stage dropped the detector; a later enable loads a new one.
+        if let Ok(mut loaded) = ASSISTANT_MIC_AUTO_LOADED.lock() {
+            *loaded = None;
+        }
+        // The microphone keeps working for push-to-talk; only automatic sending stopped.
+        let _ = self.app.emit_all("assistant:mic-auto-failed", json!({ "message": message }));
+    }
+
+    fn error(&self, message: &str) {
+        let _ = self.app.emit_all("assistant:mic-error", json!({ "message": message }));
+        // The session is dead: release it and the ASR slot. Not on this thread, which may be
+        // one of the session's own.
+        let app = self.app.clone();
+        std::thread::spawn(move || end_assistant_mic(&app, "error"));
+    }
+}
+
+/// Closes the Assistant's microphone session if one is open, and frees the ASR slot.
+/// `reason` is sent with `assistant:mic-closed` ("transcription", "error", "closed", "exit").
+#[cfg(feature = "build-base")]
+fn end_assistant_mic(app: &AppHandle, reason: &str) {
+    // Also tells an open still in progress to close what it opens.
+    ASSISTANT_MIC_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let session = ASSISTANT_MIC.lock().ok().and_then(|mut session| session.take());
+    let Some(session) = session else { return };
+    session.close();
+    release_transcription_job(ASSISTANT_MIC_JOB);
+    let _ = app.emit_all("assistant:mic-closed", json!({ "reason": reason }));
+}
+
+#[cfg(not(feature = "build-base"))]
+fn end_assistant_mic(_app: &AppHandle, _reason: &str) {}
+
+/// Opens the Assistant's microphone and loads the speech recogniser (plan §7). Holds the ASR
+/// slot until it is closed; refused while a transcription runs. Opening it again is a no-op.
+#[tauri::command]
+async fn assistant_mic_open(app: AppHandle, state: State<'_, SharedState>, device: Option<String>) -> Result<GenericResult, String> {
+    #[cfg(feature = "build-base")]
+    {
+        ensure_engine_ready(&app, &state.inner).await.map_err(to_cmd_error)?;
+        let models_dir = {
+            let guard = state.inner.lock().map_err(|_| "State lock poisoned".to_string())?;
+            PathBuf::from(&guard.models_dir)
+        };
+        if !asr_models_downloaded(&models_dir) {
+            return Err("Voice input needs the transcription model. Download it on the Models page.".to_string());
+        }
+        {
+            let mut job = ASR_JOB.lock().map_err(|_| "Transcription state lock poisoned".to_string())?;
+            match job.as_ref() {
+                Some((id, _)) if id == ASSISTANT_MIC_JOB => {
+                    return Ok(GenericResult { ok: true, message: "The microphone is already open.".to_string() })
+                }
+                Some(_) => return Err("Transcription in progress. Stop it on the Transcribe page, then try again.".to_string()),
+                None => *job = Some((ASSISTANT_MIC_JOB.to_string(), Arc::new(AtomicBool::new(false)))),
+            }
+        }
+        let generation = ASSISTANT_MIC_GENERATION.load(Ordering::SeqCst);
+        let events: Arc<dyn crate::assistant_voice::VoiceEvents> = Arc::new(TauriMicEvents { app: app.clone() });
+        let opened = tauri::async_runtime::spawn_blocking(move || {
+            crate::assistant_voice::VoiceSession::open(&models_dir, device.as_deref(), events)
+        })
+        .await
+        .map_err(|err| format!("Opening the microphone failed: {err}"))
+        .and_then(|result| result.map_err(to_cmd_error));
+        return match opened {
+            Ok(session) => {
+                let mut slot = ASSISTANT_MIC.lock().map_err(|_| "Microphone state lock poisoned".to_string())?;
+                // Closed (or failed) while it was opening: don't publish it.
+                if ASSISTANT_MIC_GENERATION.load(Ordering::SeqCst) != generation {
+                    drop(slot);
+                    session.close();
+                    release_transcription_job(ASSISTANT_MIC_JOB);
+                    return Err("The microphone was closed while it was opening.".to_string());
+                }
+                *slot = Some(session);
+                Ok(GenericResult { ok: true, message: "Microphone open.".to_string() })
+            }
+            Err(message) => {
+                release_transcription_job(ASSISTANT_MIC_JOB);
+                Err(message)
+            }
+        };
+    }
+
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = (app, state, device);
+        Err("Voice input is available in the Base build only.".to_string())
+    }
+}
+
+#[cfg(feature = "build-base")]
+fn with_assistant_mic(action: impl FnOnce(&crate::assistant_voice::VoiceSession) -> Result<()>) -> Result<(), String> {
+    let session = ASSISTANT_MIC.lock().map_err(|_| "Microphone state lock poisoned".to_string())?;
+    let session = session.as_ref().ok_or_else(|| "The microphone is not open.".to_string())?;
+    action(session).map_err(to_cmd_error)
+}
+
+/// Starts a push-to-talk turn and returns its id (used with `assistant_mic_end` and in the
+/// `assistant:mic-*` events).
+#[tauri::command]
+fn assistant_mic_begin() -> Result<u64, String> {
+    #[cfg(feature = "build-base")]
+    {
+        let mut turn_id = 0;
+        return with_assistant_mic(|session| {
+            turn_id = session.next_turn_id();
+            session.begin_turn(turn_id)
+        })
+        .map(|()| turn_id);
+    }
+    #[cfg(not(feature = "build-base"))]
+    Err("Voice input is available in the Base build only.".to_string())
+}
+
+/// Ends the open turn; its text arrives as `assistant:mic-final`.
+#[tauri::command]
+fn assistant_mic_end(turn_id: u64) -> Result<(), String> {
+    #[cfg(feature = "build-base")]
+    return with_assistant_mic(|session| session.end_turn(turn_id));
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = turn_id;
+        Err("Voice input is available in the Base build only.".to_string())
+    }
+}
+
+/// Discards the open turn (no final text).
+#[tauri::command]
+fn assistant_mic_cancel(turn_id: u64) -> Result<(), String> {
+    #[cfg(feature = "build-base")]
+    return with_assistant_mic(|session| session.cancel_turn(turn_id));
+    #[cfg(not(feature = "build-base"))]
+    {
+        let _ = turn_id;
+        Err("Voice input is available in the Base build only.".to_string())
+    }
+}
+
+/// Pre-roll while automatic turn-taking runs: it begins a turn only after hearing some speech.
+#[cfg(feature = "build-base")]
+const AUTO_PRE_ROLL: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Turns automatic turn-taking (VAD + Smart Turn, plan §7.4) on or off for the open session.
+/// While on, speech starts a turn and a completed pause ends it, reported as
+/// `assistant:mic-turn` `{turn_id, state: "started" | "ended"}`; a detector failure switches it
+/// off and is reported as `assistant:mic-auto-failed`. The detector runs inside the session's
+/// capture thread, so its boundaries are exact. The page turns it off while an answer is
+/// spoken and on again after playback drains. The first use downloads about 11 MB of models.
+#[cfg(feature = "build-base")]
+#[tauri::command]
+async fn assistant_mic_set_auto(
+    assistant: State<'_, crate::assistant_backend::AssistantState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let generation = ASSISTANT_MIC_AUTO_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let mic = ASSISTANT_MIC_GENERATION.load(Ordering::SeqCst);
+    let loaded = ASSISTANT_MIC_AUTO_LOADED.lock().map(|loaded| *loaded == Some(mic)).unwrap_or(false);
+    if !enabled {
+        return if loaded { with_assistant_mic(|session| session.pause_auto(true)) } else { Ok(()) };
+    }
+    if loaded {
+        return with_assistant_mic(|session| session.pause_auto(false));
+    }
+    with_assistant_mic(|_| Ok(()))?;
+    let (smart_turn, vad) = assistant.turn_detection_models().await.map_err(to_cmd_error)?;
+    let detector = tauri::async_runtime::spawn_blocking(move || {
+        crate::assistant_turn::TurnDetector::new(&smart_turn, &vad, crate::assistant_turn::TurnDetectorConfig::default())
+    })
+    .await
+    .map_err(|err| format!("Loading turn detection failed: {err}"))?
+    .map_err(to_cmd_error)?;
+    // A later call (for example a disable while the models loaded), or a new microphone
+    // session, wins.
+    if ASSISTANT_MIC_AUTO_GENERATION.load(Ordering::SeqCst) != generation || ASSISTANT_MIC_GENERATION.load(Ordering::SeqCst) != mic {
+        return Ok(());
+    }
+    with_assistant_mic(|session| session.set_auto(Some(Box::new(detector)), AUTO_PRE_ROLL))?;
+    if let Ok(mut loaded) = ASSISTANT_MIC_AUTO_LOADED.lock() {
+        *loaded = Some(mic);
+    }
+    Ok(())
+}
+
+/// Closes the microphone and frees the speech recogniser.
+#[tauri::command]
+async fn assistant_mic_close(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || end_assistant_mic(&app, "closed"))
+        .await
+        .map_err(|err| format!("Closing the microphone failed: {err}"))
+}
+
+/// Removes `<models_dir>/<org>/<name>` for a Hugging Face `repo`, then the `<org>` folder if
+/// it is left empty. Refuses symlinked folders so nothing outside `models_dir` is touched.
+#[cfg(feature = "build-base")]
+fn delete_repo_dir(models_dir: &Path, repo: &str) -> Result<(), String> {
+    if models_dir.as_os_str().is_empty() {
+        return Err("The models folder is not known yet.".to_string());
+    }
+    let mut parts = repo.split('/');
+    let (Some(org), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(format!("Unexpected model repository name: {repo}"));
+    };
+    if [org, name].iter().any(|part| part.is_empty() || *part == "." || *part == "..") {
+        return Err(format!("Unexpected model repository name: {repo}"));
+    }
+    let org_dir = models_dir.join(org);
+    let repo_dir = org_dir.join(name);
+    for path in [models_dir, org_dir.as_path(), repo_dir.as_path()] {
+        if std::fs::symlink_metadata(path).map(|meta| meta.file_type().is_symlink()).unwrap_or(false) {
+            return Err(format!("Refusing to delete through the symbolic link {}.", path.display()));
+        }
+    }
+    if repo_dir.exists() {
+        std::fs::remove_dir_all(&repo_dir).map_err(|err| format!("Failed to delete {}: {err}", repo_dir.display()))?;
+    }
+    // Only succeeds when empty; another model from the same publisher keeps it.
+    let _ = std::fs::remove_dir(&org_dir);
+    Ok(())
+}
+
+
 /// Clears the running transcription when its task ends, and tells the window if the
 /// task ended without reporting a result (a panic inside the model code).
 #[cfg(feature = "build-base")]
@@ -1355,6 +1775,8 @@ fn start_transcription_job<F>(app: &AppHandle, work: F) -> Result<TranscribeStar
 where
     F: FnOnce(String, Arc<AtomicBool>, &mut dyn FnMut(TranscribeEvent<'_>)) -> Result<TranscribeSummary> + Send + 'static,
 {
+    // Starting a transcription ends the Assistant's microphone session (plan §7.1).
+    end_assistant_mic(app, "transcription");
     let job_id = Uuid::new_v4().to_string();
     let stop = Arc::new(AtomicBool::new(false));
     {
@@ -1510,6 +1932,7 @@ async fn transcribe_reference_clip(
             .decode(wav_base64.trim())
             .map_err(|err| format!("The audio file could not be read: {err}"))?;
         // One model at a time: it takes about 1.3 GB while it is loaded.
+        end_assistant_mic(&app, "transcription");
         let job_id = Uuid::new_v4().to_string();
         {
             let mut job = ASR_JOB.lock().map_err(|_| "Transcription state lock poisoned".to_string())?;
@@ -1561,7 +1984,7 @@ fn cancel_transcription() -> Result<GenericResult, String> {
     #[cfg(feature = "build-base")]
     {
         let job = ASR_JOB.lock().map_err(|_| "Transcription state lock poisoned".to_string())?;
-        return Ok(match job.as_ref() {
+        return Ok(match job.as_ref().filter(|(id, _)| id != ASSISTANT_MIC_JOB) {
             Some((_, cancel)) => {
                 cancel.store(true, Ordering::SeqCst);
                 GenericResult {
@@ -1626,6 +2049,17 @@ async fn ensure_audio8_loaded(state: &Arc<Mutex<EngineState>>) -> Result<Arc<Mut
         return Ok(runtime);
     }
 
+    struct LoadingGuard;
+    impl Drop for LoadingGuard {
+        fn drop(&mut self) {
+            AUDIO8_LOADING.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    AUDIO8_LOADING.fetch_add(1, Ordering::SeqCst);
+    let _loading = LoadingGuard;
+    if AUDIO8_DOWNLOAD_ACTIVE.load(Ordering::SeqCst) {
+        return Err(anyhow!("The Audio8 model is being downloaded or deleted. Try again when that finishes."));
+    }
     let model_dir = audio8_model_dir(Path::new(&models_dir));
     if !is_audio8_model_dir(&model_dir) {
         return Err(anyhow!(
@@ -2645,6 +3079,7 @@ async fn speak_and_stream(
                 source_window: source_window.to_string(),
                 rate: settings.rate,
                 rate_applied_by_player: crate::audio_pipeline::player_applies_rate(),
+                kind: None,
             },
         );
 
@@ -2818,6 +3253,7 @@ async fn speak_and_stream(
             rate: settings.rate,
             // The sidecar stretches the audio itself.
             rate_applied_by_player: false,
+            kind: None,
         },
     );
 
@@ -3876,6 +4312,15 @@ impl Drop for SharedState {
     }
 }
 
+/// Stops the Assistant's llama-server and microphone, if running. Safe to call more than once.
+fn shutdown_assistant(_app: &AppHandle) {
+    end_assistant_mic(_app, "exit");
+    #[cfg(feature = "build-base")]
+    if let Some(assistant) = _app.try_state::<crate::assistant_backend::AssistantState>() {
+        assistant.shutdown();
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 pub fn handle_run_event(app: &AppHandle, event: &RunEvent) {
     match event {
@@ -3889,12 +4334,16 @@ pub fn handle_run_event(app: &AppHandle, event: &RunEvent) {
                 if let Some(toolbar_window) = app.get_window(TOOLBAR_WINDOW_LABEL) {
                     let _ = toolbar_window.close();
                 }
+                // `AppHandle::exit` ends the process directly, so the exit events below never
+                // run on this path: stop the Assistant's llama-server here as well.
+                shutdown_assistant(app);
                 app.exit(0);
             }
         }
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
             #[cfg(feature = "build-base")]
             crate::recording_export::clear_audio();
+            shutdown_assistant(app);
             if let Some(state) = app.try_state::<SharedState>() {
                 let state = state.inner.clone();
                 tauri::async_runtime::block_on(async {
@@ -3905,3 +4354,237 @@ pub fn handle_run_event(app: &AppHandle, event: &RunEvent) {
         _ => {}
     }
 }
+
+/// The text-to-speech engine one Assistant voice answer speaks with, chosen at its start.
+#[cfg(feature = "build-base")]
+enum AssistantVoiceEngine {
+    Kyutai { runtime: Arc<Mutex<LocalKyutaiRuntime>>, preset: String },
+    Audio8(Arc<Mutex<LocalAudio8Runtime>>),
+}
+
+/// One Assistant voice answer as a single playback job (plan §6, §8). Phrases are synthesised
+/// one at a time under the same `job_id`, so the player keeps one audio stream across them,
+/// and the TTS runtime lock is held for one phrase only, never while waiting for model text.
+/// The job registers as the active job, so a read-aloud request cancels it (plan §6.2) and
+/// it cancels a read-aloud job that was playing.
+#[cfg(feature = "build-base")]
+pub(crate) struct AssistantSpeechJob {
+    app: AppHandle,
+    state: Arc<Mutex<EngineState>>,
+    job_id: String,
+    cancel: Arc<AtomicBool>,
+    rate_steps: Arc<AtomicU32>,
+    engine: AssistantVoiceEngine,
+    voice_id: String,
+    chunk_max_chars: u32,
+    volume: f32,
+    next_chunk: Arc<std::sync::atomic::AtomicUsize>,
+    finished: AtomicBool,
+}
+
+#[cfg(feature = "build-base")]
+impl AssistantSpeechJob {
+    /// Picks the Read aloud model, voice and settings, stops any read-aloud playing, and
+    /// announces the job to the player as a streaming ("assistant") job.
+    async fn start(app: &AppHandle, state: &Arc<Mutex<EngineState>>) -> Result<Self> {
+        ensure_engine_ready(app, state).await?;
+        let (voice_id, selected_model, settings, preset) = {
+            let guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            (
+                guard.selected_voice_id.clone(),
+                guard.selected_model.clone(),
+                guard.speak_settings.clone(),
+                guard.selected_kyutai_voice.clone(),
+            )
+        };
+        let engine = if selected_model == MODEL_AUDIO8 {
+            AssistantVoiceEngine::Audio8(ensure_audio8_loaded(state).await?)
+        } else {
+            AssistantVoiceEngine::Kyutai { runtime: local_kyutai_runtime(state)?, preset }
+        };
+        let job_id = Uuid::new_v4().to_string();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let rate_steps = Arc::new(AtomicU32::new(rate_to_steps(settings.rate)));
+        {
+            let mut guard = state.lock().map_err(|_| anyhow!("State lock poisoned"))?;
+            if let Some(previous) = guard.active_cancel_flag.replace(cancel.clone()) {
+                previous.store(true, Ordering::SeqCst);
+            }
+            guard.active_rate_steps = Some(rate_steps.clone());
+            guard.last_job_id = Some(job_id.clone());
+            guard.suppressed_job_ids.remove(&job_id);
+        }
+        let _ = app.emit_all(
+            "voicereader:job-started",
+            JobStartedPayload {
+                job_id: job_id.clone(),
+                ws_url: format!("local://stream/{job_id}"),
+                source: "assistant".to_string(),
+                source_window: String::new(),
+                rate: settings.rate,
+                rate_applied_by_player: crate::audio_pipeline::player_applies_rate(),
+                kind: Some("assistant"),
+            },
+        );
+        let _ = app.emit_all("voicereader:ws-event", json!({"type": "JOB_STARTED", "job_id": job_id.clone()}));
+        Ok(Self {
+            app: app.clone(),
+            state: state.clone(),
+            job_id,
+            cancel,
+            rate_steps,
+            engine,
+            voice_id,
+            chunk_max_chars: settings.chunk_max_chars,
+            volume: settings.volume,
+            next_chunk: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            finished: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    /// True once read-aloud (or anything else) cancelled this job, or [`Self::cancel`] ran.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Synthesises one phrase and streams its audio, tagged with `seq`. Blocking: call it from
+    /// a blocking thread. Returns `Ok(false)` when the job was cancelled.
+    pub(crate) fn speak_phrase(&self, seq: u32, text: &str) -> Result<bool> {
+        if self.is_cancelled() {
+            return Ok(false);
+        }
+        let app = self.app.clone();
+        let job_id = self.job_id.clone();
+        let next_chunk = self.next_chunk.clone();
+        let on_chunk = move |_index: usize, pcm: &[i16], sample_rate: u32| -> Result<()> {
+            let mut bytes = Vec::with_capacity(pcm.len() * 2);
+            for sample in pcm {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            let chunk_index = next_chunk.fetch_add(1, Ordering::SeqCst);
+            let _ = app.emit_all(
+                "voicereader:ws-event",
+                json!({
+                    "type": "AUDIO_CHUNK",
+                    "job_id": job_id.clone(),
+                    "chunk_index": chunk_index,
+                    "phrase_seq": seq,
+                    "audio": {
+                        "format": "pcm_s16le",
+                        "sample_rate": sample_rate,
+                        "channels": 1,
+                        "data_base64": BASE64_STANDARD.encode(&bytes),
+                    }
+                }),
+            );
+            Ok(())
+        };
+        let (end, _had_audio) = match &self.engine {
+            AssistantVoiceEngine::Audio8(runtime) => runtime
+                .lock()
+                .map_err(|_| anyhow!("Audio8 runtime lock poisoned"))?
+                .stream_synthesize(&self.voice_id, text, self.chunk_max_chars, self.volume, &self.cancel, &self.rate_steps, on_chunk)?,
+            AssistantVoiceEngine::Kyutai { runtime, preset } => runtime
+                .lock()
+                .map_err(|_| anyhow!("Kyutai runtime lock poisoned"))?
+                .stream_synthesize(
+                    &self.voice_id,
+                    preset,
+                    text,
+                    self.chunk_max_chars,
+                    self.volume,
+                    &self.cancel,
+                    &self.rate_steps,
+                    on_chunk,
+                )?,
+        };
+        let done = matches!(end, LocalJobEndState::Done) && !self.is_cancelled();
+        if done {
+            // The player marks where this phrase ends only now: a phrase arrives in several
+            // audio chunks, so no single chunk can say it is the last (Codex F2).
+            let _ = self.app.emit_all(
+                "voicereader:ws-event",
+                json!({"type": "PHRASE_DONE", "job_id": self.job_id.clone(), "phrase_seq": seq}),
+            );
+        }
+        Ok(done)
+    }
+
+    /// Ends the job once: the player plays out what is queued (`JOB_DONE`), or drops it
+    /// (`JOB_CANCELED`). Clears the active-job flags if they are still this job's.
+    pub(crate) fn finish(&self) {
+        if self.finished.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let terminal = if self.is_cancelled() { "JOB_CANCELED" } else { "JOB_DONE" };
+        let _ = self.app.emit_all("voicereader:ws-event", json!({"type": terminal, "job_id": self.job_id.clone()}));
+        if let Ok(mut guard) = self.state.lock() {
+            if guard.last_job_id.as_deref() == Some(self.job_id.as_str()) {
+                guard.last_job_id = None;
+            }
+            if guard.active_cancel_flag.as_ref().is_some_and(|flag| Arc::ptr_eq(flag, &self.cancel)) {
+                guard.active_cancel_flag = None;
+                guard.active_rate_steps = None;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "build-base")]
+impl Drop for AssistantSpeechJob {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+/// Starts an Assistant voice answer's playback job; see [`AssistantSpeechJob`].
+#[cfg(feature = "build-base")]
+pub(crate) async fn start_assistant_speech(app: &AppHandle) -> Result<AssistantSpeechJob> {
+    let state = app.state::<SharedState>().inner.clone();
+    AssistantSpeechJob::start(app, &state).await
+}
+
+#[cfg(all(test, feature = "build-base"))]
+mod delete_repo_dir_tests {
+    use super::delete_repo_dir;
+
+    #[test]
+    fn deletes_the_repo_and_an_empty_org_folder_only() {
+        let root = tempfile::tempdir().unwrap();
+        let models = root.path();
+        std::fs::create_dir_all(models.join("org/model/sub")).unwrap();
+        std::fs::write(models.join("org/model/sub/weights.bin"), b"x").unwrap();
+        std::fs::create_dir_all(models.join("org/other")).unwrap();
+        delete_repo_dir(models, "org/model").unwrap();
+        assert!(!models.join("org/model").exists());
+        assert!(models.join("org/other").exists(), "a sibling model must survive");
+        delete_repo_dir(models, "org/other").unwrap();
+        assert!(!models.join("org").exists(), "an empty org folder is removed");
+        // Missing folders are fine; odd names are refused.
+        delete_repo_dir(models, "org/model").unwrap();
+        for bad in ["..", "org", "org/..", "a/b/c", "/abs"] {
+            assert!(delete_repo_dir(models, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_symlinked_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("model")).unwrap();
+        std::fs::write(outside.path().join("model/keep.bin"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("org")).unwrap();
+        assert!(delete_repo_dir(root.path(), "org/model").is_err());
+        assert!(outside.path().join("model/keep.bin").exists());
+    }
+}
+

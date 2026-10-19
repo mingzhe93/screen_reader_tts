@@ -12,6 +12,10 @@ type PlayerEvents = {
   /** Audio ran out mid-job; playback waits for `waitSeconds` of audio before going on. */
   onRebuffer: (count: number, waitSeconds: number) => void;
   onError: (message: string) => void;
+  /** Streaming jobs: every sample of phrase `seq` has been played (in order, once each). */
+  onPhrasePlayed?: (seq: number) => void;
+  /** About every 50 ms while a job plays: seconds of audio queued but not yet heard. */
+  onProgress?: (bufferedSeconds: number) => void;
 };
 
 /** Silence put in front of the first audio after the output device is opened, which can clip it. */
@@ -36,6 +40,19 @@ export class SpeechPlayer {
   private started = false;
   private ended = false;
   private rebufferCount = 0;
+  /**
+   * A streaming job (an Assistant voice answer) has natural pauses while the model writes
+   * the next phrase. Read-aloud waits for a growing reserve after each pause; a streaming
+   * job resumes as soon as the usual small prebuffer is there (plan §8.3).
+   */
+  private streaming = false;
+  /** Streaming jobs: where each finished phrase's audio ends, in samples sent, oldest first. */
+  private phraseEnds: { seq: number; end: number }[] = [];
+  /**
+   * "Consumed" counts samples fed into the time-stretcher, a little ahead of what is heard
+   * (its buffer plus the output device). A phrase counts as heard only this much later.
+   */
+  private static readonly HEARD_MARGIN_SECONDS = 0.2;
   /** Keeps audio in arrival order: opening the audio device is asynchronous. */
   private pending: Promise<void> = Promise.resolve();
 
@@ -65,7 +82,7 @@ export class SpeechPlayer {
     this.inOrder(() => this.open(sampleRate));
   }
 
-  /** Stops playback and drops everything queued. */
+  /** Stops playback and drops everything queued. The next job is read-aloud unless set otherwise. */
   reset(): void {
     this.epoch += 1;
     this.sent = 0;
@@ -74,7 +91,14 @@ export class SpeechPlayer {
     this.started = false;
     this.ended = false;
     this.rebufferCount = 0;
+    this.streaming = false;
+    this.phraseEnds = [];
     this.post({ type: "reset", epoch: this.epoch });
+  }
+
+  /** Marks the current job as streaming (see `streaming`). Call right after `reset`. */
+  setStreaming(streaming: boolean): void {
+    this.streaming = streaming;
   }
 
   /** Adds audio (mono) to the end of the current job. */
@@ -105,6 +129,19 @@ export class SpeechPlayer {
     });
   }
 
+  /**
+   * Streaming jobs: phrase `seq` has sent all its audio, so it ends where the audio sent so
+   * far ends. Queued in order with `enqueue`, so it lands after the phrase's last chunk.
+   */
+  markPhraseEnd(seq: number): void {
+    const epoch = this.epoch;
+    this.inOrder(async () => {
+      if (epoch !== this.epoch) return;
+      this.phraseEnds.push({ seq, end: this.sent });
+      this.reportPlayedPhrases(this.consumed);
+    });
+  }
+
   /** Says that the current job will send no more audio; what is queued plays out. */
   end(): void {
     const epoch = this.epoch;
@@ -125,6 +162,8 @@ export class SpeechPlayer {
 
   /** Jumps past the audio that is waiting to be played. */
   skipQueued(): void {
+    // Skipped audio was not heard: its phrases are dropped, not reported (Codex F4).
+    this.phraseEnds = [];
     this.consumed = this.sent;
     this.post({ type: "skip", epoch: this.epoch });
   }
@@ -198,23 +237,37 @@ export class SpeechPlayer {
     }
     if (report.type === "status") {
       this.consumed = Math.max(this.consumed, report.consumed);
+      this.reportPlayedPhrases(this.consumed);
+      if (this.contextRate > 0) {
+        this.events.onProgress?.(Math.max(0, this.sent - this.consumed) / this.contextRate / this.tempo);
+      }
       this.startWhenReady();
       return;
     }
     if (report.type === "finished") {
+      this.reportPlayedPhrases(Number.POSITIVE_INFINITY);
       this.hasAudio = false;
       this.started = false;
+      this.events.onProgress?.(0);
       this.events.onFinished();
       return;
     }
     // Starved: the audio ran out before more arrived. Wait for a larger reserve than
     // last time before going on, so a slow model gives a few pauses instead of stutter.
     this.started = false;
-    if (!this.ended) {
+    if (!this.ended && !this.streaming) {
       this.rebufferCount += 1;
       this.events.onRebuffer(this.rebufferCount, rebufferSeconds(this.tempo, this.rebufferCount));
     }
     this.startWhenReady();
+  }
+
+  private reportPlayedPhrases(consumed: number): void {
+    const margin = Number.isFinite(consumed) ? SpeechPlayer.HEARD_MARGIN_SECONDS * this.contextRate * this.tempo : 0;
+    while (this.phraseEnds.length > 0 && this.phraseEnds[0].end + margin <= consumed) {
+      const phrase = this.phraseEnds.shift()!;
+      this.events.onPhrasePlayed?.(phrase.seq);
+    }
   }
 
   /** Starts, or resumes after a refill, once enough audio is waiting for the current speed. */

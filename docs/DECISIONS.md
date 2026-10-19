@@ -1,6 +1,27 @@
 # VoiceReader Decisions
 
-I settled on this direction on 2026-10-03, after a seven-month gap in development. This document records my decisions through version 0.2.3 (2026-10-10). Newest decisions go at the top of each section. Dated release entries describe those releases; Metal ships in the main app from v0.2.3; v0.2.2 remains CPU-only on macOS.
+I settled on this direction on 2026-10-03, after a seven-month gap in development. This document records my release decisions through version 0.2.3 and my planning direction for v0.3.0 (updated 2026-10-18). Newest decisions go at the top of each section. Dated release entries describe those releases; Metal ships in the main app from v0.2.3; v0.2.2 remains CPU-only on macOS.
+
+## Planned v0.3.0 Assistant (direction chosen 2026-10-14; decisions settled 2026-10-18; not implemented)
+
+Details, checked facts and the decisions I accepted on the reviewer's recommendation (marked AI-recommended) are in the [v0.3.0 Assistant plan](v0.3.0_assistant_plan.md).
+
+- **I settled the open decisions in a grilling review on 2026-10-18.** The audience is friends and family, so the infrastructure is sized for a spare-time project. No assistant code was written and no backend or model was run.
+- **Base build only.** The Full build is deprecated but its code stays; it shows no Assistant page.
+- **I am pinning llama.cpp to each VoiceReader release.** The build tag, upstream URL and SHA-256 are compiled into the app; downloads are staged, verified and renamed into place. Independent backend updates, the signed catalogue and rollback are deferred. This replaces my earlier wish for backend updates without an app release.
+- **One backend package per OS.** Windows x64 uses the upstream Vulkan zip, which also contains the CPU backends; macOS arm64 uses the Metal build. CUDA is skipped as too large until larger models need the speed.
+- **The Assistant page has a chat page and a conversation mode.** Chat takes typed or push-to-talk input, streams Markdown answers, has a Speak button per message, a Think toggle (on by default) and image attachments. Conversation mode is voice in and voice out with a transcript side pane, push-to-talk turns, and pressing the button to interrupt.
+- **I want to try automatic turn detection in conversation mode.** VAD plus Smart Turn ONNX sits behind an experimental toggle: on in my builds, off for friends and family until it stops cutting people off.
+- **I chose three model tiers at Q4.** MiniCPM-V-4.7-1B (Q4_K_M), Gemma 4 E4B and Gemma 4 12B (UD-Q4_K_XL), each with its vision projector. The app recommends a tier from detected hardware and never downloads one automatically. Model files are pinned by revision and SHA-256.
+- **Context is 32K by default.** A gear setting changes it on the next load and warns when the setting may not fit memory. I intend to make 128K the default on most machines later; that is kept in view, not decided.
+- **The model loads when the Assistant page opens.** Explicit Load and Unload buttons, plus unloading after idle.
+- **A read-aloud action ends an Assistant response.** It cancels the request, pending text, synthesis and audio, matching the v0.2.2 hotkey rule.
+- **The Assistant and Transcribe are mutually exclusive.** A meeting recording is never stopped automatically.
+- **Out of v0.3.0:** an external API screen, saved chat history, custom Hugging Face models, a global push-to-talk hotkey, voice barge-in and tool calling.
+- **The chat page ships first.** Order of work: managed backend and chat page, push-to-talk input, conversation mode, the auto-send experiment, then tiers and measurements.
+- **I am choosing a Rust conversation controller** (2026-10-14). It reuses the existing ASR, TTS and player. Pipecat is a reference for conversation behaviour rather than a runtime dependency.
+- **I want a separate appendable speech mode for conversation answers** (2026-10-14). Streamed phrases queue under one response and cancellation lifecycle, sharing synthesis and playback components with normal TTS. Normal read-aloud keeps its replacement behaviour.
+- **The plan includes the earlier Opus 5.5 review** (2026-10-18). Its comments on playback feedback, resource ownership, slow-stream buffering and package variants are now decisions or open implementation work. Its update-authenticity and ordering comments are superseded by pinning and the chat-first order.
 
 ## Release 0.2.3 (2026-10-10; prepared, not yet published)
 

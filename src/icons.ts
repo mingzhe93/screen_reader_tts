@@ -13,6 +13,7 @@ const PATHS = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/>',
   download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+  assistant: '<path d="M20 15a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2z"/><path d="M9 10h6M9 13h3"/>',
 } as const;
 
 export type IconName = keyof typeof PATHS;

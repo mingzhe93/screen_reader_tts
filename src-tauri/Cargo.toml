@@ -1,6 +1,6 @@
 [package]
 name = "voicereader-desktop"
-version = "0.2.3"
+version = "0.3.0-testing"
 edition = "2021"
 
 [build-dependencies]
@@ -41,9 +41,15 @@ parakeet-rs = { path = "vendor/parakeet-rs", default-features = false, features 
 cpal = { version = "0.15", optional = true }
 # Decodes the audio files handed to the transcriber (WAV, MP3, M4A/MP4, FLAC, OGG).
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "aac", "alac", "isomp4", "flac", "ogg", "vorbis", "mkv"], optional = true }
+# Verifies the pinned llama.cpp backend and Assistant model downloads.
+sha2 = { version = "0.10", optional = true }
+# FFT for the Whisper log-mel features of the Assistant's turn detector (Smart Turn).
+realfft = { version = "3", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+# The JobObjects, Threading and Security features let the Assistant tie llama-server's
+# lifetime to the app and inspect a recorded server process; SystemInformation reads total RAM.
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation"] }
 # Audio8 decoding uses DirectML on Windows and the native WebGPU/Metal plugin on Apple Silicon.
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["directml"], optional = true }
 libloading = { version = "0.9", optional = true }
@@ -52,9 +58,33 @@ libloading = { version = "0.9", optional = true }
 core-graphics = "0.24"
 core-foundation = "0.10"
 objc = "0.2"
+# Process checks and signals for the Assistant's llama-server.
+libc = { version = "0.2", optional = true }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 build-full = []
-build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading", "dep:parakeet-rs", "dep:symphonia", "dep:cpal", "dep:tempfile", "dep:zip"]
+build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading", "dep:parakeet-rs", "dep:symphonia", "dep:cpal", "dep:tempfile", "dep:zip", "dep:sha2", "dep:libc", "dep:realfft"]
+
+# objc 0.2's `msg_send!` / `class!` macros expand to `#[cfg(feature = "cargo-clippy")]`
+# inside this crate, which rustc's cfg checking flags. Declare that value as expected so
+# the warning is silenced without hiding other unexpected cfgs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+# Cargo strips debug info from release builds by default. With Xcode 27's toolchain the
+# stripped proc-macro dylibs sometimes fail to load ("mis-aligned LINKEDIT string pool"),
+# which rustc reports as "can't find crate". Build-time code (proc macros, build scripts)
+# is therefore left unstripped; the app binary is unaffected by this override.
+[profile.release.build-override]
+strip = false
+
+# Hash the multi-gigabyte Assistant downloads at full speed in debug builds too
+# (`npm run desktop:dev`); unoptimised SHA-256 takes over a minute per 1.8 GB.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.block-buffer]
+opt-level = 3

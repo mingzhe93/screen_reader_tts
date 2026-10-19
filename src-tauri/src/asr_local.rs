@@ -35,7 +35,7 @@ pub(crate) const DIARIZER_MODEL_FILES: [&str; 2] = [
 ];
 const DIARIZER_MODEL_PATH: &str = "nemotron-3-diarization/nemotron3_diar_v3.onnx";
 
-const SAMPLE_RATE: u32 = 16_000;
+pub(crate) const SAMPLE_RATE: u32 = 16_000;
 /// The diarizer has eight speaker slots; the speech model was trained on up to four.
 pub(crate) const MAX_SPEAKERS_LIMIT: usize = 8;
 /// All eight by default, so that as many people as possible get their own label.
@@ -221,7 +221,7 @@ fn default_threads() -> usize {
     (cores / 2).clamp(1, 8)
 }
 
-fn load_model(models_dir: &Path, max_speakers: usize) -> Result<MultitalkerASR> {
+pub(crate) fn load_model(models_dir: &Path, max_speakers: usize) -> Result<MultitalkerASR> {
     if !asr_models_downloaded(models_dir) {
         return Err(anyhow!("The transcription model is not downloaded yet."));
     }

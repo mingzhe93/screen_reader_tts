@@ -27,6 +27,26 @@ pub(crate) const DEFAULT_FALLBACK_HOTKEY: &str = "Ctrl+Shift+S";
 struct AppSettingsFile {
     hotkey: Option<String>,
     compute_device: Option<String>,
+    /// The Assistant's system prompts; `None` means the built-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant_chat_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant_voice_prompt: Option<String>,
+}
+
+/// The Assistant system prompts saved by the user, `(chat, voice)`; `None` = the default.
+#[cfg(feature = "build-base")]
+pub(crate) fn load_assistant_prompts(app: &AppHandle) -> (Option<String>, Option<String>) {
+    let settings = load_settings_file(app);
+    (settings.assistant_chat_prompt, settings.assistant_voice_prompt)
+}
+
+#[cfg(feature = "build-base")]
+pub(crate) fn persist_assistant_prompts(app: &AppHandle, chat: Option<String>, voice: Option<String>) -> Result<()> {
+    update_settings_file(app, |settings| {
+        settings.assistant_chat_prompt = chat;
+        settings.assistant_voice_prompt = voice;
+    })
 }
 
 pub(crate) fn normalize_hotkey(value: &str) -> Result<String> {

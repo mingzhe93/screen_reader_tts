@@ -91,41 +91,9 @@ impl MicrophoneSource {
     }
 
     pub(crate) fn open_recorded(device_name: Option<&str>, target_rate: u32, stop: Arc<AtomicBool>, recording_path: Option<&Path>) -> Result<Self> {
-        ensure_audio_host();
-        let host = cpal::default_host();
-        let device = match device_name {
-            Some(wanted) => host
-                .input_devices()
-                .context("Failed to list audio input devices")?
-                .find(|device| device.name().ok().as_deref() == Some(wanted))
-                .ok_or_else(|| anyhow!("The microphone \"{wanted}\" is no longer available."))?,
-            None => host
-                .default_input_device()
-                .ok_or_else(|| anyhow!("No microphone was found. Connect one, or check the system's sound input settings."))?,
-        };
-        let supported = device
-            .default_input_config()
-            .map_err(|err| anyhow!("The microphone could not be opened: {err}"))?;
-        let sample_format = supported.sample_format();
-        let config: StreamConfig = supported.into();
-        let channels = usize::max(1, config.channels as usize);
-        let source_rate = config.sample_rate.0;
-
         let (sender, receiver) = channel::<Vec<f32>>();
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| s),
-            SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| s as f32 / 32_768.0)
-            }
-            SampleFormat::U16 => build_stream::<u16>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| {
-                (s as f32 - 32_768.0) / 32_768.0
-            }),
-            SampleFormat::I32 => {
-                build_stream::<i32>(&device, &config, channels, sender, error.clone(), stop.clone(), |s| s as f32 / 2_147_483_648.0)
-            }
-            other => Err(anyhow!("The microphone uses a sample format that is not supported ({other:?}).")),
-        }?;
+        let (stream, source_rate) = open_input_stream(device_name, sender, error.clone(), stop.clone())?;
         let recording = recording_path.map(|path| hound::WavWriter::create(path, hound::WavSpec {
             channels: 1, sample_rate: source_rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int,
         })).transpose().context("Could not create the recording")?;
@@ -188,6 +156,90 @@ impl MicrophoneSource {
     }
 }
 
+/// Opens `device_name` (the system default when `None`) without starting it. Each block
+/// of mono samples at the device's own rate goes to `sender` as `M::from(block)`. Returns
+/// the stream and that rate. Stream errors are stored in `error`.
+fn open_input_stream<M>(
+    device_name: Option<&str>,
+    sender: Sender<M>,
+    error: Arc<Mutex<Option<String>>>,
+    stop: Arc<AtomicBool>,
+) -> Result<(Stream, u32)>
+where
+    M: From<Vec<f32>> + Send + 'static,
+{
+    ensure_audio_host();
+    let host = cpal::default_host();
+    let device = match device_name {
+        Some(wanted) => host
+            .input_devices()
+            .context("Failed to list audio input devices")?
+            .find(|device| device.name().ok().as_deref() == Some(wanted))
+            .ok_or_else(|| anyhow!("The microphone \"{wanted}\" is no longer available."))?,
+        None => host
+            .default_input_device()
+            .ok_or_else(|| anyhow!("No microphone was found. Connect one, or check the system's sound input settings."))?,
+    };
+    let supported = device
+        .default_input_config()
+        .map_err(|err| anyhow!("The microphone could not be opened: {err}"))?;
+    let sample_format = supported.sample_format();
+    let config: StreamConfig = supported.into();
+    let channels = usize::max(1, config.channels as usize);
+    let source_rate = config.sample_rate.0;
+
+    let stream = match sample_format {
+        SampleFormat::F32 => build_stream::<f32, M>(&device, &config, channels, sender, error, stop, |s| s),
+        SampleFormat::I16 => build_stream::<i16, M>(&device, &config, channels, sender, error, stop, |s| s as f32 / 32_768.0),
+        SampleFormat::U16 => build_stream::<u16, M>(&device, &config, channels, sender, error, stop, |s| {
+            (s as f32 - 32_768.0) / 32_768.0
+        }),
+        SampleFormat::I32 => {
+            build_stream::<i32, M>(&device, &config, channels, sender, error, stop, |s| s as f32 / 2_147_483_648.0)
+        }
+        other => Err(anyhow!("The microphone uses a sample format that is not supported ({other:?}).")),
+    }?;
+    Ok((stream, source_rate))
+}
+
+/// A running input device that pushes its raw mono blocks, at the device's own rate,
+/// into a channel the caller owns. Unlike [`MicrophoneSource`], the caller reads and
+/// resamples, so it can put its own messages into the same channel and keep them in
+/// order with the audio. Capture stops when this is dropped. It must stay on the thread
+/// that opened it.
+pub(crate) struct InputStream {
+    _stream: Stream,
+    source_rate: u32,
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl InputStream {
+    /// Opens and starts `device_name`, or the system default input when it is `None`.
+    /// Every captured block is sent as `M::from(block)`.
+    pub(crate) fn open<M>(device_name: Option<&str>, sender: Sender<M>) -> Result<Self>
+    where
+        M: From<Vec<f32>> + Send + 'static,
+    {
+        let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let never = Arc::new(AtomicBool::new(false));
+        let (stream, source_rate) = open_input_stream(device_name, sender, error.clone(), never)?;
+        stream
+            .play()
+            .map_err(|err| anyhow!("The microphone could not be started: {err}"))?;
+        Ok(Self { _stream: stream, source_rate, error })
+    }
+
+    /// The rate of the blocks sent to the channel.
+    pub(crate) fn source_rate(&self) -> u32 {
+        self.source_rate
+    }
+
+    /// The error the audio system reported since the last call, if any.
+    pub(crate) fn take_error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|mut error| error.take())
+    }
+}
+
 fn write_recording_samples(writer: &mut hound::WavWriter<BufWriter<File>>, samples: &[f32]) -> Result<()> {
     for &sample in samples {
         let sample = if sample.is_finite() { sample.clamp(-1.0, 1.0) } else { 0.0 };
@@ -196,17 +248,18 @@ fn write_recording_samples(writer: &mut hound::WavWriter<BufWriter<File>>, sampl
     Ok(())
 }
 
-fn build_stream<T>(
+fn build_stream<T, M>(
     device: &cpal::Device,
     config: &StreamConfig,
     channels: usize,
-    sender: Sender<Vec<f32>>,
+    sender: Sender<M>,
     error: Arc<Mutex<Option<String>>>,
     stop: Arc<AtomicBool>,
     to_f32: fn(T) -> f32,
 ) -> Result<Stream>
 where
     T: SizedSample + Send + 'static,
+    M: From<Vec<f32>> + Send + 'static,
 {
     device
         .build_input_stream(
@@ -220,7 +273,7 @@ where
                     .map(|frame| frame.iter().map(|sample| to_f32(*sample)).sum::<f32>() / frame.len() as f32)
                     .collect();
                 // The receiver is gone once the recording has ended; nothing to do then.
-                let _ = sender.send(mono);
+                let _ = sender.send(M::from(mono));
             },
             move |err| {
                 if let Ok(mut slot) = error.lock() {

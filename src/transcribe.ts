@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/api/dialog";
 import { icon } from "./icons";
+import { makeConfirmButton } from "./confirm-button";
 import type {
   AsrModelStatus,
   AudioInput,
@@ -171,6 +172,7 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
       </div>
       <div class="model-action">
         <button class="btn btn-primary" id="asr-model-download-btn" type="button">Download model</button>
+        <button class="btn btn-quiet-danger is-hidden" id="asr-model-delete-btn" type="button">Delete</button>
       </div>
       <div class="model-progress">
         <progress class="download-progress is-hidden" data-asr-progress max="100" value="0"></progress>
@@ -204,6 +206,7 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
   const modelStatusEl = modelSlot.querySelector<HTMLParagraphElement>("#asr-model-status")!;
   const modelSizeEl = modelSlot.querySelector<HTMLSpanElement>("#asr-model-size")!;
   const modelDownloadBtn = modelSlot.querySelector<HTMLButtonElement>("#asr-model-download-btn")!;
+  const modelDeleteBtn = modelSlot.querySelector<HTMLButtonElement>("#asr-model-delete-btn")!;
   // The download can be started from either page, so both show its progress.
   const downloadBars = Array.from(document.querySelectorAll<HTMLProgressElement>("[data-asr-progress]"));
   const downloadTexts = Array.from(document.querySelectorAll<HTMLParagraphElement>("[data-asr-progress-text]"));
@@ -247,6 +250,8 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
     setupDownloadBtn.disabled = downloading;
     modelDownloadBtn.disabled = downloading || downloaded;
     modelDownloadBtn.textContent = downloaded ? "Downloaded" : "Download model";
+    modelDeleteBtn.classList.toggle("is-hidden", !downloaded || downloading);
+    modelDeleteBtn.disabled = running;
     modelStatusEl.classList.toggle("ok", downloaded);
 
     if (!modelStatus) {
@@ -666,6 +671,26 @@ export async function initTranscribe(options: TranscribeOptions): Promise<void> 
 
   setupDownloadBtn.addEventListener("click", () => void downloadModel());
   modelDownloadBtn.addEventListener("click", () => void downloadModel());
+  makeConfirmButton(modelDeleteBtn, {
+    label: "Delete",
+    confirmLabel: "Delete 1 GB?",
+    busyLabel: "Deleting...",
+    onConfirm: async () => {
+      let failure = "";
+      try {
+        await invoke("delete_asr_model");
+        log("Transcription model deleted");
+      } catch (error) {
+        failure = String(error);
+        log(`Deleting the transcription model failed: ${failure}`, "error");
+      }
+      await refreshModelStatus();
+      if (failure) {
+        modelStatusEl.classList.remove("ok");
+        modelStatusEl.textContent = failure;
+      }
+    },
+  });
   chooseBtn.addEventListener("click", async () => {
     const picked = await open({
       multiple: false,
