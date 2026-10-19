@@ -1,6 +1,6 @@
 # Voice input and voice conversation (frontend)
 
-Status: Steps 2–4 of v0.3.0, frontend side, uncommitted. Type-checked, built and exercised in a browser against a mocked backend on macOS. **It has not been run against the real Rust commands on either platform**, because they were being finished at the same time. The Rust side of voice input is in [voice-input.md](voice-input.md); the page itself is in [ui.md](ui.md).
+Status on 2026-10-19: the base Assistant is committed in `5e62732`, and I have tested it working on macOS. This document now includes the tools-phase extensions; [tools.md](tools.md) records their validation and remaining manual checks. Windows testing is deferred. The Rust voice-input path is in [voice-input.md](voice-input.md); the page is in [ui.md](ui.md).
 
 This covers two features of the Assistant page:
 
@@ -10,7 +10,7 @@ This covers two features of the Assistant page:
 It implements `docs/v0.3.0_assistant_plan.md`:
 
 - §3.2: push-to-talk input on the chat page (hold or toggle).
-- §3.3: voice mode, push-to-talk as the turn boundary, the microphone closed while the assistant speaks, a press interrupting the answer, reasoning always off, and the experimental auto-send toggle.
+- §3.3: voice mode, push-to-talk as the turn boundary, the microphone closed while the assistant speaks, a press interrupting the answer, reasoning originally off (the tools phase adds an optional Think toggle), and the experimental auto-send toggle.
 - §6.1 and Codex F8/F9: heard text comes only from `played_seq` acknowledgements, and the watchdog detects stalls rather than imposing a total-duration deadline.
 - §6.2: a read-aloud request preempts a voice answer.
 - §6.3: an interrupted answer is kept in history up to the last played phrase, followed by `[interrupted by user]`.
@@ -62,14 +62,14 @@ Tauri v1: `invoke` arguments are camelCase; payload fields are snake_case.
 
 | Command | Args | Result |
 |---|---|---|
-| `assistant_voice_respond` | `{ requestId, messages, sampling }` (as `assistant_chat_start`, no `think`) | `{ request_id, prompt_tokens, dropped_messages, job_id }` |
+| `assistant_voice_respond` | `{ requestId, messages, sampling, conversationId, tools, enabledTools, think, thinkingBudget, toolLimits }` (see [tools.md](tools.md)) | `{ request_id, prompt_tokens, dropped_messages, job_id }` |
 | `assistant_voice_cancel` | `{ requestId }` | nothing |
 
-Rust uses the saved Voice system prompt with thinking off, streams the text as `assistant:chat-delta` / `chat-done` / `chat-error` with this `request_id` (content only), and speaks it phrase by phrase as playback job `job_id`.
+Rust uses the saved Voice system prompt with thinking off by default (the optional Voice Think control enables it), streams the text as `assistant:chat-delta` / `chat-done` / `chat-error` with this `request_id` and round metadata. When thinking is enabled, reasoning also reaches the collapsed transcript accordion; only content is sent to the speech queue as playback job `job_id`.
 
 | Event | Payload |
 |---|---|
-| `assistant:voice-phrase` | `{ request_id, job_id, seq, text }`: the phrase about to be spoken |
+| `assistant:voice-phrase` | `{ request_id, job_id, seq, text, kind: "answer"|"filler", round }`: the phrase about to be spoken |
 | `assistant:voice-ended` | `{ request_id, job_id, reason: "done" \| "cancelled" \| "preempted" \| "error", message }`. "done": every phrase was handed to the player |
 | `assistant:playback` (from `main.ts`) | `{ job_id, buffered_secs, played_seq, drained }`: about every 250 ms, once per played phrase, once with `drained: true` |
 
@@ -92,7 +92,7 @@ The request id is registered before `assistant_voice_respond` is awaited, becaus
 - The main area shows a 128 px round **talk button** inside a ring that grows with the microphone level (`--level`), a **state line**, the partial text while recording, and an error line.
 - Beside it, or under it when the area is narrower than about 650 px (flex wrap), the **transcript pane**: "You" and "Assistant" entries and a New chat button. Assistant text shows what has been heard (played phrases) in normal colour and the rest muted. An interrupted or stopped answer shows the unheard rest struck through and an "Interrupted" or "Stopped" tag. Errors show under the entry. Text is plain (`textContent`), never Markdown or HTML.
 - State lines: "Hold to talk", "Starting microphone…", "Listening…", "Thinking…" (waiting for the final transcript or for the first phrase), "Speaking — press to interrupt", "Didn't catch that" (2.5 s), an error, or, when the model is not usable, "Load the model to start talking.", "Loading model…", "Unloading…", "Another VoiceReader window is using the model." or "Install a model on the Models page to talk." (the button is then inert). In auto mode: "Start talking. It sends when you finish. Press to pause.", "Paused. Press to listen again." (crossed-out microphone icon) and, after the microphone was lost, "Press to start listening".
-- The right panel stays. In voice mode the Reasoning section (Think) is hidden and a **Voice** section shows the toggle "Send automatically when I stop talking (experimental)" with a note that it uses voice activity detection plus Smart Turn and may cut you off. It is stored as `voicereader.assistant.autosend`; the default is on in a dev build (`import.meta.env.DEV`) and off in a release build. If `assistant_mic_set_auto(true)` rejects, the checkbox shows unticked with "Automatic sending stopped: <reason>", push-to-talk is used, and ticking it again retries. Concurrent enables are safe: the backend serialises the turn-model check, so a second call waits for a download in progress instead of failing.
+- The right panel stays. In voice mode the chat Reasoning section is hidden; the **Voice** section provides its own Think toggle, thinking limit and the toggle "Send automatically when I stop talking (experimental)" with a note that it uses voice activity detection plus Smart Turn and may cut you off. It is stored as `voicereader.assistant.autosend`; the default is on in a dev build (`import.meta.env.DEV`) and off in a release build. If `assistant_mic_set_auto(true)` rejects, the checkbox shows unticked with "Automatic sending stopped: <reason>", push-to-talk is used, and ticking it again retries. Concurrent enables are safe: the backend serialises the turn-model check, so a second call waits for a download in progress instead of failing.
 - On `assistant:mic-auto-failed` the message is shown in the state line and under the toggle ("Automatic sending stopped: <message> The talk button works as usual."), the toggle shows off and the talk button works as push-to-talk. The stored preference is not changed: ticking the toggle again retries, and the next time voice mode is entered auto mode is tried again.
 
 ### Conversation and lifecycle
@@ -150,7 +150,7 @@ Browser check, done on macOS with a temporary mocked `window.__TAURI_IPC__` (sin
 
 ### Manual checks with the real backend
 
-Run on Windows x64 and on macOS (Apple Silicon) with `npm run desktop:dev`, the transcription model downloaded and an Assistant model loaded. None has been run yet.
+I have tested and accepted Voice conversations and tools in the packaged macOS app. Use this list for regression checks with the transcription model downloaded and an Assistant model loaded; it is not an item-by-item record of every edge case. Windows x64 still needs its own build and microphone/playback validation.
 
 1. **Push-to-talk, hold.** On the chat page, type "Note:", hold the mic button, say "buy milk", release. Expected: "Starting microphone…" the first time, then "Listening…" with the meter moving and the partial text, then "Transcribing…", then the box reads "Note: buy milk" with the caret at the end. Nothing is sent.
 2. **Push-to-talk, toggle and Space.** Click once (short), speak, click again: the text is appended. Tab to the mic button, hold Space, speak, release: appended again.
@@ -176,3 +176,10 @@ Run on Windows x64 and on macOS (Apple Silicon) with `npm run desktop:dev`, the 
 - A turn longer than 120 s is ended by the backend; its final then arrives while the button may still be held and is handled as a normal final (the release afterwards does nothing).
 - Voice conversations, like chats, are not saved.
 - The partial transcript is not shown in the transcript pane itself, only under the button.
+
+
+## Tool-round extensions
+
+The model turn spans every tool round. App-owned fillers, model preambles and final answers share one ordered speech queue with a global sequence and round/kind tags. Preamble and filler text remain visible, but only played final-round answer phrases enter history. The watchdog remains enabled while tools run. Automatic listening waits for both terminal model metadata and actual playback drain. New chat revokes the old conversation’s URL grants, including in-flight search completions. See [tools.md](tools.md) for the complete contracts and regression coverage.
+
+Chat and Voice each expose the wrench Tools menu with All tools, per-tool selection and expandable settings. These settings live only on the Assistant page. When Voice thinking is enabled, a collapsed Thinking accordion in each exchange displays reasoning from all rounds; only content goes to speech, and reasoning never enters later history. Opening the accordion is preserved while streaming. The request’s `enabledTools` list is immutable for that turn.

@@ -1,12 +1,12 @@
 # tts-engine (Python sidecar for the Full build)
 
-This is the local engine service of the VoiceReader **Full build** (`build-full`), version 0.2.3. It is **not part of the default Base build** (`build-base`), which does not start it and needs no Python at run time. The Full build is kept for future heavier models and is not actively used.
+This is the local engine service of the VoiceReader **Full build** (`build-full`), version 0.3.0. It is **not part of the default Base build** (`build-base`), which does not start this sidecar or require a host Python installation. The Full build is kept for future heavier models and is not actively used.
 
 ## Build profile context
 
 VoiceReader ships in two desktop profiles:
 
-- **Base build** (`build-base`, the default for `npm run desktop:dev` and `npm run desktop:build`): everything runs inside the Rust process. Kyutai Pocket TTS, the optional Audio8 TTS model and speech-to-text transcription are implemented in Rust, so there is no Python sidecar, no Qwen model and no localhost API. The sidecar's API is not its interface; the Tauri commands and events described in `docs/DESIGN_SPEC.md` are.
+- **Base build** (`build-base`, the default for `npm run desktop:dev` and `npm run desktop:build`): Kyutai Pocket TTS, optional Audio8 TTS and transcription run inside Rust. The optional Assistant manages its own downloaded llama.cpp loopback server, and its optional calculation tool runs downloaded CPython inside WASI. Neither uses this Python sidecar or its API, and no Qwen model or host Python installation is required. The sidecar's API is not its interface; the Tauri commands and events described in `docs/DESIGN_SPEC.md` are.
 - **Full build** (`build-full`): the desktop app starts this Python sidecar as a child process and talks to it over loopback HTTP and WebSocket (`docs/IPC_API.md`). It offers Kyutai Pocket TTS and Qwen3-TTS 0.6B (CustomVoice and Base) with model switching and downloads. Audio8 TTS and transcription are not available in the Full build.
 
 The running Python service is used by the **Full build** only. Base builds still use the model/SoX helper scripts here at build time, and debug Base builds use `tts-engine/.data` for local data. Apple Silicon Base builds include native ONNX WebGPU/Metal from v0.2.3; that does not add a Metal, MLX or Audio8 path to this Python service. See [the native Metal guide](../docs/METAL.md). `npm run sidecar:build` packages it with PyInstaller into `src-tauri/binaries/tts-engine-<target triple>/`.

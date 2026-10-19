@@ -119,3 +119,13 @@ Windows Base installer:           npm run desktop:build:base:installer
 Windows Base portable:            npm run desktop:build:base:portable
 Windows Full portable:            npm run desktop:build:full:portable
 macOS Base portable:              npm run desktop:build:macos:portable
+
+Assistant resources (Base, v0.3.0)
+---------------------------------
+llama.cpp, GGUF models/projectors, Smart Turn/VAD and the optional CPython/tzdata
+files are downloaded into the Assistant data directory, not bundled here.
+Wasmtime/WASI is compiled into the app; no host Python installation is needed.
+The notices/ folder beside binaries/ is a Base Tauri resource containing
+assistant-tools.txt (verified in the macOS bundle). Windows portable notice
+placement remains a platform packaging check; see docs/RELEASING.md.
+The code runner is managed only from Assistant > Tools > Python settings.

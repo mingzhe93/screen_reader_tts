@@ -89,6 +89,8 @@ pub(crate) struct ModelStatus {
     /// The coefficients behind it, so the page can estimate any context length.
     pub memory: MemoryEstimate,
     pub sampling_defaults: SamplingDefaults,
+    /// Earned only by the pinned real-model tool evaluation, never inferred from size.
+    pub tools: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1003,6 +1005,9 @@ struct Inner {
     hardware: Mutex<Option<AssistantHardware>>,
 }
 
+/// The longest unload, model switch or exit waits for running turns to finish.
+const TURN_DRAIN_LIMIT: Duration = Duration::from_secs(60);
+
 impl Inner {
     fn slot(&self) -> MutexGuard<'_, ServerSlot> {
         self.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1028,6 +1033,8 @@ impl Inner {
         let pid = process.child.id();
         let tail = process.log_tail(LOG_TAIL_ON_ERROR);
         slot.process = None;
+        slot.generation += 1;
+        crate::assistant_chat::cancel_backend_turns(&self.layout.root);
         if slot.state == ServerState::Ready {
             slot.set_error(format!("llama-server stopped unexpectedly ({status}). Last log lines:\n{tail}"));
         }
@@ -1044,6 +1051,20 @@ impl Inner {
 
     /// Stops a server taken out of the slot and removes its run record if it is still ours.
     fn stop_and_forget(&self, process: Option<ServerProcess>, grace: Duration, lock_wait: Duration) {
+        // No backend slot mutex is held here: terminal sinks release their UseGuard.
+        // A first session's Wasm compilation cannot be interrupted. Retain ownership
+        // until its worker releases the lease; never report a completed unload early.
+        // Bounded: a turn that never finishes (a bug, or an uninterruptible first compile that
+        // hangs) must not hang unload or app exit forever. Stopping the model server is safe
+        // either way: a turn bound to this backend generation never reaches a newer server.
+        let deadline = std::time::Instant::now() + TURN_DRAIN_LIMIT;
+        while !crate::assistant_chat::wait_for_backend_turns(&self.layout.root, Duration::from_secs(10)) {
+            if std::time::Instant::now() >= deadline {
+                eprintln!("An Assistant turn did not finish within {} s; stopping the server anyway.", TURN_DRAIN_LIMIT.as_secs());
+                break;
+            }
+            eprintln!("Waiting for the cancelled Assistant tool worker to finish.");
+        }
         if let Some(process) = process {
             let pid = process.child.id();
             process.stop(grace);
@@ -1056,6 +1077,7 @@ impl Inner {
     /// Every caller passes the result to [`Inner::stop_and_forget`].
     fn take_server(&self, slot: &mut ServerSlot) -> Option<ServerProcess> {
         slot.generation += 1;
+        crate::assistant_chat::cancel_backend_turns(&self.layout.root);
         slot.set_stopped();
         let process = slot.process.take();
         if process.is_some() {
@@ -1083,7 +1105,7 @@ impl Inner {
             (reaped, expired, process)
         };
         self.forget_exited(reaped);
-        self.stop_and_forget(process, STOP_GRACE, RECORD_LOCK_WAIT);
+        if expired { self.stop_and_forget(process, STOP_GRACE, RECORD_LOCK_WAIT); }
         expired
     }
 }
@@ -1093,6 +1115,7 @@ fn idle_expired(state: ServerState, in_use: usize, last_activity: Instant, now: 
 }
 
 /// Shared Assistant state, registered with Tauri via `.manage(AssistantState::new(root))`.
+#[derive(Clone)]
 pub(crate) struct AssistantState {
     inner: Arc<Inner>,
 }
@@ -1123,6 +1146,41 @@ impl Drop for DownloadGuard<'_> {
 }
 
 impl AssistantState {
+    pub(crate) fn root_dir(&self) -> PathBuf { self.inner.layout.root.clone() }
+
+    pub(crate) fn generation(&self) -> u64 { self.inner.slot().generation }
+
+    pub(crate) fn is_generation_ready(&self, generation: u64) -> bool {
+        let (reaped, ready) = {
+            let mut slot = self.inner.slot();
+            let reaped = self.inner.reap_exited(&mut slot);
+            (reaped, slot.generation == generation && slot.state == ServerState::Ready && slot.process.is_some())
+        };
+        self.inner.forget_exited(reaped);
+        ready
+    }
+
+    /// Snapshot endpoint, generation and the use lease under one backend lock.
+    pub(crate) fn admit_turn(&self) -> Result<(Endpoint, UseGuard, u64)> {
+        let (reaped, admission) = {
+            let mut slot = self.inner.slot();
+            let reaped = self.inner.reap_exited(&mut slot);
+            let endpoint = match (slot.state, slot.process.as_ref(), slot.model_id.clone(), slot.ctx_size) {
+                (ServerState::Ready, Some(process), Some(model_id), Some(ctx_size)) => Some(Endpoint {
+                    base_url: format!("http://127.0.0.1:{}", process.port), api_key: process.api_key.clone(), model_id, ctx_size,
+                }),
+                _ => None,
+            };
+            let admission = endpoint.map(|endpoint| {
+                slot.in_use += 1; slot.last_activity = Instant::now();
+                (endpoint, UseGuard { inner: self.inner.clone() }, slot.generation)
+            });
+            (reaped, admission)
+        };
+        self.inner.forget_exited(reaped);
+        admission.ok_or_else(|| anyhow!("The assistant model is not loaded. Load it and try again."))
+    }
+
     pub(crate) fn new(root: PathBuf) -> Self {
         let user_agent = concat!("VoiceReader/", env!("CARGO_PKG_VERSION"));
         // Loopback calls carry the API key, so they must never go through a proxy.
@@ -1318,6 +1376,7 @@ impl AssistantState {
                     },
                     memory: model.memory,
                     sampling_defaults: model.sampling,
+                    tools: crate::assistant_catalogue::TOOLS_VERIFIED_MODELS.contains(&model.id),
                 })
                 .collect(),
             download: self.inner.download_slot().clone(),
@@ -1345,8 +1404,9 @@ impl AssistantState {
         endpoint
     }
 
-    /// Marks the server in use until the guard drops (for the length of a request).
-    pub(crate) fn begin_use(&self) -> UseGuard {
+    /// Legacy test fixture; real requests use atomic `admit_turn`.
+    #[cfg(test)]
+    fn begin_use(&self) -> UseGuard {
         let mut slot = self.inner.slot();
         slot.in_use += 1;
         slot.last_activity = Instant::now();
@@ -1485,7 +1545,7 @@ impl AssistantState {
         if !layout.model_installed(model) {
             return Err(anyhow!("{} is not downloaded.", model.label));
         }
-        let generation = {
+        let mut generation = {
             let mut slot = inner.slot();
             inner.reap_exited(&mut slot);
             if slot.state == ServerState::Ready
@@ -1507,14 +1567,23 @@ impl AssistantState {
         // Stop our current server (another model or context) before anything else.
         let current = {
             let mut slot = inner.slot();
+            if slot.generation != generation { return Err(anyhow!("Loading was cancelled.")); }
+            slot.generation += 1;
+            generation = slot.generation;
+            crate::assistant_chat::cancel_backend_turns(&layout.root);
             slot.set_stopped();
             slot.process.take()
         };
+        let drain_root = layout.root.clone();
+        let drained = tokio::task::spawn_blocking(move || crate::assistant_chat::wait_for_backend_turns(&drain_root, Duration::from_secs(10)))
+            .await.unwrap_or(false);
         if let Some(process) = current {
             let pid = process.child.id();
             tokio::task::spawn_blocking(move || process.stop(STOP_GRACE)).await.ok();
             remove_own_run_record_locked(&record_path, pid, &admission);
         }
+
+        if !drained { return Err(anyhow!("The previous Assistant tools are still stopping. Try loading again.")); }
 
         if self.admit(&admission, &SystemProbe).await == RecordDecision::InUseElsewhere {
             {
@@ -2199,6 +2268,85 @@ mod tests {
         slot.state = ServerState::Ready;
         slot.model_id = Some("minicpm-v-4.7-1b".to_string());
         slot.ctx_size = Some(4096);
+    }
+
+    #[derive(Default)]
+    struct TurnProbe {
+        guard: Mutex<Option<UseGuard>>,
+        terminals: AtomicUsize,
+    }
+    impl crate::assistant_chat::ChatSink for TurnProbe {
+        fn delta(&self, _: &str, _: Option<&str>, _: Option<&str>) {}
+        fn done(&self, _: &str, _: Option<&str>, _: bool) {
+            self.terminals.fetch_add(1, Ordering::SeqCst);
+            self.guard.lock().unwrap().take();
+        }
+        fn error(&self, _: &str, _: &str) {
+            self.terminals.fetch_add(1, Ordering::SeqCst);
+            self.guard.lock().unwrap().take();
+        }
+    }
+
+    #[test]
+    fn real_backend_admission_unload_and_replacement_bind_turns_to_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = AssistantState::new(directory.path().into());
+        assert!(state.admit_turn().is_err());
+        install_server(&state, long_running_server());
+        let (_, guard, generation) = state.admit_turn().unwrap();
+        assert!(state.is_generation_ready(generation));
+        assert_eq!(state.inner.slot().in_use, 1);
+        assert!(!state.inner.unload_if_idle());
+        let sink = Arc::new(TurnProbe { guard: Mutex::new(Some(guard)), ..Default::default() });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let id = format!("backend-unload-{}", directory.path().display());
+        let slot = crate::assistant_chat::register_turn(&id, sink.clone(), Some(cancel.clone()), Some(directory.path().into())).unwrap().unwrap();
+        let unload = state.clone();
+        let worker = std::thread::spawn(move || unload.inner.unload_blocking());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !cancel.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!state.is_generation_ready(generation));
+        assert!(state.admit_turn().is_err());
+        assert!(!crate::assistant_chat::wait_for_backend_turns(directory.path(), Duration::ZERO));
+        assert!(!worker.is_finished(), "unload must await the tool/turn owner");
+        slot.finish_turn(serde_json::json!({}), None, false, None);
+        worker.join().unwrap();
+        assert_eq!(sink.terminals.load(Ordering::SeqCst), 1);
+        assert_eq!(state.inner.slot().in_use, 0);
+        install_server(&state, long_running_server());
+        let (_, replacement_guard, replacement_generation) = state.admit_turn().unwrap();
+        assert_ne!(replacement_generation, generation);
+        assert!(state.is_generation_ready(replacement_generation));
+        assert!(!state.is_generation_ready(generation));
+        drop(replacement_guard);
+        state.shutdown();
+    }
+
+    #[test]
+    fn reaping_a_crashed_server_revokes_registered_turn_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = AssistantState::new(directory.path().into());
+        install_server(&state, long_running_server());
+        let (_, guard, generation) = state.admit_turn().unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let sink = Arc::new(TurnProbe { guard: Mutex::new(Some(guard)), ..Default::default() });
+        let id = format!("backend-crash-{}", directory.path().display());
+        let turn = crate::assistant_chat::register_turn(&id, sink.clone(), Some(cancel.clone()), Some(directory.path().into())).unwrap().unwrap();
+        {
+            let mut slot = state.inner.slot();
+            let child = &mut slot.process.as_mut().unwrap().child;
+            child.kill().unwrap(); child.wait().unwrap();
+        }
+        assert!(!state.is_generation_ready(generation));
+        assert!(cancel.load(Ordering::SeqCst));
+        assert_eq!(state.status().server.state, ServerState::Error);
+        turn.finish_turn(serde_json::json!({}), None, true, None);
+        assert!(crate::assistant_chat::wait_for_backend_turns(directory.path(), Duration::ZERO));
+        assert_eq!(sink.terminals.load(Ordering::SeqCst), 1);
+        state.shutdown();
     }
 
     fn own_record(server_pid: u32) -> RunRecord {

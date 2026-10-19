@@ -8,7 +8,8 @@
         "binaries/models/**/*",
         "binaries/sox/**/*",
         "binaries/onnxruntime/**/*",
-        "binaries/kyutai-voices/**/*"
+        "binaries/kyutai-voices/**/*",
+        "notices/**/*"
       ]
     }
   }

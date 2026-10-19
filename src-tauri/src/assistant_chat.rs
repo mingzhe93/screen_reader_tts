@@ -1,18 +1,22 @@
 //! Streaming chat against a running llama-server (OpenAI-compatible API).
 //!
-//! The module is independent of Tauri and of the backend manager: the caller supplies where
-//! the server is ([`ChatTarget`]) and receives output through [`ChatSink`]. [`start_chat`]
-//! validates the conversation, fits it into the context window by counting tokens with the
-//! server's own `/apply-template` and `/tokenize` endpoints, then streams the answer on a
-//! spawned task. [`cancel_chat`] stops a request. See `docs/assistant/chat.md`.
+//! The caller supplies the server target and a `ChatSink`. Validation, loopback HTTP
+//! helpers and the whole-turn registry live here; `assistant_tool_loop` owns actual
+//! model/tool rounds and context fitting. The old single-completion path is retained
+//! only as a regression-test fixture. See `docs/assistant/chat.md` and `tools.md`.
 
 use std::collections::{HashMap, VecDeque};
+#[cfg(test)]
 use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context;
-use futures_util::future::{AbortHandle, Abortable};
+use futures_util::future::AbortHandle;
+#[cfg(test)]
+use futures_util::future::Abortable;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -23,11 +27,13 @@ Answer accurately and concisely. Use Markdown where it helps reading. If you are
 /// Voice conversation's default system message (plan §8.1): answers are spoken aloud.
 pub(crate) const DEFAULT_VOICE_PROMPT: &str = "You are VoiceReader's voice assistant, and your replies are spoken aloud. \
 Answer in short, natural sentences, usually one to three. Do not use Markdown, lists, tables, code or emoji. \
-Say numbers, symbols and abbreviations the way you would read them out. If you are not sure, say so briefly.";
+Say numbers, symbols and abbreviations the way you would read them out. Write decimal numbers with the word point instead of a decimal dot, for example 28 point 8 degrees Celsius, not 28.8 degrees Celsius. If you are not sure, say so briefly.";
 /// Longest system prompt accepted, in characters.
 pub(crate) const MAX_SYSTEM_PROMPT_CHARS: usize = 8000;
 /// Answer room kept free in the context window, before the quarter-of-context cap.
+#[cfg(test)]
 const RESERVE_THINK_TOKENS: u32 = 8192;
+#[cfg(test)]
 const RESERVE_NO_THINK_TOKENS: u32 = 2048;
 const MAX_IMAGES_PER_MESSAGE: usize = 4;
 const IMAGE_DATA_URL_PREFIXES: [&str; 3] = [
@@ -85,7 +91,7 @@ pub(crate) struct Sampling {
 
 impl Sampling {
     /// Refuses out-of-range values rather than sending them to the server.
-    fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self) -> Result<(), String> {
         let ok = (0.0..=2.0).contains(&self.temperature)
             && (0.0..=1.0).contains(&self.top_p)
             && self.top_k <= 500
@@ -109,6 +115,8 @@ pub(crate) struct ChatStart {
 /// nothing is called after it. Calls are serialised under a lock, so an implementation
 /// must not call [`cancel_chat`] or [`start_chat`] from inside these methods.
 pub(crate) trait ChatSink: Send + Sync + 'static {
+    /// App-owned lifecycle/tool metadata, serialised with deltas and terminal output.
+    fn event(&self, _request_id: &str, _event: &str, _payload: Value) {}
     fn delta(&self, request_id: &str, content: Option<&str>, reasoning: Option<&str>);
     fn done(&self, request_id: &str, finish_reason: Option<&str>, stopped: bool);
     fn error(&self, request_id: &str, message: &str);
@@ -118,32 +126,55 @@ pub(crate) trait ChatSink: Send + Sync + 'static {
 // Request registry and cancellation
 // ---------------------------------------------------------------------------------------
 
-struct SlotState {
-    finished: bool,
+pub(crate) struct SlotState {
+    pub(crate) finished: bool,
     abort: Option<AbortHandle>,
 }
 
 /// One in-flight request. All sink output goes through the slot so that the "exactly one
 /// terminal event, nothing after it" rule holds even when `cancel_chat` races the stream.
-struct Slot {
-    request_id: String,
+pub(crate) struct Slot {
+    pub(crate) request_id: String,
     sink: Arc<dyn ChatSink>,
+    backend_root: Option<PathBuf>,
+    cancel: Option<Arc<AtomicBool>>,
     state: Mutex<SlotState>,
 }
 
 impl Slot {
-    fn lock(&self) -> MutexGuard<'_, SlotState> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, SlotState> {
         self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn delta(&self, content: Option<&str>, reasoning: Option<&str>) {
+    pub(crate) fn delta(&self, content: Option<&str>, reasoning: Option<&str>) {
         let state = self.lock();
         if !state.finished {
             self.sink.delta(&self.request_id, content, reasoning);
         }
     }
 
+    pub(crate) fn event(&self, event: &str, payload: Value) {
+        let state = self.lock();
+        if !state.finished { self.sink.event(&self.request_id, event, payload); }
+    }
+
+    pub(crate) fn finish_turn(&self, metadata: Value, finish_reason: Option<&str>, stopped: bool, error: Option<&str>) {
+        let mut state = self.lock();
+        if !state.finished {
+            // Terminal ownership is claimed here. Stop observed before this point wins;
+            // a later Stop belongs to already-completed playback, not model generation.
+            let stopped = stopped || self.cancel.as_ref().is_some_and(|flag|flag.load(Ordering::SeqCst));
+            self.sink.event(&self.request_id, "assistant:turn-metadata", metadata);
+            state.finished = true;
+            if let Some(message) = error.filter(|_|!stopped) { self.sink.error(&self.request_id, message); }
+            else { self.sink.done(&self.request_id, finish_reason, stopped); }
+        }
+        drop(state);
+        unregister(self);
+    }
+
     /// Emits `done` unless a terminal event was already sent.
+    #[cfg(test)]
     fn finish_done(&self, finish_reason: Option<&str>) {
         let mut state = self.lock();
         if !state.finished {
@@ -155,6 +186,7 @@ impl Slot {
     }
 
     /// Emits `error` unless a terminal event was already sent.
+    #[cfg(test)]
     fn finish_error(&self, message: &str) {
         let mut state = self.lock();
         if !state.finished {
@@ -167,6 +199,7 @@ impl Slot {
 
     /// Marks the request finished without emitting anything. Returns false when a
     /// terminal event had already been sent (a cancel won the race).
+    #[cfg(test)]
     fn abandon(&self) -> bool {
         let mut state = self.lock();
         let claimed = !state.finished;
@@ -194,7 +227,11 @@ fn registry() -> &'static Mutex<Registry> {
 }
 
 /// Registers a request, or returns `Ok(None)` when it was already cancelled before it got here.
+#[cfg(test)]
 fn register(request_id: &str, sink: Arc<dyn ChatSink>) -> Result<Option<Arc<Slot>>, String> {
+    register_turn(request_id, sink, None, None)
+}
+pub(crate) fn register_turn(request_id: &str, sink: Arc<dyn ChatSink>, cancel: Option<Arc<AtomicBool>>, backend_root: Option<PathBuf>) -> Result<Option<Arc<Slot>>, String> {
     let mut registry = registry().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(index) = registry.cancelled_early.iter().position(|id| id == request_id) {
         registry.cancelled_early.remove(index);
@@ -206,6 +243,8 @@ fn register(request_id: &str, sink: Arc<dyn ChatSink>) -> Result<Option<Arc<Slot
     let slot = Arc::new(Slot {
         request_id: request_id.to_string(),
         sink,
+        backend_root,
+        cancel,
         state: Mutex::new(SlotState { finished: false, abort: None }),
     });
     registry.running.insert(request_id.to_string(), slot.clone());
@@ -239,6 +278,7 @@ pub(crate) fn cancel_chat(request_id: &str) {
             }
         }
     };
+    if let Some(cancel) = &slot.cancel { cancel.store(true, Ordering::SeqCst); return; }
     let abort = {
         let mut state = slot.lock();
         if state.finished {
@@ -252,6 +292,27 @@ pub(crate) fn cancel_chat(request_id: &str) {
         handle.abort();
     }
     unregister(&slot);
+}
+
+/// Backend invalidation holds backend locks: this hook only signals, never calls a sink.
+pub(crate) fn cancel_backend_turns(root: &Path) {
+    let registry = registry().lock().unwrap_or_else(|e| e.into_inner());
+    for slot in registry.running.values().filter(|slot| slot.backend_root.as_deref() == Some(root)) {
+        if let Some(cancel) = &slot.cancel { cancel.store(true, Ordering::SeqCst); }
+    }
+}
+/// Called outside backend locks, after cancellation was signalled.
+pub(crate) fn wait_for_backend_turns(root: &Path, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !registry().lock().unwrap_or_else(|e| e.into_inner()).running.values().any(|slot| slot.backend_root.as_deref() == Some(root)) { return true; }
+        if std::time::Instant::now() >= deadline { return false; }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+pub(crate) async fn start_chat_with_options(target: ChatTarget, request: ChatRequest, sink: Arc<dyn ChatSink>, options: crate::assistant_tools::TurnOptions) -> Result<ChatStart, String> {
+    crate::assistant_tool_loop::start(target, request, sink, options).await
 }
 
 // ---------------------------------------------------------------------------------------
@@ -271,7 +332,7 @@ fn is_valid_image_url(url: &str) -> bool {
 
 /// Checks a request and returns the messages to use. Messages with neither text nor
 /// images are dropped (an empty final message is an error).
-fn validate_request(request: &ChatRequest) -> Result<Vec<ChatMessage>, String> {
+pub(crate) fn validate_request(request: &ChatRequest) -> Result<Vec<ChatMessage>, String> {
     if request.request_id.trim().is_empty() {
         return Err("The request has no id.".to_string());
     }
@@ -307,7 +368,7 @@ fn validate_request(request: &ChatRequest) -> Result<Vec<ChatMessage>, String> {
     Ok(cleaned)
 }
 
-fn wire_message(message: &ChatMessage) -> Value {
+pub(crate) fn wire_message(message: &ChatMessage) -> Value {
     if message.images.is_empty() {
         return json!({"role": message.role, "content": message.text});
     }
@@ -322,6 +383,7 @@ fn wire_message(message: &ChatMessage) -> Value {
 }
 
 /// The `/v1/chat/completions` body. `messages` already includes the system message.
+#[cfg(test)]
 fn build_request_body(messages: &[ChatMessage], think: bool, max_tokens: u32, sampling: Option<&Sampling>) -> Value {
     let mut body = json!({
         "model": "local",
@@ -348,6 +410,7 @@ fn build_request_body(messages: &[ChatMessage], think: bool, max_tokens: u32, sa
 // ---------------------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq)]
+#[cfg(test)]
 enum StreamEvent {
     Delta {
         content: Option<String>,
@@ -367,6 +430,7 @@ fn error_message(error: &Value) -> String {
         .unwrap_or_else(|| "The assistant server reported an error.".to_string())
 }
 
+#[cfg(test)]
 fn parse_event_data(data: &str) -> StreamEvent {
     if data.trim() == "[DONE]" {
         return StreamEvent::Done;
@@ -395,11 +459,13 @@ fn parse_event_data(data: &str) -> StreamEvent {
 /// Incremental Server-Sent Events parser. Bytes are buffered until a full line arrives, so
 /// JSON split across HTTP chunks (and multi-byte characters split mid-sequence) are safe.
 #[derive(Default)]
+#[cfg(test)]
 struct SseParser {
     buffer: Vec<u8>,
     data_lines: Vec<String>,
 }
 
+#[cfg(test)]
 impl SseParser {
     fn push(&mut self, chunk: &[u8]) -> Vec<StreamEvent> {
         self.buffer.extend_from_slice(chunk);
@@ -430,6 +496,7 @@ impl SseParser {
 // ---------------------------------------------------------------------------------------
 
 /// Counts the tokens of the text-only prompt the server would build. Faked in tests.
+#[cfg(test)]
 trait TokenCounter {
     fn count_text_tokens<'a>(
         &'a self,
@@ -437,11 +504,13 @@ trait TokenCounter {
     ) -> impl Future<Output = Result<u32, String>> + Send + 'a;
 }
 
+#[cfg(test)]
 struct HttpCounter<'a> {
     client: &'a Client,
     target: &'a ChatTarget,
 }
 
+#[cfg(test)]
 impl TokenCounter for HttpCounter<'_> {
     async fn count_text_tokens(&self, messages: &[ChatMessage]) -> Result<u32, String> {
         let text_only: Vec<Value> = messages
@@ -463,11 +532,13 @@ impl TokenCounter for HttpCounter<'_> {
     }
 }
 
+#[cfg(test)]
 fn reserve_tokens(ctx_size: u32, think: bool) -> u32 {
     let wanted = if think { RESERVE_THINK_TOKENS } else { RESERVE_NO_THINK_TOKENS };
     wanted.min(ctx_size / 4)
 }
 
+#[cfg(test)]
 struct Fitted {
     /// System message first, final user message last.
     messages: Vec<ChatMessage>,
@@ -478,6 +549,7 @@ struct Fitted {
 /// Evicts the oldest messages (a user message together with the assistant reply after it)
 /// until the prompt plus the answer reserve fits in `ctx_size`. The system message and the
 /// final user message are never dropped.
+#[cfg(test)]
 async fn fit_to_context<C: TokenCounter>(
     counter: &C,
     ctx_size: u32,
@@ -522,7 +594,7 @@ Shorten it or raise the context length in Assistant settings.",
 // HTTP
 // ---------------------------------------------------------------------------------------
 
-fn http_client() -> Result<Client, String> {
+pub(crate) fn http_client() -> Result<Client, String> {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     if let Some(client) = CLIENT.get() {
         return Ok(client.clone());
@@ -545,7 +617,7 @@ fn post(client: &Client, target: &ChatTarget, path: &str) -> reqwest::RequestBui
 }
 
 /// Turns a non-success response into a short sentence with the HTTP status.
-async fn http_error(response: reqwest::Response) -> String {
+pub(crate) async fn http_error(response: reqwest::Response) -> String {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     let detail = serde_json::from_str::<Value>(&body)
@@ -559,7 +631,7 @@ async fn http_error(response: reqwest::Response) -> String {
     }
 }
 
-fn connection_error(error: reqwest::Error) -> String {
+pub(crate) fn connection_error(error: reqwest::Error) -> String {
     if error.is_connect() || error.is_timeout() {
         "Could not reach the assistant server. Check that it is running.".to_string()
     } else {
@@ -568,7 +640,7 @@ fn connection_error(error: reqwest::Error) -> String {
 }
 
 /// A short, non-streaming JSON request (the token-counting calls).
-async fn post_json(client: &Client, target: &ChatTarget, path: &str, body: &Value) -> Result<Value, String> {
+pub(crate) async fn post_json(client: &Client, target: &ChatTarget, path: &str, body: &Value) -> Result<Value, String> {
     let response = post(client, target, path)
         .timeout(Duration::from_secs(30))
         .json(body)
@@ -586,6 +658,7 @@ async fn post_json(client: &Client, target: &ChatTarget, path: &str, body: &Valu
 
 /// Sends the chat request and forwards the stream to the slot's sink until it ends.
 /// Runs inside an `Abortable`: dropping it closes the connection.
+#[cfg(test)]
 async fn run_stream(client: Client, url: String, api_key: String, body: Value, slot: Arc<Slot>) {
     match stream_answer(&client, &url, &api_key, &body, &slot).await {
         Ok(finish_reason) => slot.finish_done(finish_reason.as_deref()),
@@ -593,6 +666,7 @@ async fn run_stream(client: Client, url: String, api_key: String, body: Value, s
     }
 }
 
+#[cfg(test)]
 async fn stream_answer(
     client: &Client,
     url: &str,
@@ -643,6 +717,7 @@ async fn stream_answer(
 ///
 /// If `cancel_chat` runs before streaming starts, the sink has already received
 /// `done(stopped = true)`; this function then returns `Ok` with zero counts and starts nothing.
+#[cfg(test)]
 pub(crate) async fn start_chat(
     target: ChatTarget,
     request: ChatRequest,
@@ -673,6 +748,7 @@ pub(crate) async fn start_chat(
     }
 }
 
+#[cfg(test)]
 async fn begin_stream(
     target: ChatTarget,
     slot: &Arc<Slot>,
@@ -1103,6 +1179,18 @@ Shorten it or raise the context length in Assistant settings."
         fn error(&self, id: &str, message: &str) {
             self.push(id, Event::Error(message.to_string()));
         }
+    }
+
+    #[test]
+    fn stop_before_terminal_claim_wins_over_cached_completion_state() {
+        let sink = Arc::new(RecordingSink::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let slot = register_turn("terminal-claim-race", sink.clone(), Some(cancel.clone()), None).unwrap().unwrap();
+        // The caller computed stopped=false, then Stop arrived before finalization.
+        cancel.store(true, Ordering::SeqCst);
+        slot.finish_turn(json!({}), Some("stop"), false, Some("late socket failure"));
+        slot.finish_turn(json!({}), Some("stop"), false, None);
+        assert_eq!(sink.events(), vec![Event::Done(Some("stop".into()), true)]);
     }
 
     struct Recorded {

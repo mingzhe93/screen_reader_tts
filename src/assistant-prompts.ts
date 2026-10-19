@@ -51,7 +51,7 @@ export function createPromptsSection(options: { log: (message: string, level?: "
   input.rows = 7;
   input.maxLength = MAX_PROMPT_CHARS;
   input.setAttribute("role", "tabpanel");
-  const voiceNote = h("p", "caption", "Used by voice conversation. Thinking is always off in voice mode.");
+  const voiceNote = h("p", "caption", "Used by voice conversation. Thinking is controlled separately in the Voice section.");
   const counter = h("span", "caption assistant-counter");
   const saveBtn = button("Save", "btn btn-primary btn-sm", () => void save(tab, drafts[tab]));
   const resetBtn = h("button", "btn btn-sm");

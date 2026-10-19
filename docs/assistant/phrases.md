@@ -1,12 +1,12 @@
 # Phrase buffer and speakable-text filter (`assistant_phrases.rs`)
 
-Status: Step 1 groundwork for conversation mode (later step). Rust only, pure, written and unit-tested on macOS. Nothing calls it yet; the compiler reports `dead_code` warnings for it until the conversation controller does.
+Status (2026-10-19): implemented and integrated into the v0.3.0 Voice conversation controller, tested and accepted on macOS. `assistant_conversation.rs` queues its phrases into the shared TTS job; Windows validation is pending. Tool-round boundaries flush the phrase buffer, while one global phrase sequence spans the response. See [conversation.md](conversation.md) and [tools.md](tools.md).
 
 ## What it does
 
 `src-tauri/src/assistant_phrases.rs` turns the model's streamed answer (small text deltas) into an ordered list of **phrases** ready for text-to-speech. It implements `docs/v0.3.0_assistant_plan.md` section 8.1 (speakable text: a light final filter, the Voice system prompt does most of the work) and the phrase-buffer part of section 8.2 (speak complete sentences or sensible clauses, bounded waiting and length, abbreviations, numbers, partial words, committed phrases never revised).
 
-It is pure: no threads, no I/O, no clock reads (the caller passes `now_ms`), no new dependencies. It is compiled only with the `build-base` feature (the `mod` line in `lib.rs` is added by the integrator).
+It is pure: no threads, no I/O, no clock reads (the caller passes `now_ms`), no new dependencies. It is compiled only with the `build-base` feature (declared in `lib.rs`).
 
 Two stages run inside one `PhraseBuffer`:
 

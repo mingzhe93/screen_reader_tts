@@ -1,174 +1,50 @@
-# Assistant chat bridge (`assistant_chat.rs`)
+# Assistant chat and turn loop
 
-Status: Step 1 of v0.3.0, Rust side only. Written on macOS; nothing here has been run against a real llama-server or on Windows yet (see "Manual checks").
+Updated 2026-10-19. The base Assistant is committed in `5e62732` and I have tested it working on macOS. Chat and Voice now share the tools-phase turn loop, including when tools are disabled. I have tested and accepted Chat/Voice with tools on macOS; Windows validation remains outstanding. See [tools.md](tools.md) for tool policy, permissions, runtime limits and qualification.
 
-## What it does
+## Code and responsibilities
 
-`src-tauri/src/assistant_chat.rs` sends a chat conversation to a running llama-server (OpenAI-compatible API), fits it into the context window, streams the answer back through a callback trait and supports cancellation. It implements `docs/v0.3.0_assistant_plan.md`:
+- `assistant_chat.rs`: request validation, public message/sampling types, safe loopback HTTP helpers, `ChatSink` callbacks and the whole-turn registry. The old single-completion implementation is retained only under `cfg(test)` as a baseline regression fixture.
+- `assistant_tool_loop.rs`: internal wire messages, context fitting, bounded SSE/tool-call assembly, thinking budgets and the model/tool loop.
+- `assistant_commands.rs`: Tauri chat commands and event sink.
+- `assistant_conversation.rs`: Voice sink and ordered speech worker, using that same loop.
 
-- section 3.2 (chat page: Stop keeps the text received so far, Think toggle, up to 4 images per message),
-- section 5.4 (reasoning is never sent back; `reasoning_effort: none` when Think is off),
-- section 6.3 (token counting with `/apply-template` and `/tokenize`, answer reserve, oldest-pair eviction, refusal of an oversized message; Codex finding F1).
+All are Base-only. `ChatTarget` has no `Debug` so the server key cannot accidentally appear in logs. The HTTP client uses `no_proxy()` for authenticated loopback calls.
 
-The module does not depend on Tauri or on the backend (process manager) module. A caller builds a `ChatTarget` from the backend's endpoint and implements `ChatSink` with Tauri events. The two Tauri command wrappers and the event emission are not in this module.
+## Command and event contracts
 
-It is compiled only with the `build-base` feature. The `mod assistant_chat;` line in `lib.rs` is added by the integrator. Without the Tauri commands in the build, the compiler reports `dead_code` warnings for it; they disappear once the commands call it.
+`assistant_chat_start` accepts camelCase invoke arguments: `requestId`, `messages`, `think`, optional `sampling`, `conversationId`, `tools`, `enabledTools`, tagged `thinkingBudget`, and `toolLimits`. Voice adds the same options to `assistant_voice_respond`. `enabledTools` is the per-turn selected-name list: legacy `tools: true` without a list enables all built-ins, while an explicit empty list enables none. Both schema generation and execution enforce the snapshot. Messages are `{ role: "user"|"assistant", text, images: string[] }`, ending in the new user message. Rust applies the saved system prompt; the frontend cannot supply tool messages or a replacement system message.
 
-No new dependencies: `reqwest` 0.11, `serde`, `serde_json`, `tokio`, `anyhow`, and `futures-util` (already in `Cargo.toml`) for `Abortable`.
+The backend atomically admits the turn and holds a use guard until its terminal callback. `start_chat_with_options` validates, registers, fits the first prompt and starts the stream task. It returns `ChatStart { request_id, prompt_tokens, dropped_messages }`. Early validation failures reject the command. A registered fitting/connection failure sends terminal metadata/error as well as rejecting startup; Voice's sink claims terminal emission once, so its command wrapper cannot duplicate the error.
 
-## Public interface (all `pub(crate)`)
+`ChatSink` supplies `delta`, `done`, `error` and `event`. Each model delta carries `round` in the Tauri event. Tool-call fragments/results and turn phases arrive through `event`. Before the terminal callback, private `assistant:turn-metadata` supplies `final_text`, `final_round`, `history_note`, `sources`, timings and the effective thinking budget; the Tauri sink merges these fields into `assistant:chat-done` or `assistant:chat-error`.
 
-```rust
-struct ChatTarget { base_url: String, api_key: String, ctx_size: u32, image_token_estimate: u32 }
-struct ChatMessage { role: String, text: String, images: Vec<String> }   // Deserialize, Clone
-struct ChatRequest { request_id: String, messages: Vec<ChatMessage>, think: bool }
-struct ChatStart { request_id: String, prompt_tokens: u32, dropped_messages: u32 } // Serialize
-trait ChatSink: Send + Sync + 'static {
-    fn delta(&self, request_id: &str, content: Option<&str>, reasoning: Option<&str>);
-    fn done(&self, request_id: &str, finish_reason: Option<&str>, stopped: bool);
-    fn error(&self, request_id: &str, message: &str);
-}
-async fn start_chat(target: ChatTarget, request: ChatRequest, sink: Arc<dyn ChatSink>) -> Result<ChatStart, String>;
-fn cancel_chat(request_id: &str);
-```
+Tool call events carry a stable `call_index` before the model's id/name arrive; `delta` means append, while `arguments` on completed phases is the full string. Phases are `streaming`, `queued`, `running`, `done`. Results carry status, summary, sources and optional code output. See [tools.md](tools.md) and the types in `src/types.ts`.
 
-`ChatTarget` has no `Debug` on purpose so the API key cannot be logged by accident. `ChatMessage.images` holds data URLs from the frontend. Serialized fields use snake_case (project convention).
+## Validation and counting
 
-### `start_chat`
+Request ids cannot be empty. Only user/assistant roles are accepted; the last message must be a nonempty user message (text or image). Earlier empty messages are omitted. Only user messages can include images; at most four PNG/JPEG/WebP base64 data URLs per message. Sampling values and thinking/tool limits are validated in Rust.
 
-1. Validates the request (below). Failures return `Err` with a sentence the UI can show as is; nothing is sent to the sink.
-2. Registers the request id for cancellation. A second request with an id that is still running returns `Err("A request with this id is already running.")`.
-3. Counts tokens and evicts old messages (context fitting, below). The server being down gives `Err("Could not reach the assistant server. Check that it is running.")`.
-4. Spawns a tokio task that opens the stream and returns `Ok(ChatStart)`. The sink receives output only after this returns.
+An internal JSON wire-message representation includes current-turn assistant `tool_calls`/`reasoning_content` and matching `tool` results. Every round calls `/apply-template` with actual messages, tool definitions when enabled and thinking configuration, then `/tokenize` on the rendered prompt. Images add the catalogue's conservative per-image estimate rather than sending large data URLs through the text tokenizer.
 
-Cancellation covers the whole startup. The token-counting phase runs inside an `Abortable` whose handle is stored in the request slot before the first HTTP call. If `cancel_chat` runs while `/apply-template` or `/tokenize` is in flight, the sink receives `done(stopped = true)`, the counting request is dropped (its connection closes), no further counting requests are sent, and `start_chat` resolves promptly with `Ok` and `prompt_tokens: 0, dropped_messages: 0`, starting nothing. A second handle replaces the first once the stream task is spawned. The caller should not treat that as an error.
+The fitter evicts whole older turns first. It never drops the current user question or separates a call/result pair. If necessary it truncates the oldest current-turn tool results and forces a tool-free answer; if the protected conversation still cannot fit, it returns an actionable error. Answer reserve is 8,192 tokens with thinking or 2,048 without, capped at one quarter of context. Completion tokens are also bounded by actual remaining room. Finite thinking raises the answer cap to at least budget + 1,024 where context permits, resetting per HTTP round.
 
-### `cancel_chat`
+## Streaming and recovery
 
-Marks the request finished, calls `sink.done(id, None, true)` and aborts the streaming task, which drops the HTTP response. llama-server stops generating when the client disconnects. An already finished id is a no-op. An id that is not registered yet is remembered (up to 64), because Tauri runs the async start command on a spawned task and the sync cancel command directly, so Stop can arrive first. A later `start_chat` for that id then sends `done(stopped = true)`, returns `Ok` with zero counts, and starts nothing (Codex re-review R1).
+SSE is assembled from byte chunks without splitting UTF-8 text; event, per-round text and tool-argument sizes are bounded. The parser uses OpenAI-compatible structured `tool_calls` supplied by llama.cpp; it does not execute XML or JSON found in prose. Calls are assembled by index, strictly validated before execution and paired with a result even when skipped, malformed or cancelled.
 
-### Sink guarantees
+N execution batches are followed by a final request without tool definitions. Repeated canonical calls execute once, malformed arguments get one retry, and a length-truncated call never executes. A cut-off/empty call's recovery instruction is added to the app's system policy, never as a trailing assistant prefill. A real b11718 probe confirmed that a trailing assistant recovery message can be echoed instead of answered.
 
-Exactly one of `done` or `error` is emitted per request and nothing is emitted after it, even when a cancel races the stream. Every sink call is made while holding a per-request lock, so a sink implementation must not call `cancel_chat` or `start_chat` from inside `delta`, `done` or `error` (it would deadlock). Emitting a Tauri event from them is fine.
+Reasoning and raw results are retained between rounds of the current turn only. Earlier-turn history contains the final answer plus a short tools/source note. Model preambles are visible/spoken, but only the final round is stored as the answer.
 
-If the stream task panics, no terminal event is sent (not handled; see gaps).
+## Cancellation and backend lifecycle
 
-## Validation
+One registry slot owns the whole turn, not each HTTP request. Early Stop is remembered for up to 64 not-yet-registered ids. Stop during fitting/completion drops the HTTP future and closes its connection; during a tool it signals the shared cancellation flag and awaits teardown before terminal emission. Exactly one terminal callback is claimed under the slot lock. A cancellation observed before that claim overrides a previously computed completion state.
 
-- `request_id` non-empty; at least one message; the last message has role `user`.
-- Roles are `user` or `assistant`; anything else (including `system`) is rejected.
-- At most 4 images per message; only user messages may carry images.
-- Each image must be `data:image/png|jpeg|webp;base64,<payload>` with a non-empty base64 payload (standard or URL-safe alphabet). Anything else is rejected: "Only PNG, JPEG or WebP images can be attached."
-- Earlier messages with neither text nor images are dropped silently. An empty final message is an error ("Type a message before sending.").
+Turns are bound to backend root and generation. Admission snapshots endpoint, generation and use guard atomically. Unload, replacement, crash and exit signal registered turns; a stale turn cannot address a replacement server. Backend cancellation only signals flags while holding its own lock; draining happens outside that lock because terminal sinks release a use guard that takes it.
 
-## Wire format
+A sink must not recursively call chat registration/cancellation from a callback: callbacks run under a per-slot lock. Emitting Tauri events is safe. Tools must finish cleanup before their final result/terminal event. A first Python-module compilation cannot be interrupted; unload retains ownership until it drains rather than silently returning after a timeout.
 
-`POST {base_url}/v1/chat/completions`, header `Authorization: Bearer <api_key>`:
+## Verification
 
-```json
-{"model": "local", "messages": [...], "stream": true,
- "chat_template_kwargs": {"enable_thinking": true},
- "max_tokens": 3500}
-```
-
-- `reasoning_effort: "none"` is added only when `think` is false.
-- `max_tokens = ctx_size - prompt_tokens` (at least 1). `prompt_tokens` includes the image estimates.
-- The first message is a system message from the constant `SYSTEM_PROMPT` (short, neutral).
-- A message without images has `"content": "<text>"`. With images it is `[{"type":"text","text":"..."}, {"type":"image_url","image_url":{"url":"<data url>"}}, ...]`.
-- The HTTP client ignores system proxy settings (`no_proxy`) so the API key never goes through a proxy, and uses a 5 s connect timeout. The stream has no overall timeout; the two counting calls have 30 s.
-
-### Streaming (Server-Sent Events)
-
-`SseParser` buffers bytes until a full line arrives, so JSON split across HTTP chunks, several events in one chunk, `\r\n` line endings and multi-byte characters split between chunks are all handled.
-
-- `data: {json}` lines end an event at a blank line; `data: [DONE]` ends the stream; lines starting with `:` are ignored; other fields (`event:`, `id:`, `retry:`) are ignored.
-- From `choices[0].delta` the module forwards `content` and `reasoning_content` (llama-server puts reasoning there with `--reasoning-format deepseek`) in one `sink.delta` call per event; empty and `null` values are skipped. `choices[0].finish_reason` is remembered and passed to `done`.
-- An `{"error": ...}` object in an event (string or `{message}`) becomes `sink.error` with the server's message as is.
-- A non-2xx HTTP status becomes `sink.error("The assistant server returned HTTP <status>: <server message>")`.
-- A connection that closes before `[DONE]` becomes `sink.error("The assistant stopped unexpectedly.")`. After a cancel nothing more is emitted.
-- Unparseable JSON in an event becomes `sink.error("The assistant sent a response that could not be read.")`.
-
-## Context fitting (plan section 6.3, Codex F1)
-
-1. The prompt is built as text: `POST /apply-template` with `{"messages": [...]}` (system message plus the conversation, images stripped), then `POST /tokenize` with `{"content": "<prompt>"}`. The count is `tokens.len()` plus `image_token_estimate` for every attached image. Both calls send the bearer header.
-2. `reserve = min(think ? 8192 : 2048, ctx_size / 4)`.
-3. While `prompt_tokens + reserve > ctx_size`, the oldest non-system message is dropped. A user message is dropped together with the assistant reply that follows it. The final user message is never dropped. The prompt is recounted after each drop (two HTTP calls per drop; conversations are small).
-4. If only the system message and the final message remain and they still do not fit, `start_chat` returns: "This message is too long for the current context (about N tokens; the limit for a message is M). Shorten it or raise the context length in Assistant settings." N is the token count including image estimates and M is `ctx_size - reserve`.
-5. `ChatStart.dropped_messages` counts every evicted message. The UI should tell the user when it is above zero, because the model no longer sees those turns.
-
-The eviction logic is generic over a small `TokenCounter` trait, so unit tests use a fake counter and the real one (`HttpCounter`) only talks HTTP.
-
-Caveat: `/apply-template` renders with the server's default template settings, so the count assumes the same template as the real request. It is an estimate for thinking models, whose template may add tokens depending on `enable_thinking`; the reserve absorbs the difference.
-
-## Tests
-
-All in-module, no network and no real model:
-
-```bash
-export PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"   # macOS dev machine only
-cd src-tauri
-cargo test --features build-base assistant_chat::
-```
-
-On Windows use a normal Rust toolchain: `cd src-tauri; cargo test --features build-base assistant_chat::`.
-
-Result when written: 30 passed, 0 ignored (about 0.3 s once built). Coverage:
-
-- SSE parser: split JSON, several events per chunk, comments, `[DONE]`, reasoning and content, null and empty deltas, split UTF-8, CRLF, error events, bad JSON.
-- Request body: text only, images, Think on and off.
-- Validation and image data URLs.
-- Eviction with a fake counter: fits, drops oldest pairs, lone assistant drops, final user message kept, oversized message error text with numbers, image estimates, Think reserve.
-- Mock server (a `tokio::net::TcpListener` written in the test) answering `/apply-template`, `/tokenize` and a streamed `/v1/chat/completions`: ordered deltas then one `done`; stream closing without `[DONE]`; HTTP 503 body; `error` event; cancel mid-stream (one `done(stopped=true)`, nothing after, and the mock sees the client hang up); cancel while `/apply-template` never answers (uses only `cancel_chat`: `start_chat` resolves within 1 s, the mock sees the connection close, one `done(stopped=true)`, no further requests); oversized message refused before any chat request; duplicate id; unreachable server.
-
-The tests share one global request registry, so every test uses its own request id.
-
-## Manual checks
-
-Run these against a real llama-server (any small GGUF). Start it with an API key, for example `llama-server -m model.gguf -c 8192 --port 8080 --api-key testkey --reasoning-format deepseek`.
-
-The endpoints this module relies on are `/apply-template`, `/tokenize` and `/v1/chat/completions`. Confirm each with the commands below before building on them.
-
-macOS (zsh):
-
-```bash
-H='Authorization: Bearer testkey'
-curl -s localhost:8080/apply-template -H "$H" -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"system","content":"Be brief."},{"role":"user","content":"Hi"}]}'
-# expect: {"prompt":"..."}
-curl -s localhost:8080/tokenize -H "$H" -H 'Content-Type: application/json' -d '{"content":"Hello world"}'
-# expect: {"tokens":[...]}
-curl -N localhost:8080/v1/chat/completions -H "$H" -H 'Content-Type: application/json' \
-  -d '{"model":"local","stream":true,"max_tokens":64,"reasoning_effort":"none","chat_template_kwargs":{"enable_thinking":false},"messages":[{"role":"user","content":"Say hi"}]}'
-# expect: lines "data: {...}" with choices[0].delta.content, then "data: [DONE]"
-```
-
-Windows (PowerShell). Write the body to a file to avoid quoting problems, and use `curl.exe` (plain `curl` is an alias of `Invoke-WebRequest`):
-
-```powershell
-$h = 'Authorization: Bearer testkey'
-'{"messages":[{"role":"system","content":"Be brief."},{"role":"user","content":"Hi"}]}' | Set-Content -NoNewline body1.json
-curl.exe -s http://localhost:8080/apply-template -H $h -H "Content-Type: application/json" --data-binary "@body1.json"
-'{"content":"Hello world"}' | Set-Content -NoNewline body2.json
-curl.exe -s http://localhost:8080/tokenize -H $h -H "Content-Type: application/json" --data-binary "@body2.json"
-'{"model":"local","stream":true,"max_tokens":64,"reasoning_effort":"none","chat_template_kwargs":{"enable_thinking":false},"messages":[{"role":"user","content":"Say hi"}]}' | Set-Content -NoNewline body3.json
-curl.exe -N http://localhost:8080/v1/chat/completions -H $h -H "Content-Type: application/json" --data-binary "@body3.json"
-```
-
-Same expectations as macOS. Things to verify by hand once the Tauri commands exist (on both platforms):
-
-1. Thinking on: reasoning arrives as `reasoning_content` deltas before `content` (needs `--reasoning-format deepseek`). Thinking off with `reasoning_effort: none`: no reasoning deltas.
-2. Stop: press Stop mid-answer. The UI gets exactly one `done` with `stopped = true`, and the llama-server log shows the request ending (the slot is released) rather than generating to the end.
-3. Long conversation: with `-c 2048`, paste long messages until `dropped_messages > 0`, then one message larger than the limit. Expect the "too long" sentence with plausible numbers.
-4. Wrong or missing API key: expect `HTTP 401` in the message, with no key in it. Server stopped: expect "Could not reach the assistant server".
-5. On Windows, check that a long answer (several thousand tokens) streams without stalls and that Stop works with the Windows firewall prompt dismissed (loopback only).
-6. Images: attach a PNG to a vision-capable model (with its `--mmproj`) and confirm the answer refers to it; compare the real image token cost in the server log with `image_token_estimate`.
-
-## Known gaps and next steps
-
-- `image_token_estimate` is a placeholder supplied by the caller; the real per-model cost is not measured. Image size is not checked here (the frontend downscales, plan section 3.2).
-- Token counting uses default template settings, not the request's `enable_thinking` value (see caveat above).
-- Conversation mode (no reasoning, spoken style system prompt, `reasoning_effort: none` on every request, interruption markers) is Step 3. The system prompt is a single constant for the chat page.
-- No retry and no automatic reconnect; a failed request is reported once and the user resends.
-- A panic inside the stream task would leave the UI without a terminal event. The task body does no `unwrap`s, so this is unlikely, but there is no watchdog.
-- No overall stall timeout while streaming: a server that stops sending without closing the connection hangs until the user presses Stop.
-- The Tauri wrappers, the event names and the frontend page (`src/`) are outside this module.
+Unit/integration checks exercise validation, real template-count transport, bounded SSE assembly, whole-turn fitting, exact round limits, repeat/malformed/truncated guards, fitting/tool cancellation, terminal races and real backend generation transitions. Network-tool, sandbox, UI and voice checks are recorded in [tools.md](tools.md). The real-model harness pins weights/server/template/prompt/fixtures and tests both chat and spoken prompts; it is distinct from actual microphone/TTS playback testing.

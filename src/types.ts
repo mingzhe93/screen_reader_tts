@@ -208,6 +208,8 @@ export type AssistantModelInfo = {
   tier: AssistantModelTier;
   download_bytes: number;
   installed: boolean;
+  /** True only after the recorded tool evaluation passes. */
+  tools?: boolean;
   /** Longest context the model was trained for; larger settings are refused. */
   max_context: number;
   memory_estimate: { ctx_size: number; gpu_mib: number; host_mib: number; measured: boolean };
@@ -302,12 +304,20 @@ export type AssistantChatStartResult = {
 };
 
 export type AssistantChatDeltaPayload = {
+  round?: number;
   request_id: string;
   content: string | null;
   reasoning: string | null;
 };
 
 export type AssistantChatDonePayload = {
+  final_text?: string;
+  final_round?: number;
+  history_note?: string;
+  sources?: AssistantToolSource[];
+  timings?: { predicted_per_second?: number };
+  thinking_budget_tokens?: number | null;
+  completion_tokens?: number;
   request_id: string;
   finish_reason: string | null;
   stopped: boolean;
@@ -362,6 +372,8 @@ export type AssistantMicAutoFailedPayload = { message: string };
 export type AssistantVoiceRespondResult = AssistantChatStartResult & { job_id: string };
 
 export type AssistantVoicePhrasePayload = {
+  kind?: "answer" | "filler";
+  round?: number;
   request_id: string;
   job_id: string;
   seq: number;
@@ -383,3 +395,34 @@ export type AssistantPlaybackPayload = {
   played_seq: number | null;
   drained: boolean;
 };
+
+
+export type AssistantThinkingBudget = { mode: "auto" | "unlimited" } | { mode: "tokens"; tokens: number };
+export type AssistantToolLimits = {
+  timeouts?: Record<string, number>;
+  max_rounds: number;
+  search_timeout_secs: number;
+  fetch_timeout_secs: number;
+  weather_timeout_secs: number;
+  code_timeout_secs: number;
+};
+export type AssistantToolsSettings = { provider: "duckduckgo" | "brave"; brave_key_set: boolean; limits: AssistantToolLimits };
+export type AssistantSandboxStatus = {
+  installed: boolean;
+  state: "not_installed" | "installing" | "ready" | "failed";
+  version: string;
+  download_size_bytes: number;
+  installed_size_bytes: number;
+  error?: string | null;
+};
+export type AssistantToolSource = { n: number; title: string; url: string };
+export type AssistantToolCallPayload = {
+  request_id: string; round: number; call_index: number; call_id?: string; name?: string;
+  delta: string; arguments?: string; phase: "streaming" | "queued" | "running" | "done"; done: boolean;
+};
+export type AssistantToolResultPayload = {
+  request_id: string; round: number; call_id: string; name: string;
+  status: "ok" | "error" | "timeout" | "cancelled" | "skipped";
+  summary: string; sources: AssistantToolSource[]; output?: string;
+};
+export type AssistantTurnPhasePayload = { request_id: string; round: number; phase: "thinking" | "tool" | "answering" };

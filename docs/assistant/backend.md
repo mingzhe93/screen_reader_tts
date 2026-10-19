@@ -3,8 +3,7 @@
 This is the Rust side of the v0.3.0 Assistant, Step 1. It installs a pinned llama.cpp
 `llama-server`, downloads the pinned models with SHA-256 checks, runs one server on
 `127.0.0.1` with an API key, unloads it when idle, and cleans up servers left behind by a
-VoiceReader that crashed. The chat page and chat streaming are separate tickets. They use
-`AssistantState::endpoint()` and `begin_use()` from this module.
+VoiceReader that crashed. The chat page and tool loop use `AssistantState::admit_turn()` to capture the endpoint, generation and use guard atomically. See [tools.md](tools.md) for turn cancellation and draining.
 
 Plan sections implemented (`docs/v0.3.0_assistant_plan.md`):
 
@@ -32,8 +31,8 @@ Both new modules are meant to compile only with `build-base`.
 - `lib.rs` declares `assistant_backend`, `assistant_catalogue`, `assistant_chat` and `assistant_commands`, each behind `#[cfg(feature = "build-base")]`.
 - `voicereader_core.rs` `setup` manages `AssistantState::new(<engine data dir>/assistant)`. The engine data dir comes from `resolve_engine_data_dir`, which already strips the Windows `\\?\` prefix. Nothing starts at app launch.
 - Commands are registered through `app_command_handler()`, which appends the Assistant commands to the shared `app_commands!` list in the Base build only. Tauri v1's `generate_handler!` cannot take individual commands behind `#[cfg]`, so this lets the deprecated Full build keep compiling.
-- The `RunEvent::ExitRequested` / `RunEvent::Exit` hook calls `AssistantState::shutdown()` before the engine shuts down. The call is synchronous and waits at most about 2 s.
-- The chat commands in `assistant_commands.rs` take a `UseGuard` from `begin_use()` for the lifetime of each request, so the idle timer never unloads the model mid-answer.
+- The `RunEvent::ExitRequested` / `RunEvent::Exit` hook calls `AssistantState::shutdown()` before the engine shuts down. The call is synchronous: it first drains cancelled tool workers (including any first session Wasm compilation), then allows 2 s for the server to stop.
+- The chat commands in `assistant_commands.rs` take a `UseGuard` from `admit_turn()` for the lifetime of each whole turn, so the idle timer never unloads the model mid-answer.
 
 ## Catalogue (`assistant_catalogue.rs`)
 
@@ -41,7 +40,7 @@ Both new modules are meant to compile only with `build-base`.
 - `backend_asset() -> Option<&PinnedFile>` returns the asset for the running platform. `backend_asset_for(os, arch)` takes the values of `std::env::consts::{OS, ARCH}`. Only `windows/x86_64` (`llama-b11718-bin-win-vulkan-x64.zip`, 32 307 966 bytes) and `macos/aarch64` (`llama-b11718-bin-macos-arm64.tar.gz`, 12 292 559 bytes) are supported. Every other platform gets `None`, and the status reports `platform_supported: false`.
 - `PinnedFile { file, size, sha256 }`. `url()` gives `https://github.com/ggml-org/llama.cpp/releases/download/b11718/<file>`.
 - `models()` lists the four models in a fixed order (small, mid, mid-high, large), sorted by memory at 32K because the tier recommendation walks it from the end (a test checks the order). `model_by_id(id)` looks one up.
-- `CatalogueModel` holds `id`, `label`, `tier` (`small|mid|large`), `repo`, `revision` (40-hex commit), `weights`, `mmproj`, `image_token_estimate` and `thinking`. `file_url(file)` gives `https://huggingface.co/<repo>/resolve/<revision>/<file>`, never `main`.
+- `CatalogueModel` holds `id`, `label`, `tier` (`small|mid|mid_high|large`), `repo`, `revision` (40-hex commit), `weights`, `mmproj`, `image_token_estimate`, `thinking`, maximum context, sampling defaults and memory coefficients. Tool qualification is attached to the verified model IDs with pinned report tests. `file_url(file)` gives `https://huggingface.co/<repo>/resolve/<revision>/<file>`, never `main`.
 - `image_token_estimate` is 512 for all four (measured 329–338 tokens for a 1024×768 image on the first three; MiMo is not measured yet).
 - `thinking` is `ThinkingControl::ChatTemplateKwarg("enable_thinking")` for all four. The chat code sends it as `chat_template_kwargs: {"enable_thinking": bool}`. It is an enum so a future model can use another mechanism.
 
@@ -126,15 +125,15 @@ llama-server --host 127.0.0.1 --port <free port> --api-key <48 alphanumeric char
   - Loads are serialised by an async lock. If a ready server already has the same model and context, the call returns at once.
   - Otherwise it takes the cross-process admission lock, stops our current server, checks the run record (next section), spawns, writes the run record, releases the lock, and waits for readiness. The lock is not held during the `/health` wait.
   - If `unload` runs during the wait, the load fails with "Loading was cancelled.".
-- **`unload`:** stops the child and deletes the run record, but only if the record still names this process and that server's PID (below). On macOS this is SIGTERM, then SIGKILL after 3 s. On Windows it is `TerminateProcess` straight away: the server has no console, so there is nothing to send Ctrl+C to.
-- **Idle unload:** after the first successful load, a task checks every 30 s. It unloads when the state is `ready`, no `UseGuard` is alive, and nothing has happened for 10 minutes. The check and the takeover happen under the same lock as `begin_use()`, so a request that has just started cannot lose its server.
+- **`unload`:** invalidates the generation, cancels and drains tool turns, then stops the child and deletes the run record, but only if the record still names this process and that server's PID (below). On macOS this is SIGTERM, then SIGKILL after 3 s. On Windows it is `TerminateProcess` straight away: the server has no console, so there is nothing to send Ctrl+C to.
+- **Idle unload:** after the first successful load, a task checks every 30 s. It unloads when the state is `ready`, no `UseGuard` is alive, and nothing has happened for 10 minutes. The check and the takeover happen under the same lock as `admit_turn()`, so a request that has just started cannot lose its server.
 - **Crash while ready:** `status()` and `endpoint()` notice that the process has exited. They move the state to `error` with the log tail and remove the record if it is still ours. That removal only tries the lock once and does not wait for it.
 - **`shutdown()`:** sets the download cancel flag, stops the child (2 s grace) and removes that server's run record, waiting at most 1 s for the lock. With no server running it does not touch the record, which may belong to another instance. It is synchronous, for the exit hook.
 
 ### API for the chat module
 
 - `state.endpoint() -> Option<Endpoint>` returns `Endpoint { base_url: "http://127.0.0.1:<port>", api_key, model_id, ctx_size }`. It returns `None` unless the state is `ready`. Its `Debug` output hides the key.
-- `state.begin_use() -> UseGuard` should be held for the length of each request. Dropping it records activity.
+- `state.admit_turn() -> Result<(Endpoint, UseGuard, u64)>` captures the endpoint, use lease and generation atomically. Hold the guard through every model/tool round. Dropping it records activity. `is_generation_ready(generation)` rejects stale turns; unload/crash/replacement/exit cancel their registered workers.
 
 ## Run record and single owner (plan §4.4, Codex F5)
 
@@ -299,7 +298,7 @@ The Windows-only code has not been compiled. That covers the Job Object, process
    - `--version` prints build 11718.
    - The load becomes ready with a label like `Vulkan: NVIDIA GeForce RTX 5090`.
    - No console window appears for tar or the server.
-   - Then repeat from the app UI once it is wired up.
+   - Then repeat from the integrated app UI.
 3. **CPU fallback with the GPU hidden:** three ways to try it.
    - Most reliable: rename `ggml-vulkan.dll` in the install directory. The build loads backends dynamically, so only the CPU backend is left. Rename it back afterwards.
    - Alternative: set `GGML_VK_VISIBLE_DEVICES` to an index that does not exist before starting the test or the app. llama-server inherits the environment. Whether `-1` hides all devices is unverified, so check the log.
@@ -324,7 +323,9 @@ The Windows-only code has not been compiled. That covers the Job Object, process
    - Expected: the first command fails with "Download cancelled.".
    - `<file>.part` remains, and the second run continues from that size instead of restarting. Progress jumps to the previous value.
 
-## Manual checks on macOS still to do in the app
+## macOS regression checklist
+
+I have tested and accepted the current macOS app. Keep these lifecycle checks for regression testing; force-quit/orphan edge cases are not individually signed off by that acceptance.
 
 - Install from the UI.
 - Check `xattr -l <root>/backend/b11718/llama-b11718/llama-server` shows no `com.apple.quarantine`. The binary ran without a Gatekeeper prompt in the tests.
@@ -338,6 +339,6 @@ The Windows-only code has not been compiled. That covers the Job Object, process
 - There is no fallback to the last working context size when a load fails (plan §5.3). The caller gets the error and the log tail.
 - On Windows, stopping is immediate termination, not a graceful exit.
 - The API key is visible on the server's command line to other processes of the same user. llama.cpp also has `--api-key-file` if that ever matters.
-- The memory estimates and `--list-devices` hardware detection (plan §5.2 and §5.3) are not implemented. The device label comes from the startup log only.
+- Memory estimates and `--list-devices` hardware detection are implemented. MiMo coefficients are estimated rather than measured; the fit rule still omits the additional ASR/TTS allowance. Windows device labels and RAM/VRAM splits still need native validation.
 - The licence notice is installed but not shown in the UI.
-- Next: the Windows checks listed above, then Step 2 (push-to-talk input) from the plan.
+- Next: the Windows checks above, including tools/runtime packaging and voice integration. Push-to-talk, spoken replies, automatic sending and tools are already integrated; their guides are linked from [README.md](README.md).

@@ -1,6 +1,6 @@
 # Assistant (v0.3.0) handover
 
-Status on 2026-10-19: **all planned v0.3.0 Assistant functionality is implemented and uncommitted**: Steps 1–5 of the order of work in [the plan](../v0.3.0_assistant_plan.md) §10, plus the redesigned page and model management. The app version is `0.3.0-testing`. Everything has been built and unit-tested on macOS (Apple Silicon). The text chat has been run in the real app, and the voice path has been exercised against a mocked backend and with real models in Rust tests. **Nothing has been compiled or run on Windows, and the voice conversation has not yet been tried end to end in the real app.** This document is the starting point for that testing, on Windows and macOS, and for continuing with Claude there.
+Status on 2026-10-19: Steps 1–5 of the Assistant plan are committed in `5e62732`, and I have tested the Assistant working on macOS. The next tools phase is implemented in the working tree; see [tools.md](tools.md) for its contracts, measurements and remaining checks. The app version is now `0.3.0`, in release preparation. Windows compilation/runtime and the existing Assistant gaps are deferred until I can test them together on my Windows machine. I have tested and accepted the current Chat/Voice tools, reasoning transcript, controls and UI polish on macOS. Windows and the targeted edge-case checklist remain separate validation work.
 
 Read these in order:
 
@@ -9,6 +9,8 @@ Read these in order:
 3. The area docs:
    - [backend.md](backend.md): downloads, llama-server lifecycle, run record, Windows Job Object.
    - [chat.md](chat.md): the streaming bridge and context fitting.
+   - [tools.md](tools.md): tool rounds, per-tool modules/settings, optional Python, internet permissions, thinking and voice fillers.
+   - [tool-plugins-plan.md](tool-plugins-plan.md): future runtime plugins and chat-created tools; planning only.
    - [ui.md](ui.md): the page layout, panel, safe Markdown, images, Models page.
    - [voice-input.md](voice-input.md): the microphone session and turn order.
    - [turn-detection.md](turn-detection.md): VAD and Smart Turn, with parity results.
@@ -23,24 +25,26 @@ Read these in order:
 - A collapsible right panel:
   - context length (8K–256K, capped at each model's trained limit) with an estimated memory fit;
   - the **Chat** and **Voice** system prompts (saved by Rust in the app settings file);
-  - Think (chat only);
+  - independent Chat and Voice thinking controls and limits;
   - temperature, plus advanced sampling, defaulting to each model's published recommended values and stored per model;
   - in voice mode, the experimental auto-send toggle.
 
 **Chat:**
 - Answers stream as Markdown that never becomes HTML.
-- Reasoning is collapsed, never spoken, and never sent back to the model.
+- Reasoning is collapsed and never spoken. Current-turn tool rounds retain it; earlier turns do not.
 - Stop, Speak (read-aloud), Copy, and up to 4 images per message.
 - **Push-to-talk** (hold, or click to toggle) transcribes into the composer; you press Send.
 
 **Voice mode:**
-- A large talk button and a transcript pane.
-- Release to send; the answer is spoken phrase by phrase while it streams, with thinking off and the Voice prompt.
+- A large talk button and a transcript pane. Enabled reasoning streams into a collapsed Thinking accordion and is never spoken or kept in later history.
+- Release to send; the answer is spoken phrase by phrase while it streams, with the Voice prompt and thinking off by default.
 - Pressing during an answer interrupts it; history keeps only what was heard, then `[interrupted by user]`.
 - A finished transcript that arrives while a newer turn is recording is joined to it (plan §7.2, F7).
 - Read-aloud preempts a voice answer.
 - A stall watchdog recovers from stuck playback.
 - **Auto-send (experimental):** Silero VAD plus Smart Turn v3.2 ends the turn when you stop talking. Its model files (about 11 MB) download the first time it is switched on.
+
+**Tools:** optional web search, allowed-page reading, weather and isolated standard-library Python in chat and voice. Each mode has its own wrench Tools menu, off by default, with All tools and per-tool switches. Expand a tool here for its settings, provider/key or optional Python download. Tool activity and sources appear in the transcript; Voice thinking appears in a collapsed accordion when enabled. See [tools.md](tools.md).
 
 **Models page**, in three groups:
 - **Text to speech:** Kyutai (bundled), Audio8 (Download/Delete).
@@ -61,7 +65,8 @@ Read these in order:
 | Area | Files |
 |---|---|
 | Backend, catalogue, hardware | `src-tauri/src/assistant_backend.rs`, `src-tauri/src/assistant_catalogue.rs`, `download_verified_file` in `src-tauri/src/model_download.rs` |
-| Chat bridge | `src-tauri/src/assistant_chat.rs` (system prompt, sampling, context fitting, SSE) |
+| Chat bridge | `src-tauri/src/assistant_chat.rs` (validation/registry) and `assistant_tool_loop.rs` (wire messages, fitting, SSE, rounds) |
+| Tool policy/network/Python | `assistant_tools.rs`, per-tool modules/registry in `assistant_tools/`, `assistant_tools_network.rs`, `assistant_sandbox.rs`; `src/assistant-tools.ts` and per-tool settings/registry in `src/tools/` |
 | Glue, prompts, dropped images | `src-tauri/src/assistant_commands.rs` |
 | Microphone session | `src-tauri/src/assistant_voice.rs` (capture thread with in-band turn boundaries, ASR worker); `InputStream` in `src-tauri/src/audio_capture.rs` |
 | Turn detection | `src-tauri/src/assistant_turn.rs` (Silero VAD, Smart Turn, Whisper log-mel); runs inside the capture thread; fixtures in `src-tauri/tests-data/smart_turn/`; reference generator `scripts/smart_turn_reference.py` |
@@ -69,8 +74,8 @@ Read these in order:
 | Microphone and model commands | `assistant_mic_*`, `delete_audio8_model` and `delete_asr_model` in `src-tauri/src/voicereader_core.rs` (with `app_command_handler()` and the setup and exit wiring) |
 | Player feedback | `src/player.ts` (streaming policy, phrase acknowledgements), `reportAssistantPlayback` and `PHRASE_DONE` handling in `src/main.ts` |
 | Page | `src/assistant.ts`, `assistant-voice.ts`, `assistant-turns.ts` (pure turn-taking logic), `assistant-mic.ts`, `assistant-models-page.ts`, `assistant-diagnostics.ts`, `assistant-format.ts`, `assistant-hardware.ts`, `assistant-sampling.ts`, `assistant-prompts.ts`, `assistant-dom.ts`, `assistant-markdown.ts`, `assistant-images.ts`, `confirm-button.ts` |
-| Tests | Rust unit tests in each module (229 pass, 19 ignored that need models or the network); `npm run test:assistant`, `test:assistant-fit`, `test:assistant-voice`, `test:player` |
-| Dependencies | `sha2`, `realfft` (all platforms), `libc` (macOS), extra `windows-sys` features (Windows). No npm dependencies. |
+| Tests | Rust unit tests in each module (see [tools.md](tools.md) for the latest results; ignored checks need real models or runtime assets); `npm run test:assistant`, `test:assistant-fit`, `test:assistant-voice`, `test:assistant-tools`, `test:player` |
+| Dependencies | `sha2`, `realfft` (all platforms), `libc` (macOS), extra `windows-sys` features (Windows), plus Base-only Wasmtime/WASI, scraper, chrono and ZIP extraction for tools. No new npm dependencies. |
 
 Data lives under `<engine data dir>/assistant` (backend, models, turn-detection models in `turn/`, run record). In a debug build that is `tts-engine/.data/assistant`; in a release build it is `%LOCALAPPDATA%\com.voicereader.desktop\data\assistant` on Windows and `~/Library/Application Support/com.voicereader.desktop/data/assistant` on macOS. Deleting that folder resets the Assistant completely.
 
@@ -137,11 +142,11 @@ What has been verified on macOS (M2 Max):
   - an image sent as a PNG data URL is understood (a 64×64 test image used about 80 prompt tokens);
   - requests without the API key get 401.
 
-The app's UI has not been run against the real backend on either platform.
+I have since tested and accepted the Assistant and tools in the real macOS app, including Chat, Voice, thinking display and the current controls. Automated and model qualification evidence is in [tools.md](tools.md); Windows remains untested.
 
 ## Model management, memory estimates and diagnostics (added after Step 1)
 
-- **Models page.** Audio8 and Transcription have a **Delete** button once downloaded. The Assistant group installs the backend and downloads, cancels and deletes the models (the Assistant page no longer downloads anything). Delete needs two separate clicks at least 0.5 s apart (a double-click does nothing); the first arms the button for 4 s.
+- **Models page.** Audio8 and Transcription have a **Delete** button once downloaded. The Assistant group installs the backend and downloads, cancels and deletes the models (the Assistant page manages only the optional Python tool runtime; model/backend downloads stay on Models). Delete needs two separate clicks at least 0.5 s apart (a double-click does nothing); the first arms the button for 4 s.
 - **When a delete is refused.**
   - Audio8: while it downloads, while it is the selected Read aloud model (switch to Kyutai first), or while a read-aloud job still holds it.
   - Transcription: while it downloads, or while any transcription, including a voice-clip one, is running. The ASR job slot is held during the delete.
@@ -232,8 +237,8 @@ Switching auto-send off now **pauses** the detector instead of unloading it, so 
 
 ## Known gaps
 
-- `0.3.0-testing` is valid semver but not a valid Python (PEP 440) version. `sync-version.js` also writes it into the deprecated Full engine's `tts-engine/pyproject.toml`, so `pip install` of that engine would reject it. The Base build does not read it. Windows MSI/NSIS installers also need a numeric version; the portable build (`--bundles none`) does not.
-- The test build has the same app identifier (`com.voicereader.desktop`) as v0.2.3, so both share settings and downloaded models. Its `.app` is also named `VoiceReader.app`, so unzip it in a different folder from the working one.
+- The former `0.3.0-testing` version was unsuitable for Python packaging and numeric installer versions. Release preparation now uses `0.3.0` across desktop, lockfiles and Full engine metadata. This removes that version-format issue; it does not validate the Windows build.
+- Version 0.3.0 has the same app identifier (`com.voicereader.desktop`) as v0.2.3, so both share settings and downloaded models. Its `.app` is also named `VoiceReader.app`, so unzip it in a different folder from the working one.
 
 - Hashing a large model after its download (about 15 s for 12B) shows no progress and cannot be cancelled.
 - The chat stream has no stall timeout. A server that stops sending without closing the connection waits until Stop.
@@ -247,7 +252,14 @@ Switching auto-send off now **pauses** the detector instead of unloading it, so 
 
 ## Next steps
 
-1. **On this Mac, in the real app:** chat-page push-to-talk, then voice mode (a full answer, interrupting, read-aloud preempting, and auto-send on), using the manual checks in [conversation.md](conversation.md).
-2. Commit when satisfied (nothing has been committed).
-3. **On Windows:** the build, the checks above, and the voice checks; fix anything Windows-specific.
+**v0.3.0 development is complete (2026-10-20).** It is feature-frozen: further work goes to v0.3.1. Every Chat and Voice system prompt now carries today's date; with tools on, the newest user message also carries the time of day.
+
+**v0.3.1 candidates** (not started):
+- **Page fetching rework**, which also covers the review items left open: trimming pasted URLs, HTML extraction (`header`, `form`, the first `main`/`article`, empty pages) and non-UTF-8 charsets.
+- **"Latest" searches use the wrong year.** In macOS testing Gemma 4 12B searched for "newest small language models … 2024" with the 2026 date in its tools policy. Check whether the new date line in the system prompt fixes it; if not, add a policy line (changing the pinned policy wording means requalifying the Gemma models).
+- Older tool results summarised while idle (plan §11); MiMo memory measurement and requalification; a generated notices file for every crate the app links; sandbox behaviour tests that run by default.
+
+1. **macOS accepted:** I have finished the current app testing and UI review. Keep [conversation.md](conversation.md) and [tools.md](tools.md) as regression checklists; this is not a claim that every rare failure case was exercised individually.
+2. Commit the remaining tools/docs/version work when ready; the base Assistant is already committed in `5e62732`.
+3. **On Windows:** build v0.3.0, run the checks above, tools/runtime packaging checks and real voice tests; fix anything Windows-specific before publishing that artifact. A live Brave key check is also still outstanding.
 4. Later: custom GGUF models from Hugging Face (model plus mmproj) and API endpoints (shown as "planned" on the Models page); tighten the CSP; per-model tuning of Smart Turn thresholds with real voices.

@@ -1,6 +1,6 @@
 # Assistant turn detection (`assistant_turn.rs`)
 
-Status on 2026-10-19: the detector for Step 4 (auto-send) is implemented and tested on macOS (Apple Silicon), and is uncommitted. **It is not wired into the app yet**: nothing calls it, so the build reports `dead_code` warnings for it until the coordinator connects it. It has not been compiled or run on Windows.
+Status on 2026-10-19: implemented, tested on macOS and wired into automatic sending in the committed Assistant (`5e62732`). Windows remains untested. See [conversation.md](conversation.md) for the frontend integration and experimental auto-send controls.
 
 ## What it does
 
@@ -10,7 +10,7 @@ Status on 2026-10-19: the detector for Step 4 (auto-send) is implemented and tes
 - After a pause that follows speech, **Smart Turn v3.2** (pipecat-ai, a Whisper-Tiny encoder with a classifier) judges from the last 8 s of the turn whether the utterance sounds complete. Silence alone never ends a turn early; a long pause still ends it (`max_pause_ms`).
 - The Whisper log-mel preprocessing that Smart Turn needs is reimplemented in Rust and matches the upstream Python path to 4.5e-6 (see "Parity results").
 
-The module is compiled only with the `build-base` feature. The coordinator adds its `mod assistant_turn;` line to `lib.rs`. It uses the app's existing ONNX Runtime (`ort` with `load-dynamic`, loaded by `audio8_local::ensure_onnxruntime()`). The one new dependency is `realfft` 3 (already in `Cargo.lock` through `parakeet-rs`, now also a direct optional dependency in `build-base`).
+The module is compiled only with the `build-base` feature. `lib.rs` declares `mod assistant_turn;` behind that feature. It uses the app's existing ONNX Runtime (`ort` with `load-dynamic`, loaded by `audio8_local::ensure_onnxruntime()`). The one new dependency is `realfft` 3 (already in `Cargo.lock` through `parakeet-rs`, now also a direct optional dependency in `build-base`).
 
 ## Interface (all `pub(crate)`)
 
@@ -147,7 +147,7 @@ Both are pinned by revision and SHA-256 and must be verified with `download_veri
 
 URL form: `https://huggingface.co/<repo>/resolve/<revision>/<path>`. Smart Turn's I/O: `input_features` [batch, 80, 800] float to `logits` [batch, 1]. Silero's: `input` [1, N] float, `state` [2, 1, 128] float and `sr` int64 scalar to `output` [1, 1] and `stateN`.
 
-## How the coordinator connects it (plan §7.1, §7.2)
+## Integration (completed in `5e62732`; plan §7.1, §7.2)
 
 1. When auto-send is on, create one `TurnDetector` with the two model paths and `TurnDetectorConfig::default()` (or the user's settings). Load it once when the Assistant session starts, not per turn (load time was not measured).
 2. Feed it the same 16 kHz mono blocks the capture fan-out sends to ASR, on the capture thread, in recording order.
@@ -201,7 +201,7 @@ WAV samples are converted as `int16 / 32768` on both sides.
 
 ## Manual checks (Windows and macOS)
 
-These need the coordinator's wiring, or a small harness that feeds microphone audio to `push` and prints the events.
+These are manual microphone checks through the wired automatic-send path, or a small harness that feeds microphone audio to `push` and prints the events.
 
 1. **Windows build and parity.** Build with `--features build-base` and run the ignored tests above. Expected: all pass, with probability differences within the 0.02 tolerance (the macOS result was 6e-8), and timings printed.
 2. **Real speech, complete question.** Ask a short question and stop. Expected: `EndOfTurn` about 0.3–0.6 s after you stop.
@@ -214,7 +214,7 @@ These need the coordinator's wiring, or a small harness that feeds microphone au
 
 ## Known gaps and next steps
 
-- Not connected to the capture fan-out or the ASR worker yet (next step for the coordinator, above).
+- Connected to the capture fan-out and ASR worker in the committed Assistant.
 - The Silero 64-sample context follows the silero-vad Python wrapper as remembered, not re-read offline. Without it the model also runs (on 512 samples) but gives different probabilities.
 - No echo handling: the detector must be reset or paused while the assistant speaks.
 - Silence and noise score as complete; the design relies on the VAD gate. Smart Turn is only trained on 16 kHz input; other rates must be resampled first (the capture path already delivers 16 kHz).

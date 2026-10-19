@@ -12,7 +12,8 @@
         "binaries/onnxruntime/**/*",
         "binaries/audio8-metal/**/*",
         "binaries/sox-macos/**/*",
-        "binaries/kyutai-voices/**/*"
+        "binaries/kyutai-voices/**/*",
+        "notices/**/*"
       ],
       "macOS": {
         "minimumSystemVersion": "14.0"

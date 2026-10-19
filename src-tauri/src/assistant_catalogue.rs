@@ -6,6 +6,10 @@ use serde::Serialize;
 /// The llama.cpp build tag this release installs.
 pub(crate) const BACKEND_VERSION: &str = "b11718";
 
+/// Populated only after the pinned 12-case/three-seed tool evaluation passes.
+/// A model remains usable with tools after the explicit reliability warning.
+pub(crate) const TOOLS_VERIFIED_MODELS: &[&str] = &["gemma-4-e4b", "gemma-4-12b"];
+
 const BACKEND_RELEASE_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download";
 
 /// One downloadable file with its pinned size and SHA-256 (lowercase hex).
@@ -320,6 +324,40 @@ pub(crate) fn model_by_id(id: &str) -> Option<&'static CatalogueModel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_tools_require_current_pins_and_passing_recorded_qualification() {
+        use sha2::{Digest, Sha256};
+        let reports = [
+            ("gemma-4-e4b", include_str!("../../docs/benchmarks/assistant-tools/2026-10-19-gemma-4-e4b-decimal-voice.json")),
+            ("gemma-4-12b", include_str!("../../docs/benchmarks/assistant-tools/2026-10-19-gemma-4-12b-decimal-voice.json")),
+        ];
+        assert_eq!(TOOLS_VERIFIED_MODELS, &reports.map(|(id,_)|id));
+        for (id, text) in reports {
+        let report: serde_json::Value = serde_json::from_str(text).unwrap();
+        let model = model_by_id(id).unwrap();
+        assert_eq!(report["qualified"], true);
+        assert_eq!(report["model_sha256"], model.weights.sha256);
+        assert_eq!(report["model_revision"], model.revision);
+        assert_eq!(report["server_build"], BACKEND_VERSION);
+        assert_eq!(report["tools_sha256"], format!("{:x}",Sha256::digest(crate::assistant_tools::definitions().to_string().as_bytes())));
+        let fixture: serde_json::Value = serde_json::from_str(include_str!("../tests-data/tools/model-cases.json")).unwrap();
+        assert_eq!(report["fixture_sha256"], format!("{:x}",Sha256::digest(include_bytes!("../tests-data/tools/model-cases.json"))));
+        let time = fixture["policy_time"].as_str().unwrap();
+        for (voice, prompt, field) in [(false, crate::assistant_chat::DEFAULT_CHAT_PROMPT, "chat_prompt_sha256"), (true, crate::assistant_chat::DEFAULT_VOICE_PROMPT, "voice_prompt_sha256")] {
+            assert_eq!(report[field], format!("{:x}",Sha256::digest(format!("{prompt}{}",crate::assistant_tools::prompt_at(voice,time)).as_bytes())));
+            let mut passes = 0;
+            for case in fixture["cases"].as_array().unwrap() {
+                let records: Vec<_> = report["records"].as_array().unwrap().iter().filter(|r|r["voice"]==voice && r["case"]==case["id"]).collect();
+                assert_eq!(records.len(), 3);
+                let passed = records.iter().filter(|r|r["passed"]==true).count() >= 2;
+                if case["hard"]==true { assert!(passed, "required case {} must pass",case["id"]); }
+                passes += usize::from(passed);
+            }
+            assert!(passes>=11);
+        }
+        }
+    }
 
     fn is_lower_hex(value: &str, len: usize) -> bool {
         value.len() == len && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))

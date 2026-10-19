@@ -5,6 +5,22 @@ download filenames, supported architectures and minimum OS versions. Include the
 following notice in every release that provides an ad hoc signed, unnotarized
 macOS app. Update it if the signing policy changes.
 
+## v0.3.0 preparation status (2026-10-19)
+
+The source version is `0.3.0`. I have tested and accepted the current macOS Assistant/tools, thinking transcript and UI. Windows validation of these additions remains pending; do not present the Mac result as a Windows sign-off. The version bump and these notes do not publish a GitHub release.
+
+Release notes should cover the optional app-managed llama.cpp/model downloads; Chat, images and spoken conversations; experimental automatic turn detection; optional search/page/weather/Python tools; separate Chat/Voice switches and Assistant-page tool settings; thinking budgets/collapsed Voice reasoning; and decimal “point” wording in the default Voice prompt. Mention the privacy boundary: local inference, but enabled internet tools send their own requests to providers. Runtime plugins/chat-created tools are planning only.
+
+Keep `package.json` as the version source and run `node scripts/sync-version.js` before building. Check the desktop, both lockfile app entries and Full engine metadata all show `0.3.0`; do not rewrite archived benchmark records or old testing ZIP names. Preserve generated versioned asset names and list their exact names in the release.
+
+### Assistant checks before publishing each platform artifact
+
+- Install/load/eject the pinned backend and a model; check the device, memory estimate and diagnostics. Test Chat, image input, dictation, Voice, automatic sending and interruption using the [Assistant checklist](assistant/README.md).
+- Exercise each tool separately, All tools, partial selections and Chat/Voice independence. Weather/search alone must not install Python. Verify the Python download/delete/reinstall path, error recovery and Stop/New chat/Eject during tool work. Use [tools.md](assistant/tools.md) for the specific failure cases; macOS acceptance does not imply every edge case was checked individually.
+- Check the compiled-in tool dependency notices and downloaded backend/model/runtime licences in the extracted artifact. The macOS bundle includes `notices/assistant-tools.txt`; verify notice delivery in the Windows portable packaging as part of its pending checks.
+- On Windows, build and test the Job Object, process probes, Vulkan/CPU fallback, file locking, microphone/TTS and packaged runtime paths on a real Windows machine. A live Brave key test is still outstanding and requires my key.
+- Keep existing TTS/transcription/selection/toolbar regression checks. Retain the macOS first-launch notice below in every Mac release.
+
 ## First launch on macOS
 
 VoiceReader is free to use. The macOS app is ad hoc signed, but is not Developer ID
@@ -29,7 +45,7 @@ disable macOS security protections globally.
 - Grant Accessibility access to the current app to read highlighted text. The
   default hotkey is Ctrl+Shift+S; keep the source app focused when pressing it.
 - Grant Microphone access if you want to record for transcription.
-- State the Audio8 compute support of the artifact being released. v0.2.3 uses
+- State the Audio8 compute support of the artifact being released. From v0.2.3, the standard Base build uses
   CPU autoregressive generation plus native WebGPU/Metal FP32 decoding on Apple
   Silicon. Auto benchmarks it against CPU; GPU and CPU are also selectable. Intel
   remains CPU-only. v0.2.2 used CPU on macOS. See [METAL.md](METAL.md).

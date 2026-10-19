@@ -1,4 +1,4 @@
-# Audio8 Metal support (v0.2.3)
+# Audio8 Metal support (introduced in v0.2.3)
 
 The standard Apple Silicon Base build runs the Audio8 codec decoder through ONNX Runtime's native WebGPU plugin, using Dawn's Metal backend. The slow/fast autoregressive graphs, voice registration, transcription and Kyutai stay on their existing CPU paths. It uses FP32 decoder computation and reuses the existing FP16 weight download; no MLX or Python runtime is required in the app.
 
@@ -11,7 +11,7 @@ npm ci
 npm run desktop:build:macos:portable
 ```
 
-The build pins core ONNX Runtime 1.24.4 and WebGPU plugin 0.4.0, verifies the plugin archive checksum and bundles its licenses. It produces `VoiceReader.app` and a portable ZIP at `src-tauri/target/release/bundle/portable/VoiceReader_0.2.3_macos_arm64_portable.zip`. The app has an ad-hoc signature; downloaded copies still require the macOS first-launch steps in [RELEASING.md](RELEASING.md).
+The build pins core ONNX Runtime 1.24.4 and WebGPU plugin 0.4.0, verifies the plugin archive checksum and bundles its licenses. It produces `VoiceReader.app` and a portable ZIP at `src-tauri/target/release/bundle/portable/VoiceReader_0.3.0_macos_arm64_portable.zip`. The app has an ad-hoc signature; downloaded copies still require the macOS first-launch steps in [RELEASING.md](RELEASING.md).
 
 Quit other VoiceReader copies before opening the new build. It reuses the existing model downloads, saved voices and preferences. Select **Audio8 TTS**, then **Auto** or **GPU** under **Compute Device**. The status should say `webgpu`. Select **CPU** to compare with the previous decoder. Auto benchmarks both providers and keeps the faster one only when it beats CPU by more than 1.5×. Its 7-day benchmark cache is `audio8-decoder-device-webgpu-fp32.json`, separate from the preview caches and Windows cache. If WebGPU cannot load or warm up, the existing CPU fallback applies and its reason appears in the status.
 

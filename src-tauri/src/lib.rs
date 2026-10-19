@@ -46,3 +46,11 @@ mod assistant_turn;
 mod assistant_phrases;
 #[cfg(feature = "build-base")]
 mod assistant_conversation;
+#[cfg(feature = "build-base")]
+mod assistant_tools;
+#[cfg(feature = "build-base")]
+mod assistant_tools_network;
+#[cfg(feature = "build-base")]
+mod assistant_sandbox;
+#[cfg(feature = "build-base")]
+mod assistant_tool_loop;

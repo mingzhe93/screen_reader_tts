@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { emit, listen } from "@tauri-apps/api/event";
 import { decodePcm16Base64ToFloat32 } from "./playback";
 import { SpeechPlayer } from "./player";
+import { confirmAction } from "./confirm-dialog";
 import {
   RATE_UPDATED_EVENT,
   TOOLBAR_ACTION_EVENT,
@@ -356,6 +357,7 @@ app.innerHTML = `
                 <input id="chunk-max" type="number" min="100" max="200" step="10" value="200" />
               </div>
             </article>
+
 
             <article class="card settings-section is-hidden" id="selection-access-card">
               <h2 class="card-title">Read highlighted text</h2>
@@ -1387,7 +1389,7 @@ function renderVoicesTable(): void {
     deleteBtn.title = "Delete saved voice";
     deleteBtn.addEventListener("click", async () => {
       const voiceLabel = nameInput.value.trim() || voice.voice_id;
-      if (!window.confirm(`Delete saved voice "${voiceLabel}"?`)) {
+      if (!(await confirmAction(`Delete saved voice "${voiceLabel}"?`, "Delete"))) {
         return;
       }
       deleteBtn.disabled = true;

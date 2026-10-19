@@ -1,6 +1,6 @@
 [package]
 name = "voicereader-desktop"
-version = "0.3.0-testing"
+version = "0.3.0"
 edition = "2021"
 
 [build-dependencies]
@@ -19,8 +19,8 @@ serde_json = "1.0"
 # platform and switched on by `macOSPrivateApi` in tauri.conf.json. The Tauri CLI rewrites
 # this list to match the config, and the build fails when the two disagree, so the setting
 # must not live in a macOS-only config. It has no effect on Windows.
-tauri = { version = "1.6", features = [ "macos-private-api", "global-shortcut-all", "clipboard-read-text", "global-shortcut", "shell-open", "window-all", "dialog-open", "dialog-save"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tauri = { version = "1.6", features = [ "macos-private-api", "global-shortcut-all", "clipboard-read-text", "global-shortcut", "shell-open", "window-all", "dialog-confirm", "dialog-open", "dialog-save"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net"] }
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 uuid = { version = "1", features = ["v4"], optional = true }
 pocket-tts = { version = "0.2.1", optional = true }
@@ -31,7 +31,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
 hound = { version = "3.5", optional = true }
 tempfile = { version = "3.25", optional = true }
-zip = { version = "=7.2.0", default-features = false, optional = true }
+zip = { version = "=7.2.0", default-features = false, features = ["deflate"], optional = true }
 half = { version = "2", optional = true }
 # Speech to text: multitalker Parakeet with the Nemotron-3 diarizer, on the same ONNX Runtime.
 # Vendored: vendor/parakeet-rs is version 0.3.8 with a patch that stops words being lost
@@ -43,6 +43,10 @@ cpal = { version = "0.15", optional = true }
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "adpcm", "mp3", "aac", "alac", "isomp4", "flac", "ogg", "vorbis", "mkv"], optional = true }
 # Verifies the pinned llama.cpp backend and Assistant model downloads.
 sha2 = { version = "0.10", optional = true }
+wasmtime = { version = "=36.0.18", default-features = false, features = ["async", "cranelift", "parallel-compilation", "runtime", "std"], optional = true }
+wasmtime-wasi = { version = "=36.0.18", default-features = false, features = ["preview1"], optional = true }
+chrono = { version = "0.4", optional = true }
+scraper = { version = "0.19", optional = true }
 # FFT for the Whisper log-mel features of the Assistant's turn detector (Smart Turn).
 realfft = { version = "3", optional = true }
 
@@ -65,7 +69,7 @@ libc = { version = "0.2", optional = true }
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 build-full = []
-build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading", "dep:parakeet-rs", "dep:symphonia", "dep:cpal", "dep:tempfile", "dep:zip", "dep:sha2", "dep:libc", "dep:realfft"]
+build-base = ["dep:uuid", "dep:pocket-tts", "dep:ort", "dep:tokenizers", "dep:hound", "dep:half", "dep:libloading", "dep:parakeet-rs", "dep:symphonia", "dep:cpal", "dep:tempfile", "dep:zip", "dep:sha2", "dep:libc", "dep:realfft", "dep:wasmtime", "dep:wasmtime-wasi", "dep:scraper", "dep:chrono"]
 
 # objc 0.2's `msg_send!` / `class!` macros expand to `#[cfg(feature = "cargo-clippy")]`
 # inside this crate, which rustc's cfg checking flags. Declare that value as expected so
@@ -87,4 +91,13 @@ opt-level = 3
 [profile.dev.package.digest]
 opt-level = 3
 [profile.dev.package.block-buffer]
+opt-level = 3
+
+# The optional CPython module is compiled at runtime. Optimize the compiler in
+# development too, so first-use latency reflects the shipped app.
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+[profile.dev.package.regalloc2]
+opt-level = 3
+[profile.dev.package.wasmtime-internal-cranelift]
 opt-level = 3

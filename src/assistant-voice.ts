@@ -5,6 +5,7 @@
 // Behaviour, events and manual tests: docs/assistant/conversation.md.
 // The DOM is built with createElement and textContent only.
 
+import { ToolTranscript, createThinkingLimit, createToolsToggle, finalAnswer, historyWithNote, renderToolTranscript, toolLimits } from "./assistant-tools";
 import { invoke } from "@tauri-apps/api/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { button, errorText, h, readStored, svgIcon, writeStored } from "./assistant-dom";
@@ -30,6 +31,11 @@ import {
   type VoicePhrase,
 } from "./assistant-turns";
 import type {
+  AssistantChatDonePayload,
+  AssistantModelInfo,
+  AssistantToolCallPayload,
+  AssistantToolResultPayload,
+  AssistantTurnPhasePayload,
   AssistantChatDeltaPayload,
   AssistantChatErrorPayload,
   AssistantPlaybackPayload,
@@ -344,8 +350,14 @@ export function createPushToTalk(options: {
 // ---------------------------------------------------------------------------
 
 type ExchangeView = {
+  thinking: HTMLDetailsElement;
+  thinkingText: HTMLElement;
+  thinkingSummary: HTMLElement;
   root: HTMLElement;
   heardEl: HTMLElement;
+  fillerEl: HTMLElement;
+  preambleEl: HTMLElement;
+  toolEl: HTMLElement;
   restEl: HTMLElement;
   markEl: HTMLElement;
   noteEl: HTMLElement;
@@ -354,6 +366,12 @@ type ExchangeView = {
 
 type Exchange = VoiceExchangeRecord & {
   answer: string;
+  rounds: Map<number, string>;
+  reasoning: Map<number, string>;
+  finalRound?: number;
+  terminal: boolean;
+  historyNote: string;
+  tools: ToolTranscript;
   phrases: VoicePhrase[];
   playedSeq: number;
   error: string;
@@ -367,6 +385,8 @@ type ActiveAnswer = {
   requestId: string;
   jobId: string | null;
   watch: PlaybackWatch;
+  drained: boolean;
+  phase: string;
 };
 
 type VoiceTurn = { id: number | null; endRequested: boolean; abandoned: boolean };
@@ -390,6 +410,7 @@ export async function createVoiceMode(options: {
   /** Why talking is not possible now (no model loaded, ...), or "" when it is. */
   unavailableReason: () => string;
   sampling: () => AssistantSampling | null;
+  model: () => AssistantModelInfo | null;
   onNewChat: () => void;
 }): Promise<VoiceMode> {
   const { mic, log } = options;
@@ -426,6 +447,8 @@ export async function createVoiceMode(options: {
   let noticeTimer = 0;
   let watchdog = 0;
   let conversation = 0;
+  let conversationId = crypto.randomUUID();
+  const pendingMetadata = new Map<string, Exchange>();
 
   // -- DOM ------------------------------------------------------------------
 
@@ -443,6 +466,7 @@ export async function createVoiceMode(options: {
   const partialLine = h("p", "assistant-talk-partial is-hidden");
   const errorLine = h("p", "assistant-error assistant-talk-error is-hidden");
   errorLine.setAttribute("role", "alert");
+  const toolsToggle = createToolsToggle("voice", options.model);
   const stage = h(
     "div",
     "assistant-voice-stage",
@@ -450,6 +474,7 @@ export async function createVoiceMode(options: {
     stateLine,
     partialLine,
     errorLine,
+    toolsToggle.element,
   );
 
   const transcriptList = h("div", "assistant-vt-list");
@@ -475,7 +500,12 @@ export async function createVoiceMode(options: {
     "Uses voice activity detection plus Smart Turn to decide when you have finished. It may cut you off mid-sentence; the final transcript is shown so you can see when it did. When it is off, the talk button sends.",
   );
   const autoError = h("p", "caption assistant-auto-unavailable is-hidden");
-  const panelBody = h("div", "assistant-section-body", autoLabel, autoNote, autoError);
+  const thinkKey = "voicereader.assistant.think.voice";
+  const thinkBox = h("input"); thinkBox.type = "checkbox"; thinkBox.checked = readStored(thinkKey) === "true";
+  thinkBox.addEventListener("change", () => writeStored(thinkKey, String(thinkBox.checked)));
+  const thinkingLimit = createThinkingLimit("voice");
+  const panelBody = h("div", "assistant-section-body", autoLabel, autoNote, autoError,
+    h("label", "assistant-think", thinkBox, "Think before answering"), thinkingLimit.element);
 
   // -- Derived state ----------------------------------------------------------
 
@@ -493,6 +523,7 @@ export async function createVoiceMode(options: {
     if (micStarting) return { text: "Starting microphone…", tone: "busy" };
     if (isRecording()) return { text: "Listening…", tone: "busy" };
     if (active) {
+      if (active.phase) return { text: `${active.phase} — press to interrupt`, tone: "busy" };
       if (active.exchange.phrases.length > 0) return { text: "Speaking — press to interrupt", tone: "busy" };
       return { text: "Thinking…", tone: "busy" };
     }
@@ -553,7 +584,13 @@ export async function createVoiceMode(options: {
   }
 
   function createExchange(user: string): Exchange {
+    const thinkingText = h("div", "assistant-thinking-text");
+    const thinkingSummary = h("summary", "", "Thinking…");
+    const thinking = h("details", "assistant-thinking assistant-vt-thinking is-hidden", thinkingSummary, thinkingText);
     const heardEl = h("span", "assistant-vt-heard");
+    const fillerEl = h("p", "assistant-vt-fillers is-hidden");
+    const preambleEl = h("p", "assistant-vt-preambles is-hidden");
+    const toolEl = h("div", "assistant-tool-transcript");
     const restEl = h("span", "assistant-vt-rest");
     const markEl = h("span", "assistant-vt-mark is-hidden");
     const noteEl = h("p", "caption is-hidden");
@@ -562,6 +599,10 @@ export async function createVoiceMode(options: {
       "div",
       "assistant-vt-exchange",
       h("p", "assistant-vt-user", h("span", "assistant-vt-who", "You"), user),
+      thinking,
+      fillerEl,
+      preambleEl,
+      toolEl,
       h("p", "assistant-vt-assistant", h("span", "assistant-vt-who", "Assistant"), heardEl, restEl, markEl),
       noteEl,
       errorEl,
@@ -571,11 +612,16 @@ export async function createVoiceMode(options: {
       status: "active",
       history: "",
       answer: "",
+      rounds: new Map(),
+      reasoning: new Map(),
+      terminal: false,
+      historyNote: "",
+      tools: new ToolTranscript(),
       phrases: [],
       playedSeq: -1,
       error: "",
       note: "",
-      view: { root, heardEl, restEl, markEl, noteEl, errorEl },
+      view: { thinking, thinkingText, thinkingSummary, root, heardEl, fillerEl, preambleEl, toolEl, restEl, markEl, noteEl, errorEl },
       frame: 0,
     };
   }
@@ -589,8 +635,18 @@ export async function createVoiceMode(options: {
     const { view: v } = exchange;
     let split = exchange.answer.length;
     if (exchange.status !== "done") {
-      split = heardPrefixLength(exchange.answer, heardText(exchange.phrases, exchange.playedSeq));
+      split = heardPrefixLength(exchange.answer, heardText(exchange.phrases, exchange.playedSeq, answerRound(exchange)));
     }
+    const round = answerRound(exchange);
+    v.thinkingText.textContent = Array.from(exchange.reasoning.values()).join("\n\n");
+    v.thinking.classList.toggle("is-hidden", !v.thinkingText.textContent);
+    v.thinkingSummary.textContent = exchange.status === "active" && !exchange.answer ? "Thinking…" : "Thinking";
+    const preamble = Array.from(exchange.rounds.entries()).filter(([n]) => n !== round).map(([, text]) => text).join("\n\n");
+    v.preambleEl.textContent = preamble;
+    v.preambleEl.classList.toggle("is-hidden", !preamble);
+    v.fillerEl.textContent = exchange.phrases.filter((phrase) => phrase.kind === "filler").map((phrase) => phrase.text).join(" ");
+    v.fillerEl.classList.toggle("is-hidden", !v.fillerEl.textContent);
+    renderToolTranscript(exchange.tools, v.toolEl);
     v.heardEl.textContent = exchange.answer.slice(0, split);
     v.restEl.textContent = exchange.answer.slice(split);
     v.root.classList.toggle("is-active", exchange.status === "active");
@@ -843,7 +899,7 @@ export async function createVoiceMode(options: {
     transcriptList.scrollTop = transcriptList.scrollHeight;
     const requestId = crypto.randomUUID();
     // Registered before the command: its events can arrive before it resolves.
-    active = { exchange, requestId, jobId: null, watch: newPlaybackWatch(performance.now()) };
+    active = { exchange, requestId, jobId: null, watch: newPlaybackWatch(performance.now()), drained: false, phase: "" };
     error = "";
     startWatchdog();
     // The microphone stays closed while the assistant speaks.
@@ -854,6 +910,12 @@ export async function createVoiceMode(options: {
         requestId,
         messages,
         sampling: options.sampling(),
+        conversationId,
+        tools: toolsToggle.enabled(),
+        enabledTools: toolsToggle.selection(),
+        think: thinkBox.checked,
+        thinkingBudget: thinkingLimit.value(),
+        toolLimits: toolLimits(),
       });
       if (active?.requestId !== requestId) return;
       if (result?.job_id != null && active.jobId === null) active.jobId = String(result.job_id);
@@ -875,15 +937,22 @@ export async function createVoiceMode(options: {
     stopWatchdog();
     const exchange = current.exchange;
     exchange.status = status;
-    exchange.history = history;
+    // Late tool results of an interrupted or failed answer are ignored, so no chip stays "running".
+    if (status !== "done") exchange.tools.settlePending();
+    exchange.history = historyWithNote(history, exchange.historyNote);
+    if (!exchange.terminal && (status === "interrupted" || status === "stopped")) pendingMetadata.set(current.requestId, exchange);
     exchange.error = message;
     renderExchange(exchange);
     if (entered && autoOn() && mic.state === "open" && !recording) void applyAuto(true);
     render();
   }
 
+  function answerRound(exchange: Exchange): number {
+    return exchange.finalRound ?? Math.max(0, ...exchange.rounds.keys());
+  }
+
   function heardOf(exchange: Exchange): string {
-    return heardText(exchange.phrases, exchange.playedSeq);
+    return heardText(exchange.phrases, exchange.playedSeq, answerRound(exchange));
   }
 
   function cancelRequest(requestId: string): void {
@@ -902,7 +971,7 @@ export async function createVoiceMode(options: {
 
   function complete(): void {
     const current = active;
-    if (!current) return;
+    if (!current || !current.exchange.terminal || !current.drained) return;
     settle("done", current.exchange.answer.trim());
   }
 
@@ -937,9 +1006,46 @@ export async function createVoiceMode(options: {
   // -- Events -----------------------------------------------------------------
 
   await listen<AssistantChatDeltaPayload>("assistant:chat-delta", ({ payload }) => {
-    if (!active || payload.request_id !== active.requestId || !payload.content) return;
-    active.exchange.answer += payload.content;
-    scheduleExchange(active.exchange);
+    if (!active || payload.request_id !== active.requestId) return;
+    const round = payload.round ?? 0;
+    if (payload.reasoning) active.exchange.reasoning.set(round, (active.exchange.reasoning.get(round) ?? "") + payload.reasoning);
+    if (payload.content) {
+      active.exchange.rounds.set(round, (active.exchange.rounds.get(round) ?? "") + payload.content);
+      active.exchange.answer = active.exchange.rounds.get(round) ?? "";
+    }
+    if (payload.content || payload.reasoning) scheduleExchange(active.exchange);
+  });
+  await listen<AssistantChatDonePayload>("assistant:chat-done", ({ payload }) => {
+    const current = active?.requestId === payload.request_id ? active : null;
+    const exchange = current?.exchange ?? pendingMetadata.get(payload.request_id);
+    if (!exchange) return;
+    pendingMetadata.delete(payload.request_id);
+    exchange.terminal = true;
+    exchange.finalRound = payload.final_round ?? answerRound(exchange);
+    exchange.answer = finalAnswer(exchange.rounds, payload);
+    exchange.historyNote = payload.history_note ?? "";
+    exchange.tools.addSources(payload.sources);
+    if (!current) {
+      const mark = exchange.status === "interrupted" ? INTERRUPTED_MARK : STOPPED_MARK;
+      exchange.history = historyWithNote(cutShortText(heardOf(exchange), mark), exchange.historyNote);
+    }
+    scheduleExchange(exchange);
+    complete();
+  });
+  await listen<AssistantToolCallPayload>("assistant:tool-call", ({ payload }) => {
+    if (!active || payload.request_id !== active.requestId) return;
+    active.exchange.tools.call(payload);
+    active.phase = payload.name === "web_search" ? "Searching…" : payload.name === "fetch_page" ? "Opening page…" : payload.name === "get_weather" ? "Checking weather…" : payload.name === "run_python" ? "Running code…" : "Using tools…";
+    scheduleExchange(active.exchange); render();
+  });
+  await listen<AssistantToolResultPayload>("assistant:tool-result", ({ payload }) => {
+    if (!active || payload.request_id !== active.requestId) return;
+    active.exchange.tools.result(payload); scheduleExchange(active.exchange);
+  });
+  await listen<AssistantTurnPhasePayload>("assistant:turn-phase", ({ payload }) => {
+    if (!active || payload.request_id !== active.requestId) return;
+    active.phase = payload.phase === "thinking" ? "Thinking…" : payload.phase === "tool" ? "Using tools…" : "Answering…";
+    render();
   });
   await listen<AssistantChatErrorPayload>("assistant:chat-error", ({ payload }) => {
     if (!active || payload.request_id !== active.requestId) return;
@@ -950,7 +1056,7 @@ export async function createVoiceMode(options: {
     const jobId = String(payload.job_id);
     if (active.jobId === null) active.jobId = jobId;
     else if (active.jobId !== jobId) return;
-    active.exchange.phrases.push({ seq: Number(payload.seq), text: String(payload.text ?? "") });
+    active.exchange.phrases.push({ seq: Number(payload.seq), text: String(payload.text ?? ""), kind: payload.kind ?? "answer", round: payload.round ?? 0 });
     scheduleExchange(active.exchange);
     render();
   });
@@ -963,7 +1069,7 @@ export async function createVoiceMode(options: {
       current.exchange.playedSeq = playedSeq;
       scheduleExchange(current.exchange);
     }
-    if (payload.drained) complete();
+    if (payload.drained) { current.drained = true; complete(); }
   });
   await listen<AssistantVoiceEndedPayload>("assistant:voice-ended", ({ payload }) => {
     if (!active || payload.request_id !== active.requestId) return;
@@ -972,7 +1078,7 @@ export async function createVoiceMode(options: {
     if (payload.reason === "done") {
       current.watch = noteSpeechDone(current.watch, performance.now());
       // Nothing was spoken, so no drained report will come.
-      if (current.exchange.phrases.length === 0) complete();
+      if (current.exchange.phrases.length === 0) { current.drained = true; complete(); }
     } else if (payload.reason === "error") {
       fail(payload.message || "The voice answer failed.", false);
     } else {
@@ -1097,6 +1203,10 @@ export async function createVoiceMode(options: {
     },
     newConversation() {
       conversation += 1;
+      const clearedConversationId = conversationId;
+      conversationId = crypto.randomUUID();
+      pendingMetadata.clear();
+      void invoke("assistant_clear_tool_conversation", { conversationId: clearedConversationId }).catch((failure) => log(`Could not clear voice tool conversation: ${errorText(failure)}`, "error"));
       if (active) {
         const current = active;
         active = null;

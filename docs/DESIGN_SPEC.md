@@ -4,7 +4,7 @@ This document describes how the app is put together today. Decisions and their r
 
 ## 1. Product
 
-VoiceReader reads highlighted text aloud. A global hotkey captures the selection from the active app, a local text-to-speech model turns it into audio, and the audio plays while a small floating toolbar offers playback controls. Models run on your machine.
+VoiceReader reads highlighted text aloud. A global hotkey captures the selection from the active app, a local text-to-speech model turns it into audio, and the audio plays while a small floating toolbar offers playback controls. Models run on your machine. Version 0.3.0 adds an optional local Assistant with Chat, voice conversation and individually enabled tools. Inference stays local; internet tools send their queries/requests to the selected providers. I have tested and accepted the current macOS app; Windows validation of the Assistant/tools is pending.
 
 ## 2. Builds
 
@@ -13,14 +13,15 @@ A Cargo feature picks the build. Exactly one must be enabled; the crate refuses 
 | | Base (`build-base`) | Full (`build-full`) |
 |---|---|---|
 | Status | The product and the default for `npm run desktop:dev` and `desktop:build` | Kept for future heavier models; not actively used |
-| Inference | In the Rust process | Python sidecar (`tts-engine/`) over loopback HTTP and WebSocket |
+| Inference | TTS/ASR in Rust; optional app-managed llama.cpp process; optional Python calculations in WASI | Python sidecar (`tts-engine/`) over loopback HTTP and WebSocket |
 | Models | Kyutai Pocket TTS (bundled), Audio8 TTS 0.1B (optional download) | Kyutai, Qwen3-TTS 0.6B CustomVoice and Base |
 | Speech to text | Multitalker Parakeet with the Nemotron-3 diarizer (optional download; section 15) | Not available |
-| Python at run time | No | Yes |
+| Assistant | Optional backend/model downloads; Chat, Voice, tools and turn detection (section 17) | Not available |
+| Python at run time | Optional downloaded CPython WASI for the calculation tool; no host Python or Python sidecar | Yes, the Python sidecar |
 
 Code shared by both builds (commands, state, hotkey, selection capture, toolbar) lives in `voicereader_core.rs`. Code that exists only in one build is behind `#[cfg(feature = ...)]`. In the Base build `qwen_modes_enabled()` is false, so Qwen modes are hidden and their commands return an error. Audio8 and transcription exist only in the Base build. In the Full build `download_audio8_model`, `download_asr_model`, `transcribe_audio_file`, `transcribe_microphone_input` and `cancel_transcription` return an error, `audio8_model_status` and `asr_model_status` report `supported: false`, and `list_audio_inputs` returns an empty list.
 
-The app version is 0.2.3. `package.json` is the source: `scripts/sync-version.js`, which runs before dev and build, copies it to `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, the app entries in both lockfiles, and the Full-build Python engine metadata (`tts-engine/pyproject.toml`, `tts_engine/__init__.py` and `tts_engine/config.py`). Dependency versions are left unchanged. The Base runtimes report it as `engine_version` in their health JSON (through `CARGO_PKG_VERSION`), and the model downloader sends it in its user agent. The sidecar reports the same release version.
+The app version is 0.3.0, in release preparation. `package.json` is the source: `scripts/sync-version.js`, which runs before dev and build, copies it to `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, the app entries in both lockfiles, and the Full-build Python engine metadata (`tts-engine/pyproject.toml`, `tts_engine/__init__.py` and `tts_engine/config.py`). Dependency versions are left unchanged. The Base runtimes report it as `engine_version` in their health JSON (through `CARGO_PKG_VERSION`), and the model downloader sends it in its user agent. The sidecar reports the same release version.
 
 From v0.2.3, the standard Base build includes native WebGPU/Metal decoding on Apple Silicon macOS. There is no preview feature or separate app/configuration. [METAL.md](METAL.md) describes its packaging and validation; Intel macOS stays on CPU.
 
@@ -32,9 +33,9 @@ Rust backend (`src-tauri/src/`). `lib.rs` declares the modules; every module exc
 |---|---|
 | `main.rs` | Entry point; calls `run()` in `lib.rs`, which calls `run_app()` |
 | `voicereader_core.rs` | Tauri commands, hotkey, toolbar window, engine lifecycle, job streaming, transcription jobs |
-| `settings.rs` | Settings file (hotkey, compute device) and hotkey validation |
+| `settings.rs` | Serialized settings updates: hotkey, compute device, Assistant prompts, search credentials and tool limits; hotkey validation |
 | `selection.rs` | Capturing the selected text and the source window title, per platform |
-| `model_download.rs` | Resumable model download from Hugging Face |
+| `model_download.rs` | Resumable model downloads, plus pinned size/SHA-256 verification for Assistant assets |
 | `kyutai_local.rs`, `audio8_local.rs` | The two Base-build TTS runtimes. `kyutai_local.rs` also stores the saved voices; `audio8_local.rs` also chooses the decoder device and loads the ONNX Runtime library (`ensure_onnxruntime`), which transcription uses too |
 | `audio8_model.rs` | Audio8 ONNX inference; on Apple Silicon, native plugin registration and validated FP32 decoder graph preparation |
 | `audio_pipeline.rs` | PCM emission shared by both runtimes, the switch for where the speed is applied, the older SoX tempo path, and reference-clip normalization |
@@ -44,6 +45,10 @@ Rust backend (`src-tauri/src/`). `lib.rs` declares the modules; every module exc
 | `audio_decode.rs` | Reading audio files as 16 kHz mono in blocks; the resampler (also used for Audio8 reference clips) |
 | `audio_capture.rs` | Capturing mono microphone samples, keeping a native-rate WAV for export and resampling to 16 kHz for transcription |
 | `recording_export.rs` | Retaining the current session audio and atomically exporting recording/transcript ZIPs |
+| `assistant_backend.rs`, `assistant_catalogue.rs`, `assistant_commands.rs` | Managed llama.cpp, curated model metadata, prompts and command/event transport |
+| `assistant_chat.rs`, `assistant_tool_loop.rs`, `assistant_tools.rs`, `assistant_tools/` | Shared Chat/Voice model/tool loop, context fitting, per-turn capabilities, per-tool registry and handlers |
+| `assistant_voice.rs`, `assistant_turn.rs`, `assistant_phrases.rs`, `assistant_conversation.rs` | Microphone sessions, ASR/turn detection, phrase segmentation and ordered speech lifecycle |
+| `assistant_tools_network.rs`, `assistant_sandbox.rs` | Public-address network guards and optional isolated WASI Python |
 
 `src-tauri/vendor/parakeet-rs` is a vendored copy of the `parakeet-rs` crate (0.3.8) with two changes to `src/multitalker.rs`, marked `VoiceReader patch`: the speaker hold and the transcription of speakers beyond the limit (section 15). `src-tauri/vendor/parakeet-rs/VOICEREADER_PATCH.md` lists them and says how to move to a newer upstream version. `src-tauri/Info.plist` holds the macOS microphone permission text.
 
@@ -53,6 +58,8 @@ Frontend (`src/`):
 |---|---|
 | `main.ts` | The main window: the HTML template for all pages, the handlers, and the playback queue |
 | `transcribe.ts` | The Transcribe page and the transcription row on the Models page |
+| `assistant.ts`, `assistant-voice.ts`, `assistant-tools.ts`, `tools/` | Chat/Voice UI, transcripts, selected tools and per-tool settings modules/registration |
+| `assistant-models-page.ts`, `assistant-prompts.ts`, `assistant-diagnostics.ts` | Assistant downloads, editable Chat/Voice prompts and backend diagnostics |
 | `toolbar.ts` | The floating toolbar window |
 | `playback.ts` | Prebuffer and rebuffer times, leading silence, PCM decoding |
 | `player.ts` | The speech player: audio device, queueing, start and refill decisions, pause, stop |
@@ -67,12 +74,13 @@ The two HTML entry points are `index.html` and `toolbar.html`.
 
 ## 4. Windows
 
-- **Main window** (`index.html`, label `main`): opens at 1240 by 980 (minimum 980 by 840). A fixed sidebar on the left lists the pages in three groups, Speak (Read aloud, Voices), Listen (Transcribe) and App (Models, Settings); one page at a time shows on the right.
+- **Main window** (`index.html`, label `main`): opens at 1240 by 980 (minimum 980 by 840). A fixed sidebar on the left lists Speak (Read aloud, Voices), Listen (Transcribe), Assist (Assistant, Base only) and App (Models, Settings); one page at a time shows on the right.
   - Read aloud: the hotkey with a Change button that captures a key combination, Model, Voice (the model's built-in voices, then saved voices), Speed (a slider from `0.25x` to `4x` in steps of `0.05`), and a text box with Speak, Read selection and Stop. Changing speed, volume or chunk size sends `set_speak_settings`; Speak and Read selection send it first.
   - Voices: a clone form (voice name, language hint, reference audio, reference text) and the voice library table. The form takes WAV files only. Transcribe audio fills the reference text from the chosen clip with `transcribe_reference_clip` (section 15); when the transcription model is missing, the form offers the download in place, shows its progress, and transcribes the clip once it finishes. The reference text is optional for Kyutai and required for Audio8, and the form's hint changes with the selected model. The table lists the model's built-in voices and the saved voices; a saved voice's name, language and description can be edited and saved, and it can be deleted. The description of a built-in voice can be edited in the table, but the change is kept only in memory until the app closes.
   - Transcribe: section 15.
-  - Models: Kyutai Pocket TTS (bundled, always ready), Audio8 TTS with its download button and progress (Base build only), Transcription with its download button and progress (shown when the build supports it), Qwen3 TTS with three download buttons (Full build only), and a line with the data, models and Hugging Face cache folders.
-  - Settings: Playback (volume `0` to `2`, chunk max chars `100` to `200`), Compute device (Auto, GPU or CPU; shown only where a GPU provider exists, which is Windows and Apple Silicon macOS in the Base build), Appearance (dark or light theme, dark by default), and Diagnostics (engine health JSON, Refresh health, Restart engine, and the activity log).
+  - Assistant: separate Chat/Voice conversations, a model/status bar, settings panel, transcript and wrench Tools menu (section 17).
+  - Models: Kyutai Pocket TTS (bundled, always ready), Audio8 TTS with its download button and progress (Base build only), Transcription with its download button and progress (shown when the build supports it), Assistant backend and curated model downloads (Base only), Qwen3 TTS with three download buttons (Full build only), and a line with the data, models and Hugging Face cache folders.
+  - Settings: Playback (volume `0` to `2`, chunk max chars `100` to `200`), Compute device (Auto, GPU or CPU; shown only where a GPU provider exists, which is Windows and Apple Silicon macOS in the Base build), Appearance (dark or light theme, dark by default), and Diagnostics (engine health JSON, Refresh health, Restart engine, and the activity log), plus Assistant diagnostics with right-aligned Refresh, Check devices and Copy actions. Tool settings live on Assistant, not global Settings.
   - The bottom of the sidebar shows the engine status (model and device); clicking it opens Settings at Diagnostics.
 - **Toolbar window** (`toolbar.html`, label `toolbar`), created at startup: 360 by 108, frameless, transparent, always on top, hidden from the taskbar, hidden until a job starts.
   - Controls: rate button (steps by `0.25x` and wraps from `4.0x` to `0.25x`), skip back (shows a short flash only; seeking is not implemented), pause or resume, stop, skip forward.
@@ -263,7 +271,7 @@ English speech to text with speaker labels, Base build only. It works on a recor
 ## 16. Known gaps
 
 - Skip back has no seek behind it.
-- Text is read as written; URLs, markdown symbols, citation markers and emoji are not cleaned up.
+- Normal Read aloud reads text as written; URLs, Markdown symbols, citation markers and emoji are not cleaned up there. Assistant Speak and Voice have separate plain-text/speakable handling.
 - A chunk cut in the middle of a sentence is generated on its own, so intonation can dip at the cut.
 - Core ML decoding for Audio8 failed with the shipped export and was replaced by native WebGPU/Metal FP32 decoding in v0.2.3; broader chip/OS validation, actual 2x playback measurements and investigation of the plugin teardown diagnostic remain (learnings section 15.8).
 - The clone form takes WAV files only. The description of a built-in voice, edited on the Voices page, is lost when the app closes.
@@ -271,3 +279,20 @@ English speech to text with speaker labels, Base build only. It works on a recor
 - Transcripts are not saved between runs (Copy or export is needed to keep one), and there is no word boosting.
 - Transcription is English only and runs on the CPU. More than eight speakers cannot be told apart. The first word or two of a new speaker is sometimes missing, and when one speaker takes over with no gap the previous speaker can be given the newcomer's first words (`docs/learnings.md` sections 12.6 and 12.8).
 - Opus audio cannot be decoded.
+
+
+## 17. Optional Assistant and tools (v0.3.0)
+
+The [Assistant handover](assistant/README.md) is the detailed guide. The backend is a downloaded, release-pinned llama.cpp b11718 server on authenticated loopback, not a Python sidecar. Its Windows x64 Vulkan/CPU and macOS arm64 Metal assets are pinned by URL, size and hash. The four GGUF models/projectors are downloaded separately. Context defaults to 32K; memory estimates and hardware detection drive the fit/recommendation UI. Independent backend updates, API providers and custom GGUF imports remain deferred.
+
+`AssistantState::admit_turn` captures endpoint, backend generation and use guard atomically. One Rust turn loop serves both Chat and Voice, keeps tool call/result pairs together during context fitting, bounds streaming data and owns cancellation until cleanup completes. Unload, replacement, crash and exit cancel/drain that generation's turns. New chat revokes the old conversation's exact URL grants. Details and regression evidence are in [chat.md](assistant/chat.md) and [tools.md](assistant/tools.md).
+
+The microphone/ASR session shares the one transcription slot with Transcribe. Push-to-talk releases a turn; experimental automatic sending uses Silero VAD and Smart Turn ONNX through the existing runtime. The microphone pauses during model replies. Generated answer phrases, tool fillers and playback feedback share one ordered speech job with round/kind tags; only the final round's played answer is kept as heard history. Stop reaches model generation, tool work, queued text, synthesis and audio. There is no voice barge-in/echo cancellation or saved chat history.
+
+The wrench menu has All tools, per-tool switches, filtering and expandable settings, independently for Chat and Voice. Settings/provider/timeouts are shared; capabilities are snapshotted for the next turn and enforced in both model schemas and Rust execution. Search owns provider/key settings; weather and page reading own timeouts; Python owns its timeout and runtime download/delete. Built-in Rust and TypeScript modules each have an explicit registry. Runtime-installed/chat-created plugins are [planned separately](assistant/tool-plugins-plan.md), not loaded by the current app.
+
+Network tools use DuckDuckGo/Brave, public-page fetching and Open-Meteo. Destination/DNS/redirect/proxy protections and conversation grants apply before a fetch. Tool data is untrusted model context. Python downloads pinned CPython/tzdata only when requested, runs through compiled-in Wasmtime/WASI, and has no host environment, sockets or writable host files. The guest memory/resource/output/time bounds and session-only compiled module are described in [tools.md](assistant/tools.md).
+
+Chat/Voice have independent thinking controls. Voice reasoning appears in a collapsed transcript accordion when enabled, never reaches speech and is not carried into later history. The default Voice prompt asks for decimals as “28 point 8” because the current TTS can pause at a decimal dot. Custom prompts remain unchanged unless reset.
+
+I have accepted the current macOS Assistant/tools behavior and UI. Automated evidence includes 289 passing Rust tests, frontend suites and pinned model qualification: Gemma E4B 12/12 Chat, 11/12 Voice; Gemma 12B 12/12 in both modes, all hard invariants passing. MiMo and MiniCPM remain unverified for tools. Windows compilation/runtime, a live Brave key and individually tracked rare-failure regressions remain separate checks. A Mac build does not validate the Windows process APIs or packaging.

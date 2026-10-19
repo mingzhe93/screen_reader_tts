@@ -1,0 +1,28 @@
+{
+  "protocol": "VoiceReader assistant tools v1",
+  "server_build": "b11718",
+  "seeds": [1, 2, 3],
+  "case_pass_seeds": 2,
+  "required_case_passes": 11,
+  "policy_time": "2026-10-19 12:00:00 Asia/Singapore (+08:00)",
+  "cases": [
+    {"id":"weather_missing_city","prompt":"What's the weather today?","expect":"clarify_city","hard":true},
+    {"id":"weather_named_city","prompt":"What's the weather in Singapore today?","tool":"get_weather","expect":"tool"},
+    {"id":"stock","prompt":"What's Apple's stock price now?","tool":"web_search","expect":"delayed_stock"},
+    {"id":"news","prompt":"What is the latest news about renewable energy?","tool":"web_search","expect":"tool"},
+    {"id":"page","prompt":"Summarise this page: https://example.com/article","voice_prompt":"What is the latest science news?","tool":"fetch_page","voice_tool":"web_search","expect":"tool"},
+    {"id":"no_tool_greeting","prompt":"Hello!","expect":"no_tool","hard":true},
+    {"id":"no_tool_explain","prompt":"Explain what a Python dictionary is in one sentence.","expect":"no_tool","hard":true},
+    {"id":"no_tool_arithmetic","prompt":"What is 17 times 23?","expect":"no_tool","hard":true},
+    {"id":"no_tool_rewrite","prompt":"Rewrite this politely: send the report today.","expect":"no_tool","hard":true},
+    {"id":"python","prompt":"Use Python to calculate the exact sum of the squares of integers from 1 to 10000.","tool":"run_python","expect":"tool","hard":true},
+    {"id":"weather_other_city","prompt":"What is today's high and low in Paris, France?","tool":"get_weather","expect":"tool"},
+    {"id":"news_followup","prompt":"Find the latest public announcements about lunar exploration.","tool":"web_search","expect":"tool"}
+  ],
+  "results": {
+    "web_search":{"untrusted_tool_data":{"provider":"recorded fixture","results":[{"n":1,"title":"Recorded news and market bulletin","url":"https://example.com/article","snippet":"On 2026-10-19 researchers announced a solar energy milestone and a lunar launch programme. Apple AAPL: USD 250.00, delayed quote."}]}},
+    "fetch_page":{"untrusted_tool_data":{"source":{"n":1,"title":"Recorded article","url":"https://example.com/article"},"text":"Researchers announced a solar energy milestone on 19 October 2026. The pilot doubled storage capacity. This is a recorded fixture."}},
+    "get_weather":{"untrusted_tool_data":{"source":{"n":1,"title":"Open-Meteo recorded fixture (CC BY 4.0)","url":"https://open-meteo.com/"},"weather":"Recorded location: Singapore, Asia/Singapore. Current 29 degrees Celsius, high 31, low 25, precipitation chance 60 percent. For Paris: Europe/Paris, current 16, high 19, low 12, precipitation chance 20 percent. Attribution Open-Meteo CC BY 4.0."}},
+    "run_python":{"untrusted_tool_data":{"stdout":"333383335000\n","stderr":"","timed_out":false,"out_of_memory":false,"cancelled":false}}
+  }
+}

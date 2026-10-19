@@ -176,13 +176,13 @@ export class TurnJoiner {
 // Heard text and history (plan §6.3)
 // ---------------------------------------------------------------------------
 
-export type VoicePhrase = { seq: number; text: string };
+export type VoicePhrase = { seq: number; text: string; kind?: "answer" | "filler"; round?: number };
 
 /** The phrases the player has finished (seq ≤ playedSeq), in order, joined with spaces. */
-export function heardText(phrases: VoicePhrase[], playedSeq: number): string {
+export function heardText(phrases: VoicePhrase[], playedSeq: number, finalRound?: number): string {
   return joinTurnText(
     phrases
-      .filter((phrase) => phrase.seq <= playedSeq)
+      .filter((phrase) => phrase.seq <= playedSeq && phrase.kind !== "filler" && (finalRound === undefined || (phrase.round ?? 0) === finalRound))
       .sort((a, b) => a.seq - b.seq)
       .map((phrase) => phrase.text),
   );

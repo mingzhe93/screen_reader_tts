@@ -1,0 +1,1081 @@
+{
+  "protocol": "VoiceReader assistant tools v1",
+  "model": "minicpm-v-4.7-1b",
+  "model_sha256": "588c6c94c82f756b86dba35c42ed9ba9ec187d65824eb52f039c347df563e63d",
+  "model_revision": "9684c734cfb2e6aaccb0bb52ba58afa9aae92d90",
+  "server_build": "b11718",
+  "server_sha256": "981b460a278e9a0c880cef32d6fab42785a119084456b16845304cf38c32cf69",
+  "template_sha256": "02faae121b9d3b83cdaabc9fd9220476f6a8ee8cffe49694d1454fc70d8a0535",
+  "fixture_sha256": "25550c30a4d3d7342edabc0a5c04e5abdab81d439dd6d85f0f4250bddb84cb37",
+  "tools_sha256": "87a413bbc232346ee322f8d81dede30804750e7778b06348f440a211ae34e223",
+  "chat_prompt_sha256": "1d011bc8c2827033743c7a4cb34987b9e3dafe94672687b333273f8184daf855",
+  "voice_prompt_sha256": "5f71b070a614cc2c049d420343a115408050cde03589ba6d00347f8c9ebe3a7f",
+  "sampling": {
+    "temperature": 0.699999988079071,
+    "top_p": 0.949999988079071,
+    "top_k": 100,
+    "min_p": 0.0,
+    "repeat_penalty": 1.0299999713897705
+  },
+  "thinking": false,
+  "qualified": false,
+  "records": [
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Current weather in Singapore: 29\u00b0C, high 31, low 25, 60% precipitation chance. Check [1] for open-meteo data."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Singapore's current weather: 29\u00b0C, high 31, low 25. Precipitation chance: 60%. Check [1] for source details."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "final_text": "I need to get the current weather for a city. I'll ask the user for their location.\n\nYou're asking about today's weather, but I don't know which city you're referring to. What's your location?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "The current weather in Singapore is 29 degrees Celsius, high 31, low 25. Precipitation chance: 60 percent. Check [1] for details."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Singapore's current weather today: 29\u00b0C, high 31\u00b0C, low 25\u00b0C. Precipitation chance: 60%. Check [1] for details."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Singapore's current weather is 29\u00b0C (84\u00b0F). High is 31\u00b0C, low is 25\u00b0C. Precipitation chance is 60%."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "stock",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price today\"}"
+        ]
+      ],
+      "final_text": "I found Apple stock information. The latest shows AAPL: USD 250.00, delayed quote. For official sources, [1] and [2]."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "stock",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Apple's stock price is currently USD 250.00 [1]. Check the latest market bulletin for real-time updates."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "stock",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price current\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Apple's current stock price is $250.00. [1] (Recorded news and market bulletin)\n\nApple's stock price is currently $250.00."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "news",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ]
+      ],
+      "final_text": "Found current information on renewable energy news. The latest update shows a solar energy milestone announced by researchers. Apple AAPL: USD 250.00, delayed quote.\n\nFor the most recent developments, I can see a [recorded news bulletin]."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "news",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Based on current information, the latest news about renewable energy is:\n\n[1] Researchers announced a solar energy milestone on October 19, 2026. The solar energy milestone represents a significant update in solar energy technology.\n\nI found a recorded article about solar energy. Is there a specific renewable energy topic you're interested in?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "news",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Based on current information, the latest news about renewable energy includes a solar energy milestone and lunar launch program. [1] [2]"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "page",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "I\u2019m unable to summarize the page because the URL appears to be an example article with placeholder text. Here\u2019s what I can see:\n- Title: \"Recorded article\"\n- Content: Researchers announced a solar energy milestone on 19 October 2026. The pilot doubled storage capacity. This is a recorded fixture."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "page",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "The page describes a recorded article about a solar energy milestone on October 19, 2026. The key points are:\n- A solar energy milestone was announced.\n- Storage capacity for the pilot doubled.\n- This is a documented fixture."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "page",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "The page contains the following summary: Researchers announced a solar energy milestone on October 19, 2026. The pilot doubled storage capacity. This is a recorded fixture."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "final_text": "Good afternoon! How can I assist you today?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "final_text": "Hello! What can I assist you with?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "final_text": "Hello! What can I assist you with?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "final_text": "A Python dictionary is a fundamental data structure for storing key-value pairs, where unique keys determine value association. [1]\n\nTo confirm, here\u2019s a one-sentence definition: A Python dictionary is a data structure that stores key-value pairs, where each unique key maps to a single value."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"what is a python dictionary\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "I'm fact-checking the search results to ensure accuracy. A Python dictionary is a fundamental data structure that stores key-value pairs, where each unique key maps to a single value.\nAnswer: A Python dictionary is a fundamental data structure that stores key-value pairs, where each unique key maps to a single value."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://docs.python.org/\"}"
+        ]
+      ],
+      "final_text": "The dictionary definition from Python documentation confirms: a dictionary is a fundamental data structure storing key-value pairs for O(1) lookup by key."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"17 * 23\"}"
+        ]
+      ],
+      "final_text": "The product of 17 times 23 is 391."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"17 * 23\"}"
+        ]
+      ],
+      "final_text": "The calculation 17 \u00d7 23 equals 391."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"17 * 23\"}"
+        ]
+      ],
+      "final_text": "17 times 23 equals 391."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"rewrite \\\"send the report today\\\" politely\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Based on current information, here's a polite rewrite:\n\n\"Please send the report today. Let me know if you'd like to adjust the timing.\""
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://www.example-revised-report.com\"}"
+        ]
+      ],
+      "final_text": "The revised version of the report states: \"Send the report today.\" I can rephrase that as: \"Please send the report today.\""
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"polite rewrite \\\"send the report today\\\"\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Your version is clear and polite: \"Send the report to the team today.\" This keeps the request simple and professional. Let me verify again.\n\n<tool_call>\n<function=fetch_page>\n<parameter=url>\nhttps://example.com/article\n</parameter>\n</function>\n</tool_call>"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "python",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum(i*i for i in range(1, 10001))\"}"
+        ]
+      ],
+      "final_text": "Result: The exact sum of squares from 1 to 10000 is 500,300,920. This is computed as (10000 \u00d7 10001) / 2."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "python",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_(i from 1 to 10000) of i squared\"}"
+        ],
+        [
+          "run_python",
+          "{\"code\":\"sum([(i)**2 for i in range(1, 10001)])\"}"
+        ]
+      ],
+      "final_text": "The exact sum of squares from 1 to 10000 is 31,351,650,300,000. Calculation: sum_(i from 1 to 10000) i\u00b2 = 31,351,650,300,000."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "python",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_i = 0; s = 1; for i in range(1, 10001):\\n    sum_i += i * i; s *= i\"}"
+        ]
+      ],
+      "final_text": "I apologize for the error. Let me compute this directly: sum of squares from 1 to 10000.\n\nThe sum of squares formula is n(n+1)(2n+1)/6. For n=10000, the sum is 10000\u00d710001\u00d720001/6 \u2248 3.4\u00d710^12."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Paris France today high low weather\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://www.weather.com/\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ],
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "final_text": "Currently in Paris, France:\n- High: 19\u00b0C\n- Low: 12\u00b0C\nPrecipitation chance: 20%"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Paris France weather today high low\"}"
+        ],
+        [
+          "get_weather",
+          "{\"city\":\"Paris\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://open-meteo.com/\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Based on Open-Meteo data for Paris, Europe/Paris:\n- High: 19\u00b0C\n- Low: 12\u00b0C\n\nLet me confirm this is the current high and low for today."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Paris France today high low weather\"}"
+        ],
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "final_text": "I found the current weather for Paris, France. Today's high is 19\u00b0C and low is 12\u00b0C. Precipitation chance is 20 percent."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "Here are the latest public announcements about lunar exploration:\n\n- Researchers announced a lunar launch programme on October 19, 2026, marking a solar energy milestone. [1]\n\nThe information is from a recorded news fixture. Let me confirm the latest updates."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ],
+        [
+          "run_python",
+          "{\"code\":\"import pandas as pd\"}"
+        ]
+      ],
+      "final_text": "I searched for recent lunar exploration announcements. The latest news includes a solar energy milestone on 19 October 2026 and a pilot doubling storage capacity, which relates to launch planning. For more specific historical announcements, I recommend checking the official space agency releases or reputable news sources covering lunar exploration."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://www.example.com/lunar-exploration-announcements\"}"
+        ],
+        [
+          "get_weather",
+          "{\"city\":\"Venus\"}"
+        ]
+      ],
+      "final_text": "I found recent lunar exploration announcements. The latest updates are:\n\n1. October 19, 2026: Researchers announced a solar energy milestone and a lunar launch program.\n2. A recorded article is available at [example.com/article].\n\nFor current weather in Venus, which is relevant to lunar exploration, check the Open-Meteo page: [Open-Meteo]. Sources: [1], [2]"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Here's the weather in Singapore today. It's 29 degrees Celsius, high 31, low 25, with 60 percent precipitation chance."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"singapore\"}"
+        ]
+      ],
+      "final_text": "Singapore\u2019s today\u2019s weather is 29 degrees Celsius, high 31, low 25, with 60 percent precipitation chance. Check [1] for details."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Singapore is currently 29 degrees Celsius, high 31, low 25, with 60 percent precipitation chances. Paris is at 16 degrees."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Today in Singapore: 29 degrees Celsius, high 31, low 25, with 60% chance of precipitation. Check sources: [1]."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Singapore today's weather is 29 degrees Celsius, high 31, low 25, with 60 percent precipitation chances. Check [1] for details."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "final_text": "Singapore today is 29 degrees Celsius. High 31, low 25, with 60 percent precipitation chance."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "stock",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price current\"}"
+        ]
+      ],
+      "final_text": "Apple's stock price is $250.00. This is a delayed market quote, as [1] notes. I can check current details now."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "stock",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"current Apple stock price\"}"
+        ]
+      ],
+      "final_text": "Apple's current stock price is $250.00 per share, as reported [1]. Quote is delayed."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "stock",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price today\"}"
+        ]
+      ],
+      "final_text": "Apple's stock is currently USD 250.00. This is the latest available information. Prices may be updated. [1]"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "news",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news on renewable energy\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "This news shows solar energy milestones and a doubled storage capacity. The latest update on renewable energy includes these developments."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "news",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news on renewable energy\"}"
+        ]
+      ],
+      "final_text": "I found a recent news item about solar energy progress. The latest report mentions a solar energy milestone announcement. For full details, see [1]."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "news",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news on renewable energy\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "The latest news is about a solar energy milestone. Researchers announced a solar energy milestone and a lunar launch program. This is from an example article."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "page",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news\"}"
+        ]
+      ],
+      "final_text": "For latest science news, recent developments include a solar energy milestone and a lunar launch. Apple\u2019s stock is up. Check the article at [example.com/article]."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "page",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news\"}"
+        ]
+      ],
+      "final_text": "The latest science news shows a solar energy milestone and a lunar launch program reported on October 19. [1] Apple stock updated at $250.00."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "page",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"what is the latest science news\"}"
+        ]
+      ],
+      "final_text": "I found recent science news. Researchers announced a solar energy milestone and a lunar launch today. Apple stock updated to $250.00. [1] [2]\n\nStay informed about current events."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "final_text": "Interface is ready for input. What would you like to know?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "final_text": "I'm sorry, but I cannot speak to that. What is your question?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "final_text": "I'm here to assist you. What would you like to know?"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"What is a Python dictionary?\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "In Python, a dictionary stores data as key-value pairs. This is confirmed by web search."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://www.wikipedia.org/English/Dictionary/Dictionary\"}"
+        ]
+      ],
+      "final_text": "The page explains dictionaries as key-value mappings. Dictionary lookup uses keys to find values directly."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://www.wikipedia.org/wiki/Dictionary\"}"
+        ]
+      ],
+      "final_text": "This page defines a dictionary as a data structure storing key-value pairs. I am verifying it for correctness.\n\nThe dictionary is a fundamental data structure in Python that holds key-value pairs."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "final_text": "Let me compute that for you now.\n\n17 multiplied by 23 equals 391. I can verify this directly.\n</function>\n</tool_call>"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"17 * 23\"}"
+        ]
+      ],
+      "final_text": "17 multiplied by 23 equals 391. Simple multiplication."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"17 * 23\"}"
+        ]
+      ],
+      "final_text": "One sevens times two thirds is forty-one. So, 17 multiplied by 23 equals 391."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "final_text": "Today is October 19, 2026. What would you like to modify about sending the report? If you'd like to specify a city, I can check local weather."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"send the report today\"}"
+        ],
+        [
+          "web_search",
+          "{\"query\":\"polite rewrite send the report today\"}"
+        ]
+      ],
+      "final_text": "The rewrite is: \"Please send the report today.\" That\u2019s polite."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "final_text": "I\u2019ll rephrase that politely for you. It\u2019s simply: send the report today. Let me know if you need further adjustment."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "python",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_i = 0\\nfor i in range(1, 10001):\\n    sum_i += i**2\\nprint(sum_i)\"}"
+        ]
+      ],
+      "final_text": "With 10000 integers I obtained 333,383,335,000 as the sum of squares. This is the exact result for that range."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "python",
+      "seed": 2,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum(int(i)**2 for i in range(1, 10001))\"}"
+        ]
+      ],
+      "final_text": "I'm interrupted\u2014let me proceed with the calculation directly. The sum of squares from 1 to 10000 is 50,048,050,000. This is straightforward arithmetic using Python's basic operations."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "python",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum(x*x for x in range(1, 10001))\"}"
+        ]
+      ],
+      "final_text": "I'm temporarily blocked in another session. Let me proceed with the calculation. The sum of squares from 1 to 10,000 is 50,490,375. This uses basic arithmetic since Python's built-in range function handles it efficiently."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris\"}"
+        ]
+      ],
+      "final_text": "Current Paris weather: high 19\u00b0C, low 12\u00b0C. Sources: [1], [2]. Stock prices may be updated later."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "final_text": "Paris, France has current conditions: high 19 degrees Celsius, low 12 degrees Celsius. Sources: [1], [2]."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 3,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Paris France today high low weather\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "I cannot access real-time weather data. Paris' high and low are currently uncertain. For the latest conditions, please check a weather service."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ]
+      ],
+      "final_text": "On October 19th, researchers published a solar energy milestone and a lunar launch program. Apple's stock is now at $250.00. These are the latest announcements.\n\n[1] Source: recorded news and market bulletin"
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements about lunar exploration\"}"
+        ]
+      ],
+      "final_text": "I found the latest news on lunar exploration. Researchers announced a lunar launch program on October 19, 2026. Check [1] for details."
+    },
+    {
+      "model": "minicpm-v-4.7-1b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ],
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "final_text": "The latest public announcement is a lunar launch programme, reported on October 19. A source confirms this detail."
+    }
+  ]
+}

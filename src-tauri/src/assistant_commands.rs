@@ -23,31 +23,13 @@ use crate::settings::{load_assistant_prompts, persist_assistant_prompts};
 /// Largest image file accepted from a desktop drop, before downscaling in the page.
 const MAX_DROPPED_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
 
-#[derive(Clone, Serialize)]
-struct ChatDeltaPayload<'a> {
-    request_id: &'a str,
-    content: Option<&'a str>,
-    reasoning: Option<&'a str>,
-}
-
-#[derive(Clone, Serialize)]
-struct ChatDonePayload<'a> {
-    request_id: &'a str,
-    finish_reason: Option<&'a str>,
-    stopped: bool,
-}
-
-#[derive(Clone, Serialize)]
-struct ChatErrorPayload<'a> {
-    request_id: &'a str,
-    message: &'a str,
-}
-
 /// Emits chat output as Tauri events. Holds the backend's use guard until the request ends,
 /// so the idle timer never unloads the model mid-answer.
 struct TauriChatSink {
     app: AppHandle,
     guard: Mutex<Option<UseGuard>>,
+    metadata: Mutex<serde_json::Value>,
+    round: Mutex<u32>,
 }
 
 impl TauriChatSink {
@@ -60,21 +42,36 @@ impl TauriChatSink {
 
 impl ChatSink for TauriChatSink {
     fn delta(&self, request_id: &str, content: Option<&str>, reasoning: Option<&str>) {
-        let _ = self
-            .app
-            .emit_all("assistant:chat-delta", ChatDeltaPayload { request_id, content, reasoning });
+        let round = *self.round.lock().unwrap_or_else(|e|e.into_inner());
+        let _ = self.app.emit_all("assistant:chat-delta", serde_json::json!({"request_id":request_id,"content":content,"reasoning":reasoning,"round":round}));
     }
 
     fn done(&self, request_id: &str, finish_reason: Option<&str>, stopped: bool) {
-        let _ = self
-            .app
-            .emit_all("assistant:chat-done", ChatDonePayload { request_id, finish_reason, stopped });
+        let mut payload = self.metadata.lock().unwrap_or_else(|e|e.into_inner()).clone();
+        payload["request_id"] = request_id.into();
+        payload["finish_reason"] = serde_json::json!(finish_reason);
+        payload["stopped"] = stopped.into();
+        let _ = self.app.emit_all("assistant:chat-done", payload);
         self.release();
     }
 
     fn error(&self, request_id: &str, message: &str) {
-        let _ = self.app.emit_all("assistant:chat-error", ChatErrorPayload { request_id, message });
+        let mut payload = self.metadata.lock().unwrap_or_else(|e|e.into_inner()).clone();
+        payload["request_id"] = request_id.into(); payload["message"] = message.into();
+        let _ = self.app.emit_all("assistant:chat-error", payload);
         self.release();
+    }
+
+    fn event(&self, request_id: &str, event: &str, mut payload: serde_json::Value) {
+        if event == "assistant:turn-metadata" {
+            *self.metadata.lock().unwrap_or_else(|e|e.into_inner()) = payload;
+            return;
+        }
+        if let Some(round) = payload.get("round").and_then(serde_json::Value::as_u64) {
+            *self.round.lock().unwrap_or_else(|e|e.into_inner()) = round as u32;
+        }
+        payload["request_id"] = request_id.into();
+        let _ = self.app.emit_all(event, payload);
     }
 }
 
@@ -86,14 +83,20 @@ pub(crate) async fn assistant_chat_start(
     messages: Vec<ChatMessage>,
     think: bool,
     sampling: Option<Sampling>,
+    conversation_id: Option<String>,
+    tools: Option<bool>,
+    enabled_tools: Option<Vec<String>>,
+    thinking_budget: Option<crate::assistant_tools::ThinkingBudget>,
+    tool_limits: Option<crate::assistant_tools::ToolLimits>,
 ) -> Result<ChatStart, String> {
     let system_prompt = load_assistant_prompts(&app).0;
-    let endpoint = state
-        .endpoint()
-        .ok_or_else(|| "The assistant model is not loaded. Load it and try again.".to_string())?;
+    let mut options = crate::assistant_tools::request_options(&app,&state,conversation_id,tools,enabled_tools,thinking_budget,tool_limits,false)?;
+    let (endpoint, guard, generation) = state.admit_turn().map_err(|error|format!("{error:#}"))?;
+    options.generation = generation;
+    options.model_id = endpoint.model_id.clone();
     let model = assistant_catalogue::model_by_id(&endpoint.model_id)
         .ok_or_else(|| format!("Unknown assistant model \"{}\".", endpoint.model_id))?;
-    let sink = Arc::new(TauriChatSink { app, guard: Mutex::new(Some(state.begin_use())) });
+    let sink = Arc::new(TauriChatSink { app, guard: Mutex::new(Some(guard)), metadata: Mutex::new(serde_json::json!({})), round: Mutex::new(0) });
     let target = ChatTarget {
         base_url: endpoint.base_url,
         api_key: endpoint.api_key,
@@ -101,7 +104,7 @@ pub(crate) async fn assistant_chat_start(
         image_token_estimate: model.image_token_estimate,
     };
     let request = ChatRequest { request_id, messages, think, system_prompt, sampling };
-    assistant_chat::start_chat(target, request, sink).await
+    assistant_chat::start_chat_with_options(target, request, sink, options).await
 }
 
 /// The Assistant's two system prompts with their defaults, for the settings panel.

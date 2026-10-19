@@ -2926,6 +2926,16 @@ td:last-child {
   margin-top: var(--space-3);
 }
 
+.assistant-diagnostics .card-header > :first-child {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.assistant-diagnostics .card-header .action-row {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
 .assistant-log-box {
   max-height: 260px;
   white-space: pre-wrap;
@@ -2945,3 +2955,69 @@ td:last-child {
 .models-group-title:first-child {
   margin-top: 0;
 }
+
+/* Assistant tools: all arguments and outputs are plain text, including model-written code. */
+.assistant-tools-toggle { flex-shrink: 0; }
+.assistant-tools-toggle.is-active { color: var(--accent); background: var(--accent-soft, rgba(100, 140, 230, .14)); }
+.assistant-tool-transcript { display: grid; gap: 7px; margin: 8px 0; min-width: 0; }
+.assistant-tool-transcript:empty { display: none; }
+.assistant-tool-chip { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elevated, transparent); overflow: hidden; }
+.assistant-tool-chip > summary { cursor: pointer; padding: 7px 10px; font-size: .82rem; color: var(--text-muted); }
+.assistant-tool-chip[data-status="error"] > summary,
+.assistant-tool-chip[data-status="timeout"] > summary { color: var(--danger, #c76868); }
+.assistant-tool-arguments,
+.assistant-tool-output { margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; font-size: .8rem; }
+.assistant-tool-output { border-top: 1px solid var(--border); }
+.assistant-tool-summary { margin: 0; padding: 8px 10px; font-size: .85rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-tool-sources { list-style: none; margin: 3px 0; padding: 0; display: grid; gap: 4px; font-size: .8rem; overflow-wrap: anywhere; }
+.assistant-tool-sources a { color: var(--accent); }
+.assistant-turn-phase { margin: 6px 0; }
+.assistant-vt-fillers,
+.assistant-vt-preambles { color: var(--text-muted); white-space: pre-wrap; font-size: .85rem; }
+.assistant-vt-fillers { font-style: italic; }
+.assistant-tools-key { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.assistant-tools-key input { flex: 1 1 220px; min-width: 0; }
+.assistant-tools-limits { margin-top: 12px; }
+.assistant-tools-limits > summary { cursor: pointer; padding: 6px 0; }
+.assistant-tools-limits .setting-row input { width: 100px; }
+.assistant-field > label > select { display: block; margin-top: 6px; width: 100%; }
+
+/* Assistant-owned capability menu: each mode keeps its own selection. */
+.assistant-tools-control { display: inline-flex; flex-shrink: 0; }
+.assistant-tools-button-content { display: inline-flex; align-items: center; gap: 6px; }
+.assistant-tools-count { min-width: 18px; color: var(--muted); font-size: 11px; }
+.assistant-tools-toggle.is-active .assistant-tools-count { color: var(--accent-text); }
+.assistant-tools-popover { position: fixed; z-index: 120; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; padding: 16px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface-raised); color: var(--ink); box-shadow: 0 14px 48px rgba(0,0,0,.4); text-align: left; }
+.assistant-tools-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.assistant-tools-heading h3 { margin: 0; font-size: 16px; }
+.assistant-tools-close { font-size: 22px; }
+.assistant-tools-master, .assistant-tool-choice { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; }
+.assistant-tools-master { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.assistant-tools-master + .caption { margin-top: 12px; }
+.assistant-tools-master > span, .assistant-tool-choice > span { display: flex; flex-direction: column; gap: 4px; }
+.assistant-tools-filter { width: 100%; margin: 12px 0 4px; }
+.assistant-tool-option { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.assistant-tool-name { font-size: 13px; font-weight: 600; }
+.assistant-tool-choice .caption { line-height: 1.5; }
+.assistant-tool-switch { appearance: none; -webkit-appearance: none; flex: 0 0 38px; width: 38px; height: 22px; padding: 2px; margin: 0; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--track); cursor: pointer; transition: background .15s; }
+.assistant-tool-switch::before { content: ""; display: block; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); transition: transform .15s; }
+.assistant-tool-switch:checked { background: var(--accent); border-color: var(--accent); }
+.assistant-tool-switch:checked::before { transform: translateX(16px); background: var(--on-accent); }
+.assistant-tool-switch:indeterminate { background: var(--accent-soft); border-color: var(--accent); }
+.assistant-tool-switch:indeterminate::before { transform: translateX(8px); background: var(--accent-text); }
+.assistant-tool-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.assistant-tool-switch:disabled { opacity: .5; cursor: wait; }
+.assistant-tool-options { margin-top: 10px; font-size: 12px; }
+.assistant-tool-options > summary { color: var(--muted); cursor: pointer; }
+.assistant-tool-options[open] > summary { margin-bottom: 12px; }
+.assistant-tool-options input:not(.assistant-tool-switch), .assistant-tool-options select { width: 100%; box-sizing: border-box; }
+.assistant-tool-options .assistant-field-label { display: flex; flex-direction: column; gap: 6px; }
+.assistant-tool-options .caption { line-height: 1.5; }
+.assistant-tool-limit { display: flex; align-items: end; gap: 8px; margin-top: 12px; }
+.assistant-tool-limit > label { flex: 1; }
+.assistant-tools-popover .assistant-tools-key { margin: 10px 0; flex-wrap: wrap; }
+.assistant-tools-popover .model-row { padding: 12px 0; gap: 10px; align-items: start; flex-wrap: wrap; }
+.assistant-tools-popover .model-name { font-size: 12px; }
+.assistant-tools-status:empty { display: none; }
+.assistant-vt-thinking { margin: 8px 0; }
+.assistant-vt-thinking .assistant-thinking-text { max-height: 240px; overflow-y: auto; }

@@ -1,6 +1,6 @@
 {
   "name": "voicereader-desktop",
-  "version": "0.3.0-testing",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,6 +15,7 @@
     "test:assistant": "node scripts/test-assistant-markdown.mjs",
     "test:assistant-fit": "node scripts/test-assistant-fit.mjs",
     "test:assistant-voice": "node scripts/test-assistant-voice.mjs",
+    "test:assistant-tools": "node scripts/test-assistant-tools.mjs",
     "assets:fetch": "npm run onnxruntime:fetch && node scripts/fetch-webgpu-macos.js && npm run kyutai-voices:fetch",
     "predesktop:dev": "node scripts/sync-version.js && npm run assets:fetch",
     "desktop:dev": "tauri dev --features build-base",

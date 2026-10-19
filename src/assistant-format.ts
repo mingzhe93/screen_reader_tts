@@ -35,7 +35,7 @@ export function memoryTooltip(model: AssistantModelInfo): string {
 export function memoryBadge(model: AssistantModelInfo): HTMLSpanElement {
   const badge = document.createElement("span");
   badge.className = "badge badge-hint";
-  badge.textContent = model.memory_estimate.measured ? "Memory" : "Memory (calc.)";
+  badge.textContent = "Memory";
   badge.title = memoryTooltip(model);
   badge.setAttribute("aria-label", badge.title);
   badge.tabIndex = 0;

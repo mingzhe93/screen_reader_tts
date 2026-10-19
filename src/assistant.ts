@@ -6,6 +6,7 @@
 // Downloads and installs live on the Models page (src/assistant-models-page.ts).
 // Pages are built with createElement and textContent only: model output is never parsed as HTML.
 
+import { ToolTranscript, createThinkingLimit, createToolsToggle, finalAnswer, historyWithNote, loadToolSettings, renderToolTranscript, toolLimits } from "./assistant-tools";
 import { invoke } from "@tauri-apps/api/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { IMAGE_ACCEPT, MAX_ATTACHED_IMAGES, imageFilesOf, prepareImages } from "./assistant-images";
@@ -18,6 +19,9 @@ import { createSamplingSection, samplingFor } from "./assistant-sampling";
 import { createMic } from "./assistant-mic";
 import { createPushToTalk, createVoiceMode } from "./assistant-voice";
 import type {
+  AssistantToolCallPayload,
+  AssistantToolResultPayload,
+  AssistantTurnPhasePayload,
   AssistantChatDeltaPayload,
   AssistantChatDonePayload,
   AssistantChatErrorPayload,
@@ -60,6 +64,10 @@ type TurnStatus = "streaming" | "done" | "stopped" | "error";
 type Turn = {
   role: "user" | "assistant";
   text: string;
+  historyText: string;
+  historyNote: string;
+  rounds: Map<number, string>;
+  tools: ToolTranscript;
   reasoning: string;
   images: string[];
   status: TurnStatus;
@@ -77,6 +85,8 @@ type TurnView = {
   thinking?: HTMLDetailsElement;
   thinkingText?: HTMLElement;
   answer?: HTMLElement;
+  toolEl?: HTMLElement;
+  phaseEl?: HTMLElement;
   noteEl?: HTMLElement;
   errorEl?: HTMLElement;
   actions?: HTMLElement;
@@ -152,6 +162,7 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
   let requestId: string | null = null;
   /** Bumped by New chat, so work started in an earlier conversation cannot touch this one. */
   let conversation = 0;
+  let conversationId = crypto.randomUUID();
   let activeTurn: Turn | null = null;
   let streaming = false;
   let attached: string[] = [];
@@ -217,12 +228,13 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
   const composerHint = h("p", "caption assistant-hint");
   const composerErrorEl = h("p", "assistant-error is-hidden");
   composerErrorEl.setAttribute("role", "alert");
+  const chatTools = createToolsToggle("chat", selectedModel);
   const composer = h(
     "div",
     "assistant-composer",
     thumbsEl,
     input,
-    h("div", "assistant-composer-row", attachBtn, pttSlot, newChatBtn, h("span", "toolbar-spacer"), stopBtn, sendBtn),
+    h("div", "assistant-composer-row", attachBtn, pttSlot, chatTools.element, newChatBtn, h("span", "toolbar-spacer"), stopBtn, sendBtn),
     fileInput,
   );
   const composerWrap = h("div", "assistant-composer-wrap", composer, composerErrorEl, composerHint);
@@ -257,11 +269,13 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
   thinkBox.type = "checkbox";
   thinkBox.checked = think;
   const thinkLabel = h("label", "assistant-think", thinkBox, "Think before answering");
+  const chatThinkingLimit = createThinkingLimit("chat");
   const reasoningBody = h(
     "div",
     "assistant-section-body",
     thinkLabel,
-    h("p", "caption", "Chat only. The model reasons first: slower, but better on hard questions. Voice conversation always answers without thinking."),
+    h("p", "caption", "The model reasons first: slower, but better on hard questions. Chat and voice keep separate choices."),
+    chatThinkingLimit.element,
   );
 
   const sampling = createSamplingSection();
@@ -308,6 +322,7 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
     log,
     unavailableReason: voiceUnavailableReason,
     sampling: () => requestSampling(),
+    model: selectedModel,
     onNewChat: () => void newChat(),
   });
   main.insertBefore(voice.view, composerWrap);
@@ -466,7 +481,7 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
     messagesEl.classList.toggle("is-hidden", show || voiceMode);
     composerWrap.classList.toggle("is-hidden", show || voiceMode);
     voice.view.classList.toggle("is-hidden", show || !voiceMode);
-    // Voice never thinks, so its panel shows the Voice section instead of Reasoning.
+    // Voice has its own thinking toggle and limit in its panel.
     reasoningSection.classList.toggle("is-hidden", voiceMode);
     voiceSection.classList.toggle("is-hidden", !voiceMode);
     stateTitle.textContent = title;
@@ -623,6 +638,10 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
     const turn: Turn = {
       role,
       text,
+      historyText: "",
+      historyNote: "",
+      rounds: new Map(),
+      tools: new ToolTranscript(),
       reasoning: "",
       images,
       status: role === "assistant" ? "streaming" : "done",
@@ -656,6 +675,8 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
       view.thinkingText = h("div", "assistant-thinking-text");
       view.thinking = h("details", "assistant-thinking is-hidden", h("summary", "", "Thinking…"), view.thinkingText);
       view.answer = h("div", "assistant-answer md");
+      view.toolEl = h("div", "assistant-tool-transcript");
+      view.phaseEl = h("p", "caption assistant-turn-phase is-hidden");
       view.noteEl = h("p", "caption assistant-turn-note is-hidden");
       view.errorEl = h("p", "assistant-error is-hidden");
       view.actionNote = h("span", "caption");
@@ -666,7 +687,7 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
         copyButton(turn),
         view.actionNote,
       );
-      view.root.append(view.thinking, view.answer, view.noteEl, view.errorEl, view.actions);
+      view.root.append(view.thinking, view.toolEl, view.phaseEl, view.answer, view.noteEl, view.errorEl, view.actions);
     }
     return turn;
   }
@@ -714,6 +735,7 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
       renderMarkdown(parseMarkdown(turn.text), view.answer);
       turn.renderedText = turn.text;
     }
+    if (view.toolEl) renderToolTranscript(turn.tools, view.toolEl);
     view.answer.classList.toggle("is-streaming", turn.status === "streaming");
     if (view.noteEl) {
       view.noteEl.textContent = turn.note;
@@ -860,12 +882,12 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
       const question = turns[index];
       const answer = turns[index + 1];
       if (question.role !== "user" || answer.role !== "assistant") continue;
-      if (answer.status === "done" && answer.text.trim()) {
+      if (answer.status === "done" && answer.historyText.trim()) {
         messages.push({ role: "user", text: question.text, images: question.images });
-        messages.push({ role: "assistant", text: answer.text, images: [] });
+        messages.push({ role: "assistant", text: historyWithNote(answer.historyText, answer.historyNote), images: [] });
       } else if (answer.status === "stopped") {
         messages.push({ role: "user", text: question.text, images: question.images });
-        messages.push({ role: "assistant", text: answer.text + STOPPED_SUFFIX, images: [] });
+        messages.push({ role: "assistant", text: historyWithNote(answer.historyText + STOPPED_SUFFIX, answer.historyNote), images: [] });
       }
     }
     return messages;
@@ -900,6 +922,11 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
         requestId: id,
         messages,
         think,
+        conversationId,
+        tools: chatTools.enabled(),
+        enabledTools: chatTools.selection(),
+        thinkingBudget: chatThinkingLimit.value(),
+        toolLimits: toolLimits(),
         sampling: requestSampling(),
       });
       // New chat was pressed while the request was starting: the composer now belongs to the
@@ -948,6 +975,7 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
 
   function finishRequest(turn: Turn, next: TurnStatus): void {
     turn.status = next;
+    turn.view.phaseEl?.classList.add("is-hidden");
     requestId = null;
     activeTurn = null;
     streaming = false;
@@ -962,6 +990,9 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
       return;
     }
     conversation += 1;
+    const clearedConversationId = conversationId;
+    conversationId = crypto.randomUUID();
+    void invoke("assistant_clear_tool_conversation", { conversationId: clearedConversationId }).catch((error) => log(`Could not clear tool conversation: ${errorText(error)}`, "error"));
     // Reset everything before awaiting the cancel, so a draft typed while it is pending survives.
     const cancelledId = streaming ? requestId : null;
     if (streaming) {
@@ -1089,17 +1120,39 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
   await listen<AssistantStatus>("assistant:status", ({ payload }) => applyStatus(payload));
   await listen<AssistantChatDeltaPayload>("assistant:chat-delta", ({ payload }) => {
     if (payload.request_id !== requestId || !activeTurn) return;
-    if (payload.content) activeTurn.text += payload.content;
+    if (payload.content) {
+      const round = payload.round ?? 0;
+      activeTurn.rounds.set(round, (activeTurn.rounds.get(round) ?? "") + payload.content);
+      activeTurn.text = Array.from(activeTurn.rounds.values()).join("\n\n");
+    }
     if (payload.reasoning) activeTurn.reasoning += payload.reasoning;
     scheduleRender(activeTurn);
   });
   await listen<AssistantChatDonePayload>("assistant:chat-done", ({ payload }) => {
     if (payload.request_id !== requestId || !activeTurn) return;
     const turn = activeTurn;
+    turn.historyText = finalAnswer(turn.rounds, payload);
+    turn.historyNote = payload.history_note ?? "";
+    turn.tools.addSources(payload.sources);
     if (payload.finish_reason === "length" && !payload.stopped) {
       turn.note = "The answer was cut off because the context length or the maximum response length was reached.";
     }
     finishRequest(turn, payload.stopped ? "stopped" : "done");
+  });
+  await listen<AssistantToolCallPayload>("assistant:tool-call", ({ payload }) => {
+    if (payload.request_id !== requestId || !activeTurn) return;
+    activeTurn.tools.call(payload);
+    scheduleRender(activeTurn);
+  });
+  await listen<AssistantToolResultPayload>("assistant:tool-result", ({ payload }) => {
+    if (payload.request_id !== requestId || !activeTurn) return;
+    activeTurn.tools.result(payload);
+    scheduleRender(activeTurn);
+  });
+  await listen<AssistantTurnPhasePayload>("assistant:turn-phase", ({ payload }) => {
+    if (payload.request_id !== requestId || !activeTurn?.view.phaseEl) return;
+    activeTurn.view.phaseEl.textContent = payload.phase === "tool" ? "Using tools…" : payload.phase === "thinking" ? "Thinking…" : "Answering…";
+    activeTurn.view.phaseEl.classList.remove("is-hidden");
   });
   await listen<AssistantChatErrorPayload>("assistant:chat-error", ({ payload }) => {
     if (payload.request_id !== requestId || !activeTurn) return;
@@ -1154,6 +1207,7 @@ export async function initAssistant(options: AssistantOptions): Promise<void> {
   renderAll();
   ensureHardware(log);
   await refreshStatus();
+  void loadToolSettings().catch((error) => log(`Could not load tool limits: ${errorText(error)}`, "error"));
   // Read through a function: the compiler cannot see that refreshStatus() assigned `status`.
   if (platformSupported()) void prompts.load();
   if (wasActive) await autoLoadOnOpen();

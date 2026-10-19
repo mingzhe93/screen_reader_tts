@@ -1,29 +1,36 @@
 # VoiceReader Decisions
 
-I settled on this direction on 2026-10-03, after a seven-month gap in development. This document records my release decisions through version 0.2.3 and my planning direction for v0.3.0 (updated 2026-10-18). Newest decisions go at the top of each section. Dated release entries describe those releases; Metal ships in the main app from v0.2.3; v0.2.2 remains CPU-only on macOS.
+I settled on this direction on 2026-10-03, after a seven-month gap in development. This document records my decisions through v0.3.0 release preparation (updated 2026-10-19). I have tested and accepted the current macOS app; Windows Assistant/tools validation remains pending. Newest decisions go at the top of each section. Dated release entries describe those releases; Metal ships in the main app from v0.2.3; v0.2.2 remains CPU-only on macOS.
 
-## Planned v0.3.0 Assistant (direction chosen 2026-10-14; decisions settled 2026-10-18; not implemented)
+## v0.3.0 Assistant and tools (implemented; macOS accepted 2026-10-19, Windows pending)
+
+- **v0.3.0 is feature-complete (2026-10-20).** I tested Python calculations and web search in Voice on macOS. As a last change, every Chat and Voice system prompt carries today's date (with tools on, the time of day goes on the newest user message, keeping the prompt cache reusable). Further features and refinements go to v0.3.1; candidates are in the [Assistant guide](assistant/README.md#next-steps).
 
 Details, checked facts and the decisions I accepted on the reviewer's recommendation (marked AI-recommended) are in the [v0.3.0 Assistant plan](v0.3.0_assistant_plan.md).
 
-- **I settled the open decisions in a grilling review on 2026-10-18.** The audience is friends and family, so the infrastructure is sized for a spare-time project. No assistant code was written and no backend or model was run.
+- **I settled the open decisions in a grilling review on 2026-10-18.** The audience is friends and family, so the infrastructure is sized for a spare-time project. At that planning review no Assistant code or model run existed; implementation and testing followed. The base Assistant is committed in `5e62732`, and the tools phase now extends it.
+- **Tools are part of v0.3.0.** I added search, public-page reading, weather and optional WASI Python in both Chat and Voice. Each mode starts with tools off and has a wrench menu with All tools, per-tool switches and settings. The host enforces a per-turn capability snapshot; network tools do not download Python. See [the implementation](assistant/tools.md).
+- **Thinking in Voice is optional.** It starts off, has its own budget and a collapsed transcript accordion, and is never spoken or retained in later history. Tool fillers and answer phrases share one response queue and cancellation lifecycle.
+- **I accepted the current macOS app and UI.** The tool controls, reasoning display and final spacing/alignment work as intended. The default Voice prompt asks for decimal “point” wording; custom prompts are preserved. Windows build/runtime and a live Brave key still need separate validation.
+- **Plugins are planning only.** I want to create tools through Chat without rebuilding the app. I chose to save [the runtime plugin plan](assistant/tool-plugins-plan.md) and implement it later; runtime, permissions and credential choices remain open.
+- **Version 0.3.0 is synchronized from package.json.** This replaces the testing suffix across desktop, lockfiles and the optional Python engine. The version bump prepares the release; it does not publish it or imply Windows acceptance.
 - **Base build only.** The Full build is deprecated but its code stays; it shows no Assistant page.
 - **I am pinning llama.cpp to each VoiceReader release.** The build tag, upstream URL and SHA-256 are compiled into the app; downloads are staged, verified and renamed into place. Independent backend updates, the signed catalogue and rollback are deferred. This replaces my earlier wish for backend updates without an app release.
 - **One backend package per OS.** Windows x64 uses the upstream Vulkan zip, which also contains the CPU backends; macOS arm64 uses the Metal build. CUDA is skipped as too large until larger models need the speed.
 - **The Assistant page has a chat page and a conversation mode.** Chat takes typed or push-to-talk input, streams Markdown answers, has a Speak button per message, a Think toggle (on by default) and image attachments. Conversation mode is voice in and voice out with a transcript side pane, push-to-talk turns, and pressing the button to interrupt.
 - **I want to try automatic turn detection in conversation mode.** VAD plus Smart Turn ONNX sits behind an experimental toggle: on in my builds, off for friends and family until it stops cutting people off.
-- **I chose three model tiers at Q4.** MiniCPM-V-4.7-1B (Q4_K_M), Gemma 4 E4B and Gemma 4 12B (UD-Q4_K_XL), each with its vision projector. The app recommends a tier from detected hardware and never downloads one automatically. Model files are pinned by revision and SHA-256.
+- **The implemented catalogue has four Q4 models.** MiniCPM-V-4.7-1B and MiMo-V2.6 9B use Q4_K_M; Gemma 4 E4B and Gemma 4 12B use UD-Q4_K_XL, each with its vision projector. The app recommends a tier from detected hardware and never downloads one automatically. Model files are pinned by revision and SHA-256.
 - **Context is 32K by default.** A gear setting changes it on the next load and warns when the setting may not fit memory. I intend to make 128K the default on most machines later; that is kept in view, not decided.
-- **The model loads when the Assistant page opens.** Explicit Load and Unload buttons, plus unloading after idle.
+- **The model loads when the Assistant page opens.** Explicit Load/Eject controls, plus unloading after 10 minutes idle.
 - **A read-aloud action ends an Assistant response.** It cancels the request, pending text, synthesis and audio, matching the v0.2.2 hotkey rule.
 - **The Assistant and Transcribe are mutually exclusive.** A meeting recording is never stopped automatically.
-- **Out of v0.3.0:** an external API screen, saved chat history, custom Hugging Face models, a global push-to-talk hotkey, voice barge-in and tool calling.
+- **Out of v0.3.0:** an external API screen, saved chat history, custom Hugging Face models, a global push-to-talk hotkey, voice barge-in and runtime-installed/chat-created plugins. Tool calling was subsequently included by the tools-phase decision above.
 - **The chat page ships first.** Order of work: managed backend and chat page, push-to-talk input, conversation mode, the auto-send experiment, then tiers and measurements.
 - **I am choosing a Rust conversation controller** (2026-10-14). It reuses the existing ASR, TTS and player. Pipecat is a reference for conversation behaviour rather than a runtime dependency.
 - **I want a separate appendable speech mode for conversation answers** (2026-10-14). Streamed phrases queue under one response and cancellation lifecycle, sharing synthesis and playback components with normal TTS. Normal read-aloud keeps its replacement behaviour.
 - **The plan includes the earlier Opus 5.5 review** (2026-10-18). Its comments on playback feedback, resource ownership, slow-stream buffering and package variants are now decisions or open implementation work. Its update-authenticity and ordering comments are superseded by pinning and the chat-first order.
 
-## Release 0.2.3 (2026-10-10; prepared, not yet published)
+## Release 0.2.3 (prepared 2026-10-10; subsequently published for macOS and Windows)
 
 - **I am including the validated Metal decoder in the main app.** I confirmed stable playback and decided to include it in v0.2.3. The standard Apple Silicon Base build moves only Audio8's codec decoder to the GPU; the separate preview feature, app name and build configuration are removed. Core ONNX Runtime 1.24.4 plus WebGPU plugin 0.4.0 use Dawn's Metal backend. Audio8 generation, voice registration, Kyutai and transcription stay on CPU. MLX is not needed for this implementation. Windows retains DirectML and Intel macOS retains CPU.
 - **Use FP32 computation as the validated baseline.** The first FP16 GPU decoder was fast but produced unusable speech. Identical-code comparisons showed 85.6% relative RMS waveform difference from CPU; FP32 reduced it to 0.0321%. The small derived graph casts the existing FP16 weights at load time, preserving the download and CPU graph. Any later precision optimization needs the same waveform, streaming and listening checks. The exact FP16 operator/kernel failure remains unlocalized.
@@ -101,14 +108,15 @@ Details, checked facts and the decisions I accepted on the reviewer's recommenda
 4. Housekeeping before ASR. Done 2026-10-04.
 5. Redesign the main window, add file transcription and live microphone transcription. Done 2026-10-04; I tried it on recordings and the microphone.
 6. Release version 0.2.0 on GitHub. Published, followed by 0.2.1 (2026-10-05) and 0.2.2 (2026-10-09).
-7. Live transcription of system audio, mixed with the microphone. Next.
-8. Word boosting.
+7. Release 0.2.3 with validated Metal decoding. Published for macOS and Windows.
+8. Optional Assistant and tools. Implemented and accepted on macOS for v0.3.0; validate Windows next.
+9. Runtime plugins/chat-created tools, system-audio transcription and word boosting remain planned follow-ups, not part of the completed Assistant scope.
 
 The on-demand Audio8 0.6B INT4 model was originally step 4. It has not been dropped, but ASR was started ahead of it, so it has no slot at the moment. I found the 0.1B model's built-in voice poor but acceptable for now (2026-10-04).
 
 ## User interface (2026-10-04)
 
-- **Sidebar layout.** The three tabs became a left sidebar with five pages: Read aloud, Voices, Transcribe, Models, Settings. Engine health and the activity log moved under Settings as Diagnostics.
+- **Sidebar layout.** The three tabs became a left sidebar with five pages: Read aloud, Voices, Transcribe, Models, Settings. Version 0.3.0 adds Assistant as a sixth page in the Base build. Engine health and the activity log moved under Settings as Diagnostics.
 - **Dark, calm greens.** I like the green look; the palette stays dark green, toned down from the earlier bright teal. The light theme is kept.
 - **System fonts and inline icons**, so the app needs no font or icon downloads.
 - **One colour per speaker.** The transcript uses eight distinct label colours, one for each speaker the diarizer can tell apart, and a grey dashed label for the unknown speaker.

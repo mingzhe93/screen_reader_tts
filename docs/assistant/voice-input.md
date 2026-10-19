@@ -1,6 +1,6 @@
 # Assistant voice input (`assistant_voice.rs`)
 
-Status: Step 2 of v0.3.0, Rust side only, uncommitted. Built and tested on macOS (Apple Silicon). It has not been compiled or run on Windows. It is not wired to Tauri commands or the UI yet; that is the coordinator's job (see "What the coordinator must wire").
+Status on 2026-10-19: implemented and wired into the committed Assistant (`5e62732`). I have tested the Assistant working on macOS; Windows remains untested. The original implementation notes below describe the capture/ASR boundaries; the Tauri command wiring now exists in `voicereader_core.rs`.
 
 ## What it does
 
@@ -22,7 +22,7 @@ Not in this module: admitting a finished transcript while a newer turn is record
 | `src-tauri/src/audio_capture.rs` | New `InputStream`, which pushes raw mono blocks into a channel the caller owns. The device lookup and stream building moved from `MicrophoneSource::open_recorded` into a shared private `open_input_stream`, and `build_stream` is generic over the message type (`M: From<Vec<f32>>`). This is a behaviour-preserving extraction, not a purely additive change: `open_recorded` does the same steps in the same order with the same error messages. |
 | `src-tauri/src/asr_local.rs` | `load_model` and `SAMPLE_RATE` are now `pub(crate)`. Nothing else changed. |
 
-No new dependencies. The module needs a `#[cfg(feature = "build-base")] mod assistant_voice;` line in `lib.rs`, which the coordinator adds.
+No new dependencies. `lib.rs` declares this module behind `build-base`; the microphone commands are wired in `voicereader_core.rs`.
 
 ## Design
 
@@ -117,9 +117,11 @@ pub(crate) trait AsrEngine: Send {        // the model behind a trait, for tests
 - `begin_turn(id)` fails if a turn is open or `id` is not greater than the last one.
 - `end_turn(id)` and `cancel_turn(id)` fail if `id` is not the open turn.
 - The methods take `&self` and are safe to call from any thread. Events arrive on the session's own threads: `level` from the capture thread, and `partial`/`final_text` from the worker.
-- `#[allow(dead_code)]` sits on `impl VoiceSession` only, because nothing outside the tests calls it until the commands are wired. Everything else is reachable from it, so `cargo build --features build-base` shows no new warnings. Remove the allowance when the commands land.
+- `VoiceSession` is used by the `assistant_mic_*` Tauri commands; the current wire contract is in [conversation.md](conversation.md).
 
-## What the coordinator must wire
+## Original integration checklist (completed in `5e62732`)
+
+These were implementation notes. Actual command/event names are `assistant_mic_*` / `assistant:mic-*`, documented in [conversation.md](conversation.md).
 
 1. **Commands** (suggested names, camelCase arguments in JS): `assistant_voice_open { device?: string }` (on `spawn_blocking`), `assistant_voice_begin { turnId }`, `assistant_voice_end { turnId }`, `assistant_voice_cancel { turnId }`, `assistant_voice_close`. Keep the session in app state, for example `Mutex<Option<VoiceSession>>`.
 2. **The ASR slot.** Hold `ASR_JOB` in `voicereader_core.rs` for the session's whole lifetime: take it before `open`, release it after `close` returns, and if `open` fails. Per §7.1, starting Transcribe or reference-clip transcription while a session is open ends the session, and opening a session while Transcribe runs is refused with "Transcription in progress". If `close` timed out, the worker can still hold the model for up to one chunk of compute; that is acceptable for a slot measured in seconds.
@@ -203,7 +205,7 @@ This machine is not the constrained profile of §9.1. Run the experiment on Wind
 
 ## Manual checks (Windows, then macOS)
 
-These need the coordinator's wiring and could not be run here.
+These are manual hardware checks; the wiring is complete. I have since tested the base Assistant working on macOS.
 
 1. **Build:** `cargo build --features build-base` shows no new warnings, and `cargo test --features build-base --lib assistant_voice::` passes.
 2. **Experiment on Windows** (above) with `VOICEREADER_ASR_THREADS=4`. Expected: all assertions pass, and latency is under about 1 s. Record the figures here.
@@ -217,7 +219,7 @@ These need the coordinator's wiring and could not be run here.
 
 ## Known gaps and next steps
 
-- Not wired: commands, events, ASR-slot exclusivity and the UI (coordinator).
+- Commands, events, ASR-slot exclusivity and the UI are wired in the committed Assistant.
 - F7 admission (joining an older final into a newer turn) belongs in the conversation controller, not here.
 - `level` is RMS, while Transcribe's level is peak. The UI may need a different scale (speech RMS is about 0.02 to 0.2).
 - Auto-send (§7.4) can send the same `End` message from a VAD/Smart Turn stage. It should go through the capture thread too, for example by adding a fan-out of the resampled audio in `CaptureStage`.
