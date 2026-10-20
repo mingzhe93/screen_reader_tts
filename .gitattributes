@@ -1,3 +1,7 @@
 # Preserve ONNX protobuf graphs and external weights byte for byte.
 *.onnx binary
 *.onnx.data binary
+
+# The qualification tests and reports hash these fixtures byte for byte, so a Windows
+# checkout must not turn their line endings into CRLF.
+src-tauri/tests-data/tools/* -text

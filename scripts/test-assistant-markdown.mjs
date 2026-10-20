@@ -56,6 +56,7 @@ function inlines(blocks) {
       }
     }
     if (block.blocks) block.blocks.forEach(visit);
+    if (block.header) for (const cell of [...block.header, ...block.rows.flat()]) walk(cell);
   };
   blocks.forEach(visit);
   return found;
@@ -253,6 +254,84 @@ check('plain text for Speak and Copy', () => {
   assert.equal(markdownToPlainText('half **bold'), 'half **bold');
   assert.equal(markdownToPlainText('<b>x</b>'), '<b>x</b>');
   assert.equal(markdownToPlainText(''), '');
+});
+
+check('pipe tables parse with header, alignment and rows', () => {
+  const src = '| Endpoint | Price | Note |\n|:---|---:|:-:|\n| Search | $5 | **fast** |\n| Answer | $4 | |';
+  const [table] = parseMarkdown(src);
+  assert.equal(table.type, 'table');
+  assert.deepEqual(table.align, ['left', 'right', 'center']);
+  assert.deepEqual(table.header, [[text('Endpoint')], [text('Price')], [text('Note')]]);
+  assert.equal(table.rows.length, 2);
+  assert.equal(table.rows[0][2][0].type, 'strong');
+  assert.deepEqual(table.rows[1][2], []);
+});
+
+check('tables without outer pipes, and with an escaped pipe in a cell', () => {
+  const [table] = parseMarkdown('a | b\n--- | ---\nx \\| y | z');
+  assert.equal(table.type, 'table');
+  assert.deepEqual(table.align, [null, null]);
+  assert.deepEqual(table.rows[0][0], [text('x | y')]);
+  assert.deepEqual(table.rows[0][1], [text('z')]);
+});
+
+check('a row still being streamed is padded, and extra cells are cut', () => {
+  const [table] = parseMarkdown('| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |');
+  assert.equal(table.rows.length, 2);
+  assert.deepEqual(table.rows[0], [[text('1')], []]);
+  assert.equal(table.rows[1].length, 2);
+});
+
+check('a header with its delimiter is a table before any row arrives; a lone header line is text', () => {
+  const [table] = parseMarkdown('| a | b |\n|---|---|');
+  assert.equal(table.type, 'table');
+  assert.equal(table.rows.length, 0);
+  assert.equal(parseMarkdown('| a | b |')[0].type, 'paragraph');
+});
+
+check('a table ends at a blank line and can interrupt a paragraph', () => {
+  const blocks = parseMarkdown('Intro line\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAfter');
+  assert.deepEqual(blocks.map((b) => b.type), ['paragraph', 'table', 'paragraph']);
+  assert.equal(blocks[1].rows.length, 1);
+});
+
+check('text that only looks like a table stays text', () => {
+  assert.equal(parseMarkdown('a | b')[0].type, 'paragraph');
+  assert.deepEqual(parseMarkdown('text\n---').map((b) => b.type), ['paragraph', 'hr']);
+  // The delimiter row must have as many columns as the header.
+  assert.equal(parseMarkdown('| a | b |\n| - |')[0].type, 'paragraph');
+  // Too many columns is not worth a table.
+  const wide = Array.from({ length: 30 }, (_, i) => `c${i}`);
+  assert.equal(parseMarkdown(`| ${wide.join(' | ')} |\n|${wide.map(() => '---').join('|')}|`)[0].type, 'paragraph');
+  assert.equal(parseMarkdown('| a |\n|---|')[0].type, 'table');
+});
+
+check('table cells are inline text only: HTML, javascript links and images stay inert', () => {
+  const [table] = parseMarkdown('| <img src=x onerror=y> | [x](javascript:alert(1)) |\n|---|---|\n| ![a](http://x/y.png) | `<script>` |');
+  assert.equal(table.type, 'table');
+  const cells = [...table.header, ...table.rows[0]].flat();
+  const allowed = new Set(['text', 'code', 'strong', 'em', 'link']);
+  for (const node of cells) assert.ok(allowed.has(node.type), node.type);
+  assert.equal(cells.filter((n) => n.type === 'link' && n.openable).length, 0);
+  assert.deepEqual(table.header[0], [text('<img src=x onerror=y>')]);
+});
+
+check('plain text for tables', () => {
+  assert.equal(markdownToPlainText('| a | b |\n|---|---|\n| 1 | **2** |'), 'a | b\n1 | 2');
+});
+
+check('a 200 KB table parses fast and stops at the row limit', () => {
+  const rows = '| cell one | cell two | cell three |\n'.repeat(6000);
+  const started = performance.now();
+  const blocks = parseMarkdown('| a | b | c |\n|---|---|---|\n' + rows);
+  const elapsed = performance.now() - started;
+  assert.equal(blocks[0].type, 'table');
+  assert.equal(blocks[0].rows.length, 500);
+  assert.ok(elapsed < 500, `took ${elapsed.toFixed(0)} ms`);
+  // A line of nothing but pipes and dashes is not a catastrophic case for the delimiter check.
+  const started2 = performance.now();
+  parseMarkdown(('| - '.repeat(2000) + '|\n').repeat(100));
+  assert.ok(performance.now() - started2 < 1000);
 });
 
 check('windows line endings parse like unix ones', () => {

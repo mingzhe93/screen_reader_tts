@@ -1,6 +1,6 @@
 # Phrase buffer and speakable-text filter (`assistant_phrases.rs`)
 
-Status (2026-10-19): implemented and integrated into the v0.3.0 Voice conversation controller, tested and accepted on macOS. `assistant_conversation.rs` queues its phrases into the shared TTS job; Windows validation is pending. Tool-round boundaries flush the phrase buffer, while one global phrase sequence spans the response. See [conversation.md](conversation.md) and [tools.md](tools.md).
+Status (2026-10-19): implemented and integrated into the v0.3.0 Voice conversation controller, tested and accepted on macOS. `assistant_conversation.rs` queues its phrases into the shared TTS job; I have since tested it on Windows (2026-10-20). Tool-round boundaries flush the phrase buffer, while one global phrase sequence spans the response. See [conversation.md](conversation.md) and [tools.md](tools.md).
 
 ## What it does
 

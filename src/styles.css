@@ -2520,17 +2520,24 @@ td:last-child {
   font-variant-numeric: tabular-nums;
 }
 
-/* Voice mode: talk button and state on one side, transcript on the other; they wrap into a
-   column when the main area is too narrow for both. --level (0..1) is the microphone level. */
+/* Voice mode: talk button and state on one side, transcript on the other. They stack into a
+   column (data-narrow, set from the width in assistant-voice.ts) when the main area is too
+   narrow for both. Either way both fill the height of the page and only the transcript list
+   scrolls, so the talk button and Tools stay in view however long the conversation gets.
+   --level (0..1) is the microphone level. */
 .assistant-voice {
   --level: 0;
   display: flex;
   flex: 1;
-  flex-wrap: wrap;
   gap: var(--space-3);
   min-height: 0;
   padding: var(--space-3);
+  /* Only a safety net for a window too short to fit both. */
   overflow-y: auto;
+}
+
+.assistant-voice[data-narrow] {
+  flex-direction: column;
 }
 
 .assistant-voice-stage {
@@ -2544,6 +2551,12 @@ td:last-child {
   min-height: 300px;
   padding: var(--space-3);
   text-align: center;
+}
+
+.assistant-voice[data-narrow] .assistant-voice-stage {
+  flex: 0 0 auto;
+  min-height: 0;
+  padding: var(--space-2);
 }
 
 .assistant-talk {
@@ -2678,10 +2691,14 @@ td:last-child {
   flex: 1 1 340px;
   flex-direction: column;
   min-width: 0;
-  min-height: 260px;
+  min-height: 200px;
   border: 1px solid var(--line);
   border-radius: var(--radius-card);
   background: var(--surface);
+}
+
+.assistant-voice[data-narrow] .assistant-voice-transcript {
+  flex: 1 1 0;
 }
 
 .assistant-vt-head {
@@ -2831,6 +2848,33 @@ td:last-child {
 .md hr {
   border: 0;
   border-top: 1px solid var(--line-strong);
+}
+
+/* Tables scroll sideways in their own box when they are wider than the answer. */
+.md .md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.md .md-table {
+  border-collapse: collapse;
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.md .md-table th,
+.md .md-table td {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.md .md-table th {
+  background: var(--surface-hover);
+  font-weight: 600;
 }
 
 .md .md-code {

@@ -4,7 +4,7 @@ This document describes how the app is put together today. Decisions and their r
 
 ## 1. Product
 
-VoiceReader reads highlighted text aloud. A global hotkey captures the selection from the active app, a local text-to-speech model turns it into audio, and the audio plays while a small floating toolbar offers playback controls. Models run on your machine. Version 0.3.0 adds an optional local Assistant with Chat, voice conversation and individually enabled tools. Inference stays local; internet tools send their queries/requests to the selected providers. I have tested and accepted the current macOS app; Windows validation of the Assistant/tools is pending.
+VoiceReader reads highlighted text aloud. A global hotkey captures the selection from the active app, a local text-to-speech model turns it into audio, and the audio plays while a small floating toolbar offers playback controls. Models run on your machine. Version 0.3.0 adds an optional local Assistant with Chat, voice conversation and individually enabled tools. Inference stays local; internet tools send their queries/requests to the selected providers. I have tested and accepted the current macOS app, and since 2026-10-20 the Windows app.
 
 ## 2. Builds
 
@@ -295,4 +295,4 @@ Network tools use DuckDuckGo/Brave, public-page fetching and Open-Meteo. Destina
 
 Chat/Voice have independent thinking controls. Voice reasoning appears in a collapsed transcript accordion when enabled, never reaches speech and is not carried into later history. The default Voice prompt asks for decimals as “28 point 8” because the current TTS can pause at a decimal dot. Custom prompts remain unchanged unless reset.
 
-I have accepted the current macOS Assistant/tools behavior and UI. Automated evidence includes 289 passing Rust tests, frontend suites and pinned model qualification: Gemma E4B 12/12 Chat, 11/12 Voice; Gemma 12B 12/12 in both modes, all hard invariants passing. MiMo and MiniCPM remain unverified for tools. Windows compilation/runtime, a live Brave key and individually tracked rare-failure regressions remain separate checks. A Mac build does not validate the Windows process APIs or packaging.
+I have accepted the current macOS Assistant/tools behavior and UI. Automated evidence includes 289 passing Rust tests, frontend suites and pinned model qualification: Gemma E4B 12/12 Chat, 11/12 Voice; Gemma 12B 12/12 in both modes, all hard invariants passing. MiMo was later qualified (12/12 in both modes, with its own tool guidance and Chat thinking on), and the Gemma models were re-checked on the current loop. MiniCPM remains unverified for tools; see [the findings](assistant/tools.md#live-test-findings-and-the-minicpm-and-mimo-work-2026-10-20). I have since tested the app on Windows and it works (2026-10-20). A live Brave key test also works. Individually tracked rare-failure regressions remain separate checks.

@@ -53,6 +53,8 @@ const PTT_IDLE_CLOSE_MS = 60_000;
 const NOTICE_MS = 2500;
 const WATCHDOG_TICK_MS = 500;
 const NEAR_BOTTOM_PX = 80;
+/** Content width below which the talk button and the transcript stack instead of sitting side by side (300 + 340 + gap). */
+const VOICE_SIDE_BY_SIDE_MIN_PX = 680;
 
 export const micIcon = (size = 16) =>
   svgIcon(["M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z", "M19 10v2a7 7 0 0 1-14 0v-2", "M12 19v3"], [], size);
@@ -489,6 +491,14 @@ export async function createVoiceMode(options: {
   );
   transcript.setAttribute("aria-label", "Voice conversation transcript");
   const view = h("div", "assistant-voice is-hidden", stage, transcript);
+  // Side by side needs room for both columns; below it they stack. A hidden view reports no
+  // width, which keeps whichever layout it had.
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      if (width > 0) view.toggleAttribute("data-narrow", width < VOICE_SIDE_BY_SIDE_MIN_PX);
+    }).observe(view);
+  }
 
   const autoBox = h("input");
   autoBox.type = "checkbox";

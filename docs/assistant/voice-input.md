@@ -1,6 +1,6 @@
 # Assistant voice input (`assistant_voice.rs`)
 
-Status on 2026-10-19: implemented and wired into the committed Assistant (`5e62732`). I have tested the Assistant working on macOS; Windows remains untested. The original implementation notes below describe the capture/ASR boundaries; the Tauri command wiring now exists in `voicereader_core.rs`.
+Status on 2026-10-19: implemented and wired into the committed Assistant (`5e62732`). I have tested the Assistant working on macOS and, since 2026-10-20, on Windows. The original implementation notes below describe the capture/ASR boundaries; the Tauri command wiring now exists in `voicereader_core.rs`.
 
 ## What it does
 

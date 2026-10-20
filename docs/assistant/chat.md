@@ -1,6 +1,6 @@
 # Assistant chat and turn loop
 
-Updated 2026-10-19. The base Assistant is committed in `5e62732` and I have tested it working on macOS. Chat and Voice now share the tools-phase turn loop, including when tools are disabled. I have tested and accepted Chat/Voice with tools on macOS; Windows validation remains outstanding. See [tools.md](tools.md) for tool policy, permissions, runtime limits and qualification.
+Updated 2026-10-19. The base Assistant is committed in `5e62732` and I have tested it working on macOS. Chat and Voice now share the tools-phase turn loop, including when tools are disabled. I have tested and accepted Chat/Voice with tools on macOS; I have since tested it on Windows too, and it works (2026-10-20). See [tools.md](tools.md) for tool policy, permissions, runtime limits and qualification.
 
 ## Code and responsibilities
 

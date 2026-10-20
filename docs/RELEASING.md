@@ -7,7 +7,7 @@ macOS app. Update it if the signing policy changes.
 
 ## v0.3.0 preparation status (2026-10-19)
 
-The source version is `0.3.0`. I have tested and accepted the current macOS Assistant/tools, thinking transcript and UI. Windows validation of these additions remains pending; do not present the Mac result as a Windows sign-off. The version bump and these notes do not publish a GitHub release.
+The source version is `0.3.0`. I have tested and accepted the current macOS Assistant/tools, thinking transcript and UI. I have since tested these additions on Windows and they work (2026-10-20). The Mac and Windows results are separate sign-offs; repeat each on the release artifact. The version bump and these notes do not publish a GitHub release.
 
 Release notes should cover the optional app-managed llama.cpp/model downloads; Chat, images and spoken conversations; experimental automatic turn detection; optional search/page/weather/Python tools; separate Chat/Voice switches and Assistant-page tool settings; thinking budgets/collapsed Voice reasoning; and decimal “point” wording in the default Voice prompt. Mention the privacy boundary: local inference, but enabled internet tools send their own requests to providers. Runtime plugins/chat-created tools are planning only.
 
@@ -17,8 +17,8 @@ Keep `package.json` as the version source and run `node scripts/sync-version.js`
 
 - Install/load/eject the pinned backend and a model; check the device, memory estimate and diagnostics. Test Chat, image input, dictation, Voice, automatic sending and interruption using the [Assistant checklist](assistant/README.md).
 - Exercise each tool separately, All tools, partial selections and Chat/Voice independence. Weather/search alone must not install Python. Verify the Python download/delete/reinstall path, error recovery and Stop/New chat/Eject during tool work. Use [tools.md](assistant/tools.md) for the specific failure cases; macOS acceptance does not imply every edge case was checked individually.
-- Check the compiled-in tool dependency notices and downloaded backend/model/runtime licences in the extracted artifact. The macOS bundle includes `notices/assistant-tools.txt`; verify notice delivery in the Windows portable packaging as part of its pending checks.
-- On Windows, build and test the Job Object, process probes, Vulkan/CPU fallback, file locking, microphone/TTS and packaged runtime paths on a real Windows machine. A live Brave key test is still outstanding and requires my key.
+- Check the compiled-in tool dependency notices and downloaded backend/model/runtime licences in the extracted artifact. The macOS bundle includes `notices/assistant-tools.txt`; the Windows portable packager now copies `notices/` next to the exe (2026-10-20; it copied only `binaries/` before, so the 0.3.0 Windows zip built earlier has no notices). Re-package it with `python scripts/package_portable.py --variant base`, or rebuild with `npm run desktop:build:base:portable`, and check that `notices/assistant-tools.txt` is in the zip.
+- Windows was built and tested on a real Windows machine (2026-10-20). Keep this as a checklist for each release: the Job Object, process probes, Vulkan/CPU fallback, file locking, microphone/TTS and packaged runtime paths. A live Brave key test also passed (2026-10-20).
 - Keep existing TTS/transcription/selection/toolbar regression checks. Retain the macOS first-launch notice below in every Mac release.
 
 ## First launch on macOS

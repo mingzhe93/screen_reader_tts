@@ -2,14 +2,14 @@
 
 Version 0.3.0. A desktop app for reading highlighted text aloud, transcribing speech with speaker labels, and talking with an optional local AI assistant.
 
-**Release preparation (2026-10-19):** I have tested and accepted the Assistant, tools and updated UI on Apple Silicon macOS. Windows validation of the new v0.3.0 features is still pending. This README describes the current source; the published v0.2.3 packages do not include the Assistant.
+**Release preparation (2026-10-19):** I have tested and accepted the Assistant, tools and updated UI on Apple Silicon macOS. I have since tested the v0.3.0 features on Windows and they work (2026-10-20). This README describes the current source; the published v0.2.3 packages do not include the Assistant.
 
 - **Read aloud.** Highlight text in any app, press a hotkey, and hear it spoken. The voices are open-weight text-to-speech models, with voice cloning from a short clip.
 - **Transcribe.** Record from the microphone, or pick a recording, and get a transcript that labels who spoke. It tells up to 8 speakers apart. English only.
 - **Assistant.** Chat by typing or dictating, attach images, or have a spoken conversation. VoiceReader downloads and manages llama.cpp and a chosen model; neither is bundled with the default app.
 - **Optional tools.** Search the web, read permitted pages, check weather or run isolated Python calculations. Chat and Voice each have a Tools menu with individual switches and tool-specific settings.
 - **Local inference.** TTS, transcription and Assistant inference run on your computer. Tools are off by default. Enabling internet tools sends their searches, page requests or locations to the relevant services; Python calculations stay local.
-- **Platforms.** Read-aloud and transcription support Windows and macOS (Apple Silicon, macOS 14 or newer). The new v0.3.0 Assistant is tested on macOS; Windows testing remains outstanding. Audio8 GPU decoding uses DirectML on Windows and native WebGPU/Metal on Apple Silicon macOS. The FP32 Metal decoder has passed listening and waveform checks on an M2 Max. On Linux the hotkey flow does not work (see [Platform status](#platform-status)).
+- **Platforms.** Read-aloud and transcription support Windows and macOS (Apple Silicon, macOS 14 or newer). The v0.3.0 Assistant is tested on macOS and Windows. Audio8 GPU decoding uses DirectML on Windows and native WebGPU/Metal on Apple Silicon macOS. The FP32 Metal decoder has passed listening and waveform checks on an M2 Max. On Linux the hotkey flow does not work (see [Platform status](#platform-status)).
 - **Stack.** A Tauri 1.x desktop app: a Vite/TypeScript frontend and a Rust backend.
 
 ## How to use
@@ -63,7 +63,7 @@ The Base build has six sidebar pages: Read aloud, Voices, Transcribe, Assistant,
 The Assistant is optional and available in the Base build. Its backend and models are downloaded only when requested; no separate llama.cpp installation or host Python setup is needed.
 
 1. Open **Models → Assistant**, install the llama.cpp backend, then download a model. The catalogue shows download sizes, memory estimates and a hardware-based recommendation.
-2. Open **Assistant**. The selected installed model loads locally; **Eject** frees its memory. The status shows the device in use. Apple Silicon uses Metal; the Windows backend package provides Vulkan and CPU support, with Windows validation still pending.
+2. Open **Assistant**. The selected installed model loads locally; **Eject** frees its memory. The status shows the device in use. Apple Silicon uses Metal; the Windows backend package provides Vulkan and CPU support, and I have tested it on Windows.
 3. In **Chat**, type a message or use the microphone to dictate into the composer, then Send. Attach up to four images per message. Answers stream as Markdown, with Copy and Speak controls.
 4. Switch to **Voice** for spoken replies. Hold the talk button and release to send, or click to start and click again to send. Press during an answer to interrupt. Speech starts as phrases become available rather than waiting for the complete reply.
 5. For automatic sending, enable **Send automatically when I stop talking (experimental)** in the Voice settings. Silero VAD and Smart Turn judge when the utterance is complete; their approximately 11 MB models download on first enable. The microphone pauses during replies. Automatic sending is off by default in release builds and can cut off a turn too early.
@@ -85,7 +85,7 @@ All tool settings live on the **Assistant page**, including the shared round lim
 
 The Brave key is stored in plain text in the app settings file, as disclosed beside its field. It is not included in model messages or returned to the page. Tool calls, results and sources appear in Chat and the Voice transcript. Stop cancels generation, tools, pending speech and playback together.
 
-Gemma E4B and Gemma 12B passed the pinned tool qualification checks. MiniCPM and MiMo were tested and did not qualify, so they show a reliability warning that can be overridden. Qualification is evidence for these tested models and prompts, not a guarantee for every question; see [reports and limits](docs/benchmarks/assistant-tools/README.md).
+Gemma E4B, Gemma 12B and MiMo passed the pinned tool qualification checks. MiMo needs two things the app does for it: extra tool guidance appended to the tools policy, and Chat's Think toggle on (its default). MiniCPM did not qualify, so it shows a reliability warning that can be overridden; it is the least reliable with tools, mostly in Voice. Qualification is evidence for these tested models and prompts, not a guarantee for every question; see [reports and limits](docs/benchmarks/assistant-tools/README.md).
 
 Conversations stay in memory for the current session; there is no saved history or persistent personal memory. The microphone is shared with Transcribe, so a meeting transcription and Assistant voice input cannot run together. The initial voice mode takes turns rather than listening through the spoken answer; there is no wake word or voice barge-in. Custom GGUF imports, external model APIs and chat-created runtime plugins remain planned. See the [Assistant guide](docs/assistant/README.md) and [future plugin plan](docs/assistant/tool-plugins-plan.md).
 
@@ -117,9 +117,9 @@ Downloads below include the quantized language model and its image projector; th
 
 | Model repository | Approx. download | Maximum context | Tool qualification |
 |---|---|---|---|
-| [MiniCPM-V 4.7 1B](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B-gguf) | 1.8 GB | 256K | Not qualified: 7/12 Chat, 8/12 Voice, misses hard checks; warning/override |
+| [MiniCPM-V 4.7 1B](https://huggingface.co/openbmb/MiniCPM-V-4.7-1B-gguf) | 1.8 GB | 256K | Not qualified: 11/12 Chat and Voice on the official seeds, but 3 of 6 and 2 of 6 on fresh seeds for two Voice cases; always thinks when tools are on; warning/override |
 | [Gemma 4 E4B](https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF) | 6.1 GB | 128K | Passed: 12/12 Chat, 11/12 Voice prompts |
-| [MiMo-V2.6 9B](https://huggingface.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF) | 6.8 GB | 256K | Not qualified: 11/12 Chat, 10/12 Voice, misses the city-clarification and Python checks; warning/override |
+| [MiMo-V2.6 9B](https://huggingface.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF) | 6.8 GB | 256K | Passed: 12/12 in both prompt modes, with its tool guidance and Chat thinking on |
 | [Gemma 4 12B](https://huggingface.co/unsloth/gemma-4-12b-it-GGUF) | 7.5 GB | 256K | Passed: 12/12 in both prompt modes |
 
 These are recorded-tool tests with three seeds per case, thinking off and pinned model/backend/prompt revisions. They do not measure microphone recognition or TTS quality. The app defaults to 32K context. Model files and backend archives are pinned and hash-verified; the backend version is tied to the VoiceReader release. No model download starts automatically.
@@ -147,7 +147,7 @@ The Base build includes native Metal decoding on Apple Silicon macOS from v0.2.3
 
 | Platform | Status |
 |---|---|
-| Windows | Read-aloud and transcription were tested in earlier releases. The v0.3.0 Assistant/tools build and runtime checks are pending on a Windows machine. Selection capture sends Ctrl+C with `SendInput`. The source label comes from the foreground window title. Audio8 can decode on any DirectX 12 GPU through DirectML. |
+| Windows | Read-aloud and transcription were tested in earlier releases. I have tested the v0.3.0 Assistant and tools on Windows and they work. Selection capture sends Ctrl+C with `SendInput`. The source label comes from the foreground window title. Audio8 can decode on any DirectX 12 GPU through DirectML. |
 | macOS | Working on Apple Silicon with macOS 14 or newer. I have tested the portable app, downloads, highlighted-text hotkey, floating toolbar, and the v0.3.0 Assistant in Chat and Voice with tools on Apple Silicon. Selection capture requires Accessibility permission; microphone recording requires Microphone permission. The player preserves pitch when changing speed; bundled SoX prepares cloning clips and supports the older backend speed path. Audio8 supports FP32 Metal GPU decoding from v0.2.3, validated on an M2 Max running macOS 27.0.1. Other Mac chips/OS versions, and Intel/universal releases, still need verification. Intel uses CPU. |
 | Linux | Not supported for the hotkey flow: simulated copy and source-window lookup are not implemented. `scripts/fetch-onnxruntime.js` has a Linux x64 download, and SoX is looked up on `PATH`, but nothing else about Linux is covered. |
 
@@ -172,7 +172,7 @@ The Base build includes native Metal decoding on Apple Silicon macOS from v0.2.3
 - The Assistant catalogue is curated; API providers, custom GGUF imports, persistent history and runtime plugins are not available yet.
 - Automatic turn detection is experimental, and there is no echo cancellation. Headphones help prevent the end of a spoken answer leaking into the next microphone turn.
 - Model memory estimates do not yet include the additional ASR/TTS allowance. Hash verification after a large download has no progress indicator and cannot currently be cancelled.
-- A search provider can block requests or return a CAPTCHA; the app reports the failure. A live Brave key check and the new Windows Assistant paths still need validation. Open-Meteo's free service is used for this non-commercial distribution.
+- A search provider can block requests or return a CAPTCHA; the app reports the failure. I have tested a live Brave key and the Windows Assistant paths, and they work. Open-Meteo's free service is used for this non-commercial distribution.
 
 ## Development setup (Base build)
 

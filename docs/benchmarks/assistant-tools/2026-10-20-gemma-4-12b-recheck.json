@@ -1,0 +1,1617 @@
+{
+  "experiment": false,
+  "protocol": "VoiceReader assistant tools v1",
+  "model": "gemma-4-12b",
+  "model_sha256": "90fd944d227e9d9b68e7e2c7d5b57b79d4c66ed521b0919fbbd932cf834f6f8e",
+  "model_revision": "fc034cfff751157913579611efad8462ac1be606",
+  "server_build": "b11718",
+  "server_sha256": "181674817da4e1e22581584cbb0e9abc8c9a5dbc0b0e6d93b66a161781d3d046",
+  "template_sha256": "aa3185dfc65051046349995de1cfc2fbb275491b9a3832b71595f1ff5b31d61b",
+  "fixture_sha256": "25550c30a4d3d7342edabc0a5c04e5abdab81d439dd6d85f0f4250bddb84cb37",
+  "tools_sha256": "87a413bbc232346ee322f8d81dede30804750e7778b06348f440a211ae34e223",
+  "chat_prompt_sha256": "1d011bc8c2827033743c7a4cb34987b9e3dafe94672687b333273f8184daf855",
+  "voice_prompt_sha256": "20c11f5e1f72e9981dd8d9d1eba080a801eb267b61ec9f9fd274ad4ac0535271",
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 0.949999988079071,
+    "top_k": 64,
+    "min_p": 0.0,
+    "repeat_penalty": 1.0
+  },
+  "thinking": {
+    "chat": false,
+    "voice": false
+  },
+  "qualified": true,
+  "records": [
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Which city would you like the weather for?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Please tell me which city you would like the weather for!"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Please tell me which city you would like the weather for!"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_named_city-false-1",
+          "round": 0,
+          "call_id": "kEKQQfgQelLOlsxTgwxdQqO2BUuDQ8Aw",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current weather in Singapore is 29°C, with a high of 31°C and a low of 25°C. There is a 60% chance of precipitation today."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_named_city-false-2",
+          "round": 0,
+          "call_id": "wKwuO2uD2tCcqv7csEpcXeUrWfVCHx0o",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current weather in Singapore is **29°C**, with a high of 31°C and a low of 25°C. There is a 60% chance of precipitation."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_named_city-false-3",
+          "round": 0,
+          "call_id": "uM1UsAOReVyhhUxJfBseDXqwTvDbWqbW",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current weather in Singapore is 29°C, with a high of 31°C and a low of 25°C. There is a 60% chance of precipitation today."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "stock",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price now\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-stock-false-1",
+          "round": 0,
+          "call_id": "o1jztnhE4fhnAEonNfMNp0xUZ6v2HQPU",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Apple's stock price (AAPL) is currently **USD 250.00** (delayed quote)."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "stock",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"current Apple stock price\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-stock-false-2",
+          "round": 0,
+          "call_id": "xw6XzKobS6k9v40MK4hmIdykZYXBVG3N",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Apple's stock price (AAPL) is currently **USD 250.00** (delayed quote)."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "stock",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price now\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-stock-false-3",
+          "round": 0,
+          "call_id": "VxSUWALIjpCo4mAcDQXptLqgPtjBrOV0",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Apple's stock price (AAPL) is currently **USD 250.00** (delayed quote)."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "news",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news renewable energy October 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news-false-1",
+          "round": 0,
+          "call_id": "jq5TFz0FWQhzWRw0AL6HyuHxANZJD4gw",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent news in the renewable energy sector (as of October 2026) highlights significant advancements in solar technology and infrastructure:\n\n*   **Solar Energy Milestones:** Researchers have recently announced a major breakthrough in solar energy efficiency, marking a significant milestone for the industry [1].\n*   **Market Trends:** The shift toward sustainable power continues to influence global markets, with ongoing investments in diversifying energy sources to meet carbon neutrality goals.\n\n*Note: Because my data is updated periodically, for the most specific regional updates or company-specific news, please let me know which area you are interested in.*"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "news",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news renewable energy October 2025\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news-false-2",
+          "round": 0,
+          "call_id": "MTaXvTmt5sfG4U5CHj9gScLv9GnXgepy",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent news in the renewable energy sector (as of October 2025) highlights several key developments:\n\n*   **Solar Energy Milestones:** Researchers have recently announced significant breakthroughs in solar energy efficiency, potentially increasing the power output of photovoltaic cells.\n*   **Global Infrastructure:** There is a continued push toward integrating large-scale renewable sources into national power grids to meet net-zero targets.\n*   **Market Trends:** Energy markets remain dynamic, with a high focus on the transition from fossil fuels to sustainable alternatives.\n\nFor the most specific news regarding a particular region or technology (such as wind, hydro, or geothermal), please let me know!"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "news",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news renewable energy October 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news-false-3",
+          "round": 0,
+          "call_id": "wEGtHt8CaxIAVp7m8iQ7ytM7SivwgoLa",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent news in the renewable energy sector highlights significant technological milestones and infrastructure expansions. Key updates include:\n\n*   **Solar Energy Milestones:** Recent research has announced a breakthrough in solar energy efficiency, potentially lowering the cost of large-scale solar deployments [1].\n*   **Lunar and Space Integration:** There is growing interest in integrating renewable energy solutions with space exploration programs, including lunar launch initiatives [1].\n*   **Global Infrastructure:** Continual expansion of offshore wind farms and grid modernization projects remains a primary focus for governments aiming to meet net-zero targets.\n\n*(Note: Information is based on current available reports as of October 2026.)*"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "page",
+      "seed": 1,
+      "passed": false,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I'm sorry, but I cannot access the content of that specific URL. The link \"https://example.com/article\" is a placeholder used for demonstration purposes and does not lead to a live article.\n\nIf you have a specific article you'd like me to summarize, please provide a working URL or paste the text here!"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "page",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-page-false-2",
+          "round": 0,
+          "call_id": "nQS7G12Gf1h2vD6qXQszyf1qpQm6wkQQ",
+          "name": "fetch_page"
+        }
+      ],
+      "final_text": "The article reports that researchers achieved a significant solar energy milestone on October 19, 2026, by successfully doubling the storage capacity of a pilot project."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "page",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-page-false-3",
+          "round": 0,
+          "call_id": "ttWDocVKnyNR0JsuYFmEqKNbh5RqND9L",
+          "name": "fetch_page"
+        }
+      ],
+      "final_text": "The article reports that researchers achieved a significant solar energy milestone on October 19, 2026, by successfully doubling the storage capacity of a pilot project."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you with the VoiceReader app today?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you with VoiceReader today?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you with VoiceReader today?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered, mutable collection of items stored as key-value pairs, where each unique key maps to a specific value."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered, mutable collection of key-value pairs where each unique key maps to a specific value."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered, mutable collection of items stored as key-value pairs, where each unique key maps to a specific value."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "17 times 23 is **391**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "17 times 23 is **391**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "17 times 23 is **391**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Here are a few ways to rewrite \"send the report today,\" depending on who you are emailing:\n\n**Option 1: Friendly & Casual (Best for a teammate)**\n> \"Could you please send over the report sometime today?\"\n\n**Option 2: Professional & Standard (Best for a colleague or manager)**\n> \"Would you mind sending the report by the end of the day?\"\n\n**Option 3: Soft & Appreciative (Best if you are asking for a favor)**\n> \"I’d appreciate it if you could get the report to me today. Thank you!\"\n\n**Option 4: Firm but Polite (Best if there is a strict deadline)**\n> \"If possible, please ensure the report is submitted by the end of the day today.\""
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Depending on who you are emailing and how urgent the request is, here are a few ways to rewrite \"send the report today\" politely:\n\n**Option 1: Soft & Collaborative (Best for teammates)**\n> \"Could you please send over the report by the end of the day? Thanks!\"\n\n**Option 2: Professional & Standard (Best for general use)**\n> \"Would you mind sharing the report with me sometime today?\"\n\n**Option 3: Firm but Polite (Best if there is a hard deadline)**\n> \"I would appreciate it if you could get the report to me by the end of business today so I can stay on schedule.\"\n\n**Option 4: Action-Oriented (Best for a quick check-in)**\n> \"Just checking in on the report—could you please send it over today when you have a moment?\""
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Depending on who you are emailing and how urgent the request is, here are a few ways to rewrite \"send the report today\" politely:\n\n**Option 1: Standard & Professional (Best for colleagues)**\n> \"Could you please send over the report by the end of the day?\"\n\n**Option 2: Soft & Indirect (Best for a first-time request)**\n> \"Would it be possible to receive the report sometime today?\"\n\n**Option 3: Providing Context (Best for high-priority tasks)**\n> \"If possible, could you share the report today so I can review it before my meeting tomorrow?\"\n\n**Option 4: Very Formal (Best for clients or senior management)**\n> \"I would appreciate it if you could provide the report by the close of business today.\""
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "python",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_squares = sum(i**2 for i in range(1, 10001))\\nprint(sum_squares)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-12b-python-false-1",
+          "round": 0,
+          "call_id": "OjwPKZqBsEnec7XtmoxlA5bBMpPjJezV",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from 1 to 10,000 is **333,383,335,000**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "python",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"total_sum = sum(i**2 for i in range(1, 10001))\\nprint(total_sum)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-12b-python-false-2",
+          "round": 0,
+          "call_id": "cdflJPPRi7zmttnqu2ebbiNv68rbLj33",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from 1 to 10,000 is **333,383,335,000**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "python",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_squares = sum(i**2 for i in range(1, 10001))\\nprint(sum_squares)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-12b-python-false-3",
+          "round": 0,
+          "call_id": "E9fKWtwV082YWBnose5k0rs9NTmSjfuE",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from 1 to 10,000 is **333,383,335,000**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_other_city-false-1",
+          "round": 0,
+          "call_id": "JphkrRFzKS5x1YZWrKl6sYoCPrR7pg9e",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "In Paris, France, today's high is **19°C** and the low is **12°C**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_other_city-false-2",
+          "round": 0,
+          "call_id": "uLiw9QMUqMvCop91BytJeL4f2CYiJpea",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "In Paris, France, the high for today is 19°C and the low is 12°C."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_other_city-false-3",
+          "round": 0,
+          "call_id": "K3saZKLddBSntDqqE0769tui3c68tbep",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "Today in Paris, France, the high is expected to be **19°C** and the low is expected to be **12°C**."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration 2024 2025\"}"
+        ],
+        [
+          "web_search",
+          "{\"query\":\"NASA lunar exploration news October 2024 2025\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-false-1",
+          "round": 0,
+          "call_id": "MEuVFERzXHQgBQK4yypySq4KBylLuESf",
+          "name": "web_search"
+        },
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-false-1",
+          "round": 1,
+          "call_id": "5rQJAP0Ty1B0JYprCRgBwq8PqATBDSZn",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent public announcements regarding lunar exploration highlight several key initiatives and milestones:\n\n*   **NASA Artemis Program:** Ongoing progress continues toward the Artemis missions, which aim to return humans to the lunar surface. This includes the development of the **Space Launch System (SLS)** and the **Orion spacecraft**.\n*   **Lunar Launch Programs:** Recent reports indicate new milestones in solar energy and dedicated lunar launch programs intended to support long-term habitation and research.\n*   **International Cooperation:** Continued collaboration between international space agencies (such as NASA, ESA, and JAXA) remains a focal point for establishing sustainable lunar bases and scientific outposts.\n\n*Note: As specific news updates can vary daily, I recommend checking official NASA or SpaceX newsrooms for real-time mission updates.*"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-false-2",
+          "round": 0,
+          "call_id": "FZV2kfXAZ2cS1j7Jxi9O8Uqo6NoSd8sz",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent public announcements regarding lunar exploration (as of October 2026) include:\n\n*   **Lunar Launch Programme:** A new lunar launch programme was announced today, October 19, 2026, aimed at expanding human and robotic presence on the Moon.\n*   **Solar Energy Milestones:** Related research highlights a new milestone in solar energy, which is critical for long-term lunar base sustainability.\n\nPlease note that these are the most current reports available in the provided data. For specific mission details from organizations like NASA, ESA, or private companies (like SpaceX), I can perform a more targeted search if you specify an agency."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration 2024 2025\"}"
+        ],
+        [
+          "web_search",
+          "{\"query\":\"NASA lunar exploration missions 2024 2025 news\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-false-3",
+          "round": 0,
+          "call_id": "rJmHfX66Fx24YeiRpDX8vFPTKDsCOf9K",
+          "name": "web_search"
+        },
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-false-3",
+          "round": 1,
+          "call_id": "KgmTCk5AONbOdgJ7R6y63MQTrq7jy0KC",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent public announcements regarding lunar exploration highlight several key initiatives and milestones:\n\n*   **Lunar Launch Programs:** Recent reports indicate the announcement of new lunar launch programs aimed at increasing the frequency of missions to the Moon [1].\n*   **Solar Energy Milestones:** Research updates have recently highlighted milestones in solar energy, which are critical for powering long-term lunar bases and rovers.\n*   **Ongoing Agency Activity:** While specific daily updates vary, major space agencies (such as NASA with the Artemis program and various international partners) continue to provide updates on crewed and robotic lunar exploration.\n\n*Note: For the most specific real-time technical updates, it is recommended to check the official newsrooms of NASA, ESA, or private aerospace companies like SpaceX.*\n\nSources:\n[1] Recorded news and market bulletin (2026-10-19)"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Which city would you like the weather for?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I need to know which city you are in to give you the weather. Could you please tell me your location?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I'm sorry, but I need to know which city you are in to give you the weather. Could you please tell me your location?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_named_city-true-1",
+          "round": 0,
+          "call_id": "OYy7j2dYRRmQMe1vyt4itTWtdj0Tby2c",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current temperature in Singapore is 29 degrees Celsius. The high today will be 31 degrees Celsius with a 60 percent chance of precipitation."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_named_city-true-2",
+          "round": 0,
+          "call_id": "XyAUzyAaBPcWMKq4f6ikARZ1fhO3ZiSq",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current temperature in Singapore is 29 degrees Celsius. The high for today will be 31 degrees and the low will be 25 degrees. There is a 60 percent chance of precipitation."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_named_city-true-3",
+          "round": 0,
+          "call_id": "e4U6AuyjqNXjjD73RxN7Mpd967gBTSKC",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current temperature in Singapore is 29 degrees Celsius. The high for today will be 31 degrees and the low will be 25 degrees. There is a 60 percent chance of precipitation."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "stock",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"current Apple stock price\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-stock-true-1",
+          "round": 0,
+          "call_id": "WWpf77czBWuv9I47BPFsjOU2wllLSc8S",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Apple's stock price is currently two hundred fifty dollars. Please note that this quote may be delayed."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "stock",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price now\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-stock-true-2",
+          "round": 0,
+          "call_id": "ivGaLtITXtSKgroCQmWD13LmZqb7srRm",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Apple's stock price is currently two hundred fifty dollars. Please note that this quote may be delayed."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "stock",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"current Apple stock price\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-stock-true-3",
+          "round": 0,
+          "call_id": "sVPIZWYqK2Mm9lBIyOS9cujuqDhT3qdR",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Apple's stock price is currently two hundred fifty dollars. Please keep in mind that this quote may be delayed."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "news",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news renewable energy October 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news-true-1",
+          "round": 0,
+          "call_id": "M6tr9YcSINxVoSDocDPIWP1hO0wCaXCm",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent news highlights a new milestone in solar energy research. Additionally, there is ongoing interest in lunar launch programs involving sustainable energy. Please note that some market data may be delayed."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "news",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news renewable energy October 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news-true-2",
+          "round": 0,
+          "call_id": "p8MiFZxO6bggrX46s40L7Ukt7DfsrrMY",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent news shows that researchers have announced a significant new milestone in solar energy. Additionally, there are new developments regarding lunar launch programs related to energy research."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "news",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news renewable energy October 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news-true-3",
+          "round": 0,
+          "call_id": "9tHLGFrL7JWvkf88MboKmv3Uc9hkf0ld",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent news highlights a significant milestone in solar energy research. Additionally, new programs are being launched to explore energy sources beyond earth."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "page",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news today\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-page-true-1",
+          "round": 0,
+          "call_id": "mss0SQKPIrs8RjqnzN6SBxy4vP8i0lWx",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Researchers recently announced a significant milestone in solar energy. There is also a new lunar launch programme currently in the news."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "page",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news today\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-page-true-2",
+          "round": 0,
+          "call_id": "5DQ6IYzVwHnInmA5vIZ4X28dbaXGwZTa",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Researchers recently announced a major milestone in solar energy technology. There is also news regarding a new lunar launch program."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "page",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news October 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-page-true-3",
+          "round": 0,
+          "call_id": "maBoc8BYFzpbUOAj8BYslNOrlxMfCK1f",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Researchers recently announced a major milestone in solar energy technology. Additionally, a new lunar launch program has been scheduled for the near future."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you today?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you today?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you today?"
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is a collection of key value pairs where each unique key maps to a specific value."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is a collection of key-value pairs where each unique key maps to a specific value."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is a collection of key-value pairs where each unique key maps to a specific value."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "The answer is three hundred ninety one."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Seventeen times twenty three is three hundred ninety one."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Seventeen times twenty three is three hundred ninety one."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Could you please send the report today? It would be greatly appreciated."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Could you please send the report today? I would appreciate it if you could get it to me by the end of the day."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Could you please send the report today? I would appreciate it if you could get that to me by the end of the day."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "python",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum(i**2 for i in range(1, 10001))\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-12b-python-true-1",
+          "round": 0,
+          "call_id": "2BzSb2S6dsQWGWtFhhvakls7vZG1tyNB",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from one to ten thousand is 333,383,335,000."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "python",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum(i**2 for i in range(1, 10001))\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-12b-python-true-2",
+          "round": 0,
+          "call_id": "pCfPcyz5gnmD8plXzf7r1kdywlf8r7gg",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from 1 to 10000 is 333383335000."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "python",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum(i**2 for i in range(1, 10001))\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-12b-python-true-3",
+          "round": 0,
+          "call_id": "9udgWrhEtF6YJ2LkC8dnxjuCDofXrMDq",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from one to ten thousand is three hundred thirty three billion, three hundred eighty three million, three hundred thirty five thousand."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_other_city-true-1",
+          "round": 0,
+          "call_id": "Df3b3Tnlx5QJteZK9XgQGq92vyDymF2j",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The high in Paris is expected to be 19 degrees Celsius. The low will be 12 degrees Celsius."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_other_city-true-2",
+          "round": 0,
+          "call_id": "ENRRreSeDIxLpADzFCLmmFpjuWXpY35d",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The high in Paris today is nineteen degrees Celsius. The low is twelve degrees Celsius."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-weather_other_city-true-3",
+          "round": 0,
+          "call_id": "ILijPCvLAsmk06nh45iQeL8YdQ3mZTAB",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The high in Paris today is 19 degrees Celsius. The low is 12 degrees Celsius."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-true-1",
+          "round": 0,
+          "call_id": "kbIaq1uWE0rCSLzz062uGo0xfpGsAOBG",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent announcements include a new lunar launch program scheduled for later this year. Additionally, researchers have reached a new milestone regarding solar energy for space missions."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration 2024 2025\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-true-2",
+          "round": 0,
+          "call_id": "POcUDvMd9ELsIE4JXsS9MD4yiccvkrV4",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "NASA and other space agencies have recently announced milestones for lunar launch programs. These initiatives focus on establishing a sustainable presence on the moon. I can look for more specific details if you have a particular country or agency in mind."
+    },
+    {
+      "model": "gemma-4-12b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration 2026\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-12b-news_followup-true-3",
+          "round": 0,
+          "call_id": "TCxL23sLXv3tHXZWcFYIogj9osDtMMmL",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Recent announcements include a new lunar launch programme. Researchers also shared a major milestone regarding solar energy."
+    }
+  ]
+}

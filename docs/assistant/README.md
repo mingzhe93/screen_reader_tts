@@ -1,6 +1,6 @@
 # Assistant (v0.3.0) handover
 
-Status on 2026-10-19: Steps 1–5 of the Assistant plan are committed in `5e62732`, and I have tested the Assistant working on macOS. The next tools phase is implemented in the working tree; see [tools.md](tools.md) for its contracts, measurements and remaining checks. The app version is now `0.3.0`, in release preparation. Windows compilation/runtime and the existing Assistant gaps are deferred until I can test them together on my Windows machine. I have tested and accepted the current Chat/Voice tools, reasoning transcript, controls and UI polish on macOS. Windows and the targeted edge-case checklist remain separate validation work.
+Status on 2026-10-19: Steps 1–5 of the Assistant plan are committed in `5e62732`, and I have tested the Assistant working on macOS. The next tools phase is implemented in the working tree; see [tools.md](tools.md) for its contracts, measurements and remaining checks. The app version is now `0.3.0`, in release preparation. I have since tested Windows compilation and runtime on my Windows machine (2026-10-20) and it works; the existing Assistant gaps remain. I have tested and accepted the current Chat/Voice tools, reasoning transcript, controls and UI polish on macOS. The targeted edge-case checklist remains separate validation work.
 
 Read these in order:
 
@@ -90,7 +90,7 @@ cd src-tauri
 cargo build --features build-base
 ```
 
-**Expect this first build to need small fixes.** The `#[cfg(target_os = "windows")]` blocks in `assistant_backend.rs` (Job Object, `OpenProcess` / `QueryFullProcessImageNameW` / `TerminateProcess`, `tar.exe`, `CREATE_NO_WINDOW`) were written against `windows-sys` 0.59 but have never been compiled. Fix compile errors only inside those blocks, and keep the behaviour described in [backend.md](backend.md).
+**This build compiles and works on Windows** (tested 2026-10-20). The `#[cfg(target_os = "windows")]` blocks in `assistant_backend.rs` (Job Object, `OpenProcess` / `QueryFullProcessImageNameW` / `TerminateProcess`, `tar.exe`, `CREATE_NO_WINDOW`) were written against `windows-sys` 0.59. If a later change breaks them, fix compile errors only inside those blocks, and keep the behaviour described in [backend.md](backend.md).
 
 Then run the automated tests. All should pass; the network and end-to-end tests are `#[ignore]` and are covered next.
 
@@ -118,6 +118,8 @@ Then run the app with `npm run desktop:dev` and work through the manual checks.
 
 ## Manual checks on Windows, in priority order
 
+I have tested the Assistant on Windows and it works (2026-10-20). This list stays as the regression checklist for each Windows build.
+
 Each check is described in detail in the area doc named.
 
 1. **Backend install and load** ([backend.md](backend.md)): install from the page, download the small model, and confirm it loads and the pill shows a Vulkan device.
@@ -142,7 +144,7 @@ What has been verified on macOS (M2 Max):
   - an image sent as a PNG data URL is understood (a 64×64 test image used about 80 prompt tokens);
   - requests without the API key get 401.
 
-I have since tested and accepted the Assistant and tools in the real macOS app, including Chat, Voice, thinking display and the current controls. Automated and model qualification evidence is in [tools.md](tools.md); Windows remains untested.
+I have since tested and accepted the Assistant and tools in the real macOS app, including Chat, Voice, thinking display and the current controls. Automated and model qualification evidence is in [tools.md](tools.md). I have since tested it on Windows too, and it works (2026-10-20).
 
 ## Model management, memory estimates and diagnostics (added after Step 1)
 
@@ -258,8 +260,13 @@ Switching auto-send off now **pauses** the detector instead of unloading it, so 
 - **Page fetching rework**, which also covers the review items left open: trimming pasted URLs, HTML extraction (`header`, `form`, the first `main`/`article`, empty pages) and non-UTF-8 charsets.
 - **"Latest" searches use the wrong year.** In macOS testing Gemma 4 12B searched for "newest small language models … 2024" with the 2026 date in its tools policy. Check whether the new date line in the system prompt fixes it; if not, add a policy line (changing the pinned policy wording means requalifying the Gemma models).
 - Older tool results summarised while idle (plan §11); MiMo memory measurement and requalification; a generated notices file for every crate the app links; sandbox behaviour tests that run by default.
+- **From the MiMo live test (2026-10-20), details in [tools.md](tools.md#live-test-findings-and-the-minicpm-and-mimo-work-2026-10-20):** the raw-tool-call answer, the search retry loop, the empty Python output and MiMo's qualification are fixed. Still open:
+  - Search failures are indistinguishable (offline, blocked, changed page) and there is no back-off after one.
+  - Formatting adherence (Markdown, decimal wording) has never been measured for any model. Check whether my saved Voice prompt is the new default.
+  - MiniCPM is not verified for tools (decision needed: keep with the warning, block tools for it, or remove it).
+  - The 2026-10-20 evidence was produced on Windows; repeat it on the Mac before release.
 
 1. **macOS accepted:** I have finished the current app testing and UI review. Keep [conversation.md](conversation.md) and [tools.md](tools.md) as regression checklists; this is not a claim that every rare failure case was exercised individually.
 2. Commit the remaining tools/docs/version work when ready; the base Assistant is already committed in `5e62732`.
-3. **On Windows:** build v0.3.0, run the checks above, tools/runtime packaging checks and real voice tests; fix anything Windows-specific before publishing that artifact. A live Brave key check is also still outstanding.
+3. **On Windows:** done (2026-10-20): I built and tested v0.3.0 and it works. Repeat the checks above, the tools/runtime packaging checks and the voice tests on the release artifact before publishing it. A live Brave key check has also passed (2026-10-20).
 4. Later: custom GGUF models from Hugging Face (model plus mmproj) and API endpoints (shown as "planned" on the Models page); tighten the CSP; per-model tuning of Smart Turn thresholds with real voices.

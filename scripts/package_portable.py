@@ -191,6 +191,15 @@ def main() -> int:
                 flush=True,
             )
 
+    # Third-party licence notices (tool dependencies) ship next to the exe, as the macOS app bundle
+    # ships them as a resource. Without this the Windows package had none.
+    notices_dir = src_tauri / "notices"
+    if notices_dir.exists():
+        print("Copying third-party notices...", flush=True)
+        _copytree(notices_dir, portable_dir / "notices")
+    else:
+        print("WARNING: third-party notices not found under src-tauri/notices.", flush=True)
+
     readme_path = portable_dir / "README-PORTABLE.txt"
     readme_path.write_text(
         "\n".join(
@@ -203,6 +212,7 @@ def main() -> int:
                 "Notes:",
                 "- No installer/admin rights required.",
                 "- Keep the binaries folder next to the exe.",
+                "- Third-party licence notices are in the notices folder.",
                 f"- Variant: {args.variant}",
                 "- Voice data and runtime cache are written under LocalAppData.",
             ]

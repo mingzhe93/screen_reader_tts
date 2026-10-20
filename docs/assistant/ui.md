@@ -163,7 +163,8 @@ Built on the Step 2–4 backend contract; full rules, events and manual tests in
 
 Model output is untrusted and never becomes HTML.
 
-- `parseMarkdown` is a pure function from text to data (`MdBlock`, `MdInline`) with no DOM access. Supported: paragraphs, ATX headings, emphasis, bold, inline code, fenced code (also unterminated while streaming), lists with one nesting level, block quotes, horizontal rules, `[text](url)` links and bare `http(s)://` URLs. Everything else, including raw HTML and tables, stays literal text.
+- `parseMarkdown` is a pure function from text to data (`MdBlock`, `MdInline`) with no DOM access. Supported: paragraphs, ATX headings, emphasis, bold, inline code, fenced code (also unterminated while streaming), lists with one nesting level, block quotes, horizontal rules, pipe tables, `[text](url)` links and bare `http(s)://` URLs. Everything else, including raw HTML, stays literal text.
+- **Tables** are a header row plus a delimiter row with the same number of columns (`| a | b |` then `|---|:-:|`), with optional outer pipes, `:` alignment and `\|` for a literal pipe. Cells hold inline text only, so HTML, images and `javascript:` links stay inert. Rows continue until a blank line, a line without a pipe or another block; a row still streaming is padded to the header width. At most 24 columns and 500 rows, beyond which the text stays literal. A table can interrupt a paragraph. It renders as a real `<table>` built from text nodes inside a box that scrolls sideways when it is wider than the answer. Speak and Copy turn each row into cells joined by ` | `.
 - `renderMarkdown` uses `createElement` and text nodes only. Headings are shifted down two levels.
 - Links become `<button class="md-link">`; a click calls `shell.open(url)` only for `^https?://`. Other schemes render as an inert `<span>`. The WebView never navigates.
 - Markdown images stay literal text. Parsing cost is bounded (see `assistant-markdown.ts`).
@@ -186,7 +187,7 @@ grep -nE "innerHTML|outerHTML|insertAdjacentHTML|DOMParser|document\.write" src/
 
 The redesign was exercised in a browser (Vite dev server) against a temporary mocked `window.__TAURI_IPC__`, since deleted: top bar and panel in dark and light themes; panel open/close, its stored state and the overlay with Escape below 1000 px; the no-model, no-backend and unsupported empty states and Open Models; prompt save, tab switch and two-step reset (args checked); sampling stored per model, clamping, and the values sent in `assistant_chat_start`; the 256K option disabled for a 128K model; fit levels (fits, tight, spill on an 8 GB GPU); the model picker unloading and loading; a rejected start keeping the draft; Stop and the `[stopped by user]` history; New chat during a stream; Eject; and on the Models page install, cancel, download, cancel, download, delete, the Recommended badge, the fit dots and the hardware refresh after install. That earlier mocked run did not use the real backend; I subsequently tested and accepted the macOS app, as recorded below.
 
-Regression checklist with the real backend (`npm run desktop:dev` or the packaged app). I have tested and accepted the current UI and Assistant/tools behavior on Apple Silicon macOS, including the final spacing/alignment and Voice decimal prompt. Windows validation is pending. The list remains useful for repeat testing; individual edge cases are not marked complete without a specific record.
+Regression checklist with the real backend (`npm run desktop:dev` or the packaged app). I have tested and accepted the current UI and Assistant/tools behavior on Apple Silicon macOS, including the final spacing/alignment and Voice decimal prompt. I have since tested it on Windows too, and it works (2026-10-20). The list remains useful for repeat testing; individual edge cases are not marked complete without a specific record.
 
 1. **Clean profile.** Open Assistant. Expect the top bar to say "No Assistant model installed" with Open Models, the same empty state in the conversation area, and no download buttons. Press Open Models: the Models page opens.
 2. **Install the backend.** On the Models page, the backend row reads "llama.cpp backend (b11718, … MB)" and the model Download buttons are disabled with the tooltip "Install the llama.cpp backend first". Press Install: progress and Cancel appear. Cancel mid-way: no error, Install returns. Install again to the end: the row says "Installed" and Download buttons enable. On Windows, hover the fit dots afterwards: they should name your GPU (the devices are re-read after install).
@@ -210,7 +211,7 @@ Regression checklist with the real backend (`npm run desktop:dev` or the package
 - No fallback to the last context that worked when a load fails (plan §5.3); the error shows in the pill.
 - The full-height layout uses `:has()`. WebView2 and current macOS WebKit support it; on macOS older than 12.3 the page falls back to the normal 920 px column and the messages area grows with the page instead of scrolling on its own.
 - Load is no longer disabled while a model downloads (it was in Step 1, when downloads were on this page). If the backend turns out to refuse a load during a download, its error appears in the pill.
-- Tables and other Markdown extensions render as literal text. Conversations are not saved, by design.
+- Markdown extensions other than pipe tables (footnotes, task lists, strikethrough, reference links) render as literal text. Conversations are not saved, by design.
 - Voice gaps are listed in [conversation.md](conversation.md).
 
 

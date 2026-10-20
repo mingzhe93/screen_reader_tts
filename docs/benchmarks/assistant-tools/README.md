@@ -28,3 +28,15 @@ The follow-up default Voice prompt asks for decimal numbers as “28 point 8” 
 
 
 Current revised-prompt evidence: [Gemma E4B](2026-10-19-gemma-4-e4b-decimal-voice.json) passes 12/12 Chat and 11/12 Voice (the stock case remains its allowed failure); [Gemma 12B](2026-10-19-gemma-4-12b-decimal-voice.json) passes 12/12 in both modes. Both pass every hard invariant. These reruns completed on the M2 Max with b11718 and thinking off. MiniCPM and MiMo reports still describe the earlier prompt and remain unqualified.
+
+
+## 2026-10-20: MiMo guidance, Gemma re-check and robustness
+
+Run on Windows 11 with an RTX 5090 (Vulkan) and the Windows `llama-server` b11718, so `server_sha256` differs from the Mac reports; the model weights, template, fixture, tool schemas and prompts are the same pins. The Windows run of the original MiMo code reproduced the Mac's scores.
+
+- [MiMo, guided](2026-10-20-mimo-v2.6-9b-guided.json): 12/12 in Chat and Voice, all hard cases pass. Run with `VR_TOOLS_THINKING=app-defaults`, so Chat thinks and Voice does not, as in the app, and with the model's `tools_guidance` in the prompt. The catalogue regression test binds MiMo's flag to this report.
+- [Gemma E4B re-check](2026-10-20-gemma-4-e4b-recheck.json) (12/12 Chat, 11/12 Voice) and [Gemma 12B re-check](2026-10-20-gemma-4-12b-recheck.json) (12/12 both), thinking off, on the current loop and sandbox. The regression test binds their flags to these reports.
+- [MiniCPM, guided](2026-10-20-minicpm-v-4.7-1b-guided.json): 11/12 in both modes with all hard cases passing, with its guidance and thinking on in both modes. **Not used for a flag.**
+- Fresh-seed checks (seeds not used for tuning; `experiment: true`, never `qualified`): [MiMo](2026-10-20-mimo-v2.6-9b-fresh-seeds.json), nine seeds, every case 9/9 except Voice Python and Voice named-city weather at 8/9; [MiniCPM](2026-10-20-minicpm-v-4.7-1b-fresh-seeds.json), six seeds, Voice Python 3/6, Voice named-city weather 2/6, Chat stock 0/6, Chat rewrite 4/6. That is why MiniCPM is not verified although its official run passed.
+
+The `thinking` field is now `{"chat": bool, "voice": bool}`. New harness switches: `VR_TOOLS_THINKING=app-defaults`, and for experiments `VR_TOOLS_CASES`, `VR_TOOLS_MODES`, `VR_TOOLS_SEEDS`, `VR_TOOLS_THINK=1`, `VR_TOOLS_TEMPERATURE`, `VR_TOOLS_POLICY_TIME`, `VR_TOOLS_EXTRA_SYSTEM` and `VR_TOOLS_DEBUG`. Any experiment switch makes the run an experiment that never writes `qualified: true`. The harness needs `src-tauri/tests-data/tools/*` to keep LF line endings (`.gitattributes`), because it hashes those files.

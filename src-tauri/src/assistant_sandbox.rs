@@ -491,7 +491,10 @@ async fn execute(
     // Explicit CPython path configuration lets -I ignore all environment and user files.
     // Zoneinfo is configured through an app-owned prelude, never host TZ/PYTHONPATH.
     let code_literal = serde_json::to_string(&code)?;
-    let program = format!("import sys\nsys.path.insert(0, '/tz')\nimport zoneinfo\nzoneinfo.reset_tzpath(['/tz/tzdata/zoneinfo'])\nexec(compile({code_literal}, '<assistant>', 'exec'))");
+    // A final bare expression is printed, as a REPL or notebook cell does. Models write
+    // `sum(...)` and expect to see the value; without this the run returns nothing, and the
+    // model tries again until its rounds run out. `print(...)` returns None and is not echoed.
+    let program = format!("import sys\nsys.path.insert(0, '/tz')\nimport zoneinfo\nzoneinfo.reset_tzpath(['/tz/tzdata/zoneinfo'])\nimport ast\n_vr_tree = ast.parse({code_literal}, '<assistant>', 'exec')\n_vr_last = _vr_tree.body.pop() if _vr_tree.body and isinstance(_vr_tree.body[-1], ast.Expr) else None\nexec(compile(_vr_tree, '<assistant>', 'exec'))\nif _vr_last is not None:\n    _vr_value = eval(compile(ast.Expression(_vr_last.value), '<assistant>', 'eval'))\n    if _vr_value is not None:\n        print(repr(_vr_value))");
     wasi.args(&["/python.wasm", "-I", "-S", "-B", "-u", "-c", &program])
         .stdout(stdout.clone())
         .stderr(stderr.clone())
@@ -756,6 +759,33 @@ mod tests {
             let target = to.join(entry.file_name());
             if entry.file_type().unwrap().is_dir() { copy_dir(&entry.path(), &target); } else { std::fs::copy(entry.path(), target).unwrap(); }
         }
+    }
+
+    /// A final bare expression is echoed like a REPL; everything else behaves as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires pinned CPython WASI ZIP and tzdata wheel, or VOICEREADER_SANDBOX_INSTALLED_DIR"]
+    async fn a_trailing_bare_expression_is_echoed_like_a_repl() {
+        let root = tempfile::tempdir().unwrap();
+        let state = SandboxState::new(root.path().into());
+        fixture_runtime(&state);
+        for (code, stdout) in [
+            ("1 + 1", "2\n"),
+            ("x = 5\nx * 3", "15\n"),
+            ("print('a')\n'b'", "a\n'b'\n"),
+            ("print(7)", "7\n"),
+            ("None", ""),
+            ("def f():\n    return 4\nf()", "4\n"),
+            ("sum(i*i for i in range(1, 10001))", "333383335000\n"),
+            ("x = 1", ""),
+        ] {
+            let result = state.run(code.into(), Duration::from_secs(10), Arc::new(AtomicBool::new(false))).await.unwrap();
+            assert_eq!(result.stdout, stdout, "{code:?} -> {result:?}");
+            assert!(result.stderr.is_empty(), "{code:?} -> {result:?}");
+        }
+        let broken = state.run("1 +".into(), Duration::from_secs(10), Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert!(broken.stderr.contains("SyntaxError"), "{broken:?}");
+        let failing = state.run("a = 1\n1 / 0".into(), Duration::from_secs(10), Arc::new(AtomicBool::new(false))).await.unwrap();
+        assert!(failing.stderr.contains("ZeroDivisionError"), "{failing:?}");
     }
 
     /// No host Python is executed. Set the two archive paths described in the fixture

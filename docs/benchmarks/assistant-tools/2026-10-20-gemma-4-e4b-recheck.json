@@ -1,0 +1,1553 @@
+{
+  "experiment": false,
+  "protocol": "VoiceReader assistant tools v1",
+  "model": "gemma-4-e4b",
+  "model_sha256": "3cf61de12daa015ee0f7b68e7b7c541405bf220e1e942bad8b47cab827d7df80",
+  "model_revision": "bfc15c382204943c3a8fff0c750b94ae2364d7a3",
+  "server_build": "b11718",
+  "server_sha256": "181674817da4e1e22581584cbb0e9abc8c9a5dbc0b0e6d93b66a161781d3d046",
+  "template_sha256": "74a88f94c57c14e22dcdbe08e94127f42b87c6f584cb73838e73e32126f3f6b3",
+  "fixture_sha256": "25550c30a4d3d7342edabc0a5c04e5abdab81d439dd6d85f0f4250bddb84cb37",
+  "tools_sha256": "87a413bbc232346ee322f8d81dede30804750e7778b06348f440a211ae34e223",
+  "chat_prompt_sha256": "1d011bc8c2827033743c7a4cb34987b9e3dafe94672687b333273f8184daf855",
+  "voice_prompt_sha256": "20c11f5e1f72e9981dd8d9d1eba080a801eb267b61ec9f9fd274ad4ac0535271",
+  "sampling": {
+    "temperature": 1.0,
+    "top_p": 0.949999988079071,
+    "top_k": 64,
+    "min_p": 0.0,
+    "repeat_penalty": 1.0
+  },
+  "thinking": {
+    "chat": false,
+    "voice": false
+  },
+  "qualified": true,
+  "records": [
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I can check the weather for you, but please tell me which city you would like the forecast for."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "What city are you interested in?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_missing_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "What city would you like the weather for?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_named_city-false-1",
+          "round": 0,
+          "call_id": "38Jzf649BrtazFGIwe0MuuWLxaxK0EZr",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current weather in Singapore is **29 degrees Celsius**, with a high of **31 degrees Celsius** and a low of **25 degrees Celsius**. There is a **60 percent** chance of precipitation [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_named_city-false-2",
+          "round": 0,
+          "call_id": "7Vv1glfp7p2HFMlcRd3XaySDSZr2J0VI",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current weather in Singapore is 29 degrees Celsius, with a high of 31 degrees and a low of 25 degrees. There is a 60 percent chance of precipitation [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_named_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_named_city-false-3",
+          "round": 0,
+          "call_id": "XCQY3Zr0efjTwF96fIlODXZxcHVSJCT9",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current weather in Singapore is **29 degrees Celsius**, with a high of **31** and a low of **25**. There is a **60 percent** chance of precipitation [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "stock",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-stock-false-1",
+          "round": 0,
+          "call_id": "AI0DOYJts9qSgwFZX6vpmU4ggfwpMbid",
+          "name": "web_search"
+        }
+      ],
+      "final_text": ""
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "stock",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-stock-false-2",
+          "round": 0,
+          "call_id": "sOOnK3KHQJuRqnR2weK0WnAKjfyxUwsJ",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "The provided search result indicates that the Apple (AAPL) stock price is **USD 250.00**, but please note that this is a **delayed quote** [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "stock",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"Apple stock price\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-stock-false-3",
+          "round": 0,
+          "call_id": "MGGTf9oLthalGMmFqN9G83wdbta9uRR4",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "The current stock price for Apple (AAPL) is **USD 250.00**, but please note that this is a delayed quote [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "news",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news-false-1",
+          "round": 0,
+          "call_id": "cccKy36g25BwDXC1VdnD1PveQJZQW5fP",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Based on the available information, here is a summary of the latest news:\n\n*   On October 19, 2026, researchers announced a **solar energy milestone** and a **lunar launch programme** [1].\n\nFor the most comprehensive and up-to-date coverage, I recommend searching a dedicated news source, as the result I found is from an example source."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "news",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news-false-2",
+          "round": 0,
+          "call_id": "st55531ufJgHAoyxjjiejA17dUV6d043",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "The latest news includes a solar energy milestone announced by researchers on 2026-10-19, along with updates on a lunar launch programme [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "news",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news-false-3",
+          "round": 0,
+          "call_id": "YpwV7sLoLKkPW9qTSxWNbz5zSP42gtot",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "The latest news includes a solar energy milestone announced by researchers on 2026-10-19, as well as details on a lunar launch program [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "page",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-page-false-1",
+          "round": 0,
+          "call_id": "Qc9IvjTONSYSUS1vb7Q4pbSsfvEOCA5d",
+          "name": "fetch_page"
+        }
+      ],
+      "final_text": "I have summarized the page for you. The article reports that researchers achieved a milestone in solar energy on October 19, 2026, by doubling the storage capacity of a pilot project."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "page",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-page-false-2",
+          "round": 0,
+          "call_id": "j4m8PzcHI7IMCVKGoSrnFfGM9lUxxrMj",
+          "name": "fetch_page"
+        }
+      ],
+      "final_text": "The article on `https://example.com/article` announces that researchers achieved a solar energy milestone on October 19, 2026, by doubling the pilot's storage capacity."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "page",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "fetch_page",
+          "{\"url\":\"https://example.com/article\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-page-false-3",
+          "round": 0,
+          "call_id": "2MiBkMB7hrWEEcJm2mRJomqq6hAdkn8K",
+          "name": "fetch_page"
+        }
+      ],
+      "final_text": "The article reports that researchers announced a solar energy milestone on October 19, 2026, where the pilot project doubled its storage capacity [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How may I help you today? 😊"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you today?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_greeting",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello! How can I help you today? 😊"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered collection of data stored as key-value pairs, allowing for fast lookups of values using their corresponding unique keys."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered collection of data values used to store data in a key:value pair format."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_explain",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered collection of data values that maps unique keys to specific values."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 1,
+      "passed": false,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"print(17 * 23)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "391\n",
+          "request_id": "real-gemma-4-e4b-no_tool_arithmetic-false-1",
+          "round": 0,
+          "call_id": "Z2NOE1wZpWGlVMLq6VYNPprU7hSszKUc",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "391"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "17 times 23 is 391."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_arithmetic",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "17 times 23 is 391."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Here are a few polite ways to rewrite \"send the report today,\" depending on the level of urgency and formality you need:\n\n**More Formal/Professional:**\n\n* \"Could you please send the report by the end of the day?\"\n* \"Would it be possible to have the report submitted today?\"\n* \"I would appreciate it if you could send the report today.\"\n\n**More Casual/Friendly:**\n\n* \"Can you send over the report sometime today?\"\n* \"Please try to get the report to me today.\"\n\n**If you need to emphasize the deadline:**\n\n* \"To keep us on track, could you please ensure the report is sent today?\""
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Here are a few polite ways to rewrite \"Send the report today,\" depending on the level of urgency and formality you need:\n\n**More Direct but Polite (Good for deadlines):**\n\n*   \"Could you please send the report by the end of today?\"\n*   \"I would appreciate it if you could send the report sometime today.\"\n\n**Softer and More Collaborative (Good for colleagues):**\n\n*   \"When you have a moment today, could you send over the report?\"\n*   \"Would it be possible to have the report by the end of the day?\"\n\n**Formal (Good for superiors or external clients):**\n\n*   \"Please ensure the report is submitted by the close of business today.\"\n*   \"We would be grateful if you could provide the report today.\""
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "no_tool_rewrite",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Here are a few polite ways to rewrite \"Send the report today,\" depending on the tone you want to convey:\n\n**If it's a gentle reminder:**\n\n* \"Could you please send the report by the end of today?\"\n* \"Would it be possible to get the report over to me today?\"\n\n**If it's a more formal request:**\n\n* \"Please ensure the report is submitted today.\"\n* \"I would appreciate it if you could send the report today.\"\n\n**If you need it for a specific reason (most polite):**\n\n* \"To keep us on track for the next steps, could you please send the report today?\"\n* \"We need the report today to [reason, e.g., finalize the presentation]. Thanks!\""
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "python",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_of_squares = sum(i**2 for i in range(1, 10001))\\nprint(sum_of_squares)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-e4b-python-false-1",
+          "round": 0,
+          "call_id": "u18Z4FeoEn3WgYLU4B0CTNWDuUS8nanz",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from 1 to 10000 is **3,333,833,350,000**."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "python",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"# Calculate the sum of the squares of integers from 1 to 10000\\nn = 10000\\n# The formula for the sum of the first n squares is: n(n+1)(2n+1) / 6\\nsum_of_squares = n * (n + 1) * (2 * n + 1) // 6\\nprint(sum_of_squares)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-e4b-python-false-2",
+          "round": 0,
+          "call_id": "n1amK4HCtVeKfpz5VRt1gJFM3xpAUmVD",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from 1 to 10000 is **333,383,335,000**."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "python",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_of_squares = sum(i**2 for i in range(1, 10001))\\nprint(sum_of_squares)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-e4b-python-false-3",
+          "round": 0,
+          "call_id": "NcA0LCQroXTnxxol17tcknSLaP6KulA7",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The exact sum of the squares of integers from 1 to 10000 is **3,333,833,350,000**."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_other_city-false-1",
+          "round": 0,
+          "call_id": "HvDvHd6Jh7wzdBcjH7qYSOmSUBX3VO0S",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "Today in Paris, France, the forecast is:\n\n*   **High:** 19°C\n*   **Low:** 12°C"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_other_city-false-2",
+          "round": 0,
+          "call_id": "oEADnEX5YSXwnKkWTaHA1WYbUPBNMubo",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The forecast for Paris, France today is a high of **19 degrees Celsius** and a low of **12 degrees Celsius** [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "weather_other_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris, France\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_other_city-false-3",
+          "round": 0,
+          "call_id": "y9Bf7VnjVqh0X8dGLNu8KkZPsISIbATW",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The forecast for Paris, France is:\n\n*   **High:** 19 degrees Celsius\n*   **Low:** 12 degrees Celsius"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements about lunar exploration\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news_followup-false-1",
+          "round": 0,
+          "call_id": "PBK7DSCrKZwzU88U1BJoWltCIEStgpAn",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Based on the information I found, there was a recorded news bulletin from October 19, 2026, which mentioned a **solar energy milestone and a lunar launch programme** [1].\n\nFor the most current and detailed information, I recommend performing a more specific search on a reliable space agency or news site."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news_followup-false-2",
+          "round": 0,
+          "call_id": "EkQFkXHEHyzoFz3BKRlxMiGUEd7kZxsA",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I found an article mentioning a recent announcement about a lunar launch programme on October 19, 2026, regarding a solar energy milestone [1].\n\nTo get more detailed and up-to-date information, could you tell me if there is a specific space agency, mission, or region you are interested in? This will help me narrow down the search for the most relevant announcements."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": false,
+      "case": "news_followup",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements about lunar exploration\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news_followup-false-3",
+          "round": 0,
+          "call_id": "7TYRHGUXPHbtakvNshUfptLWkA2DpKWp",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I found one result regarding lunar exploration announcements. It mentions that on **2026-10-19**, researchers announced a **solar energy milestone and a lunar launch programme** [1].\n\nThe source is:\n*   **Title:** Recorded news and market bulletin\n*   **URL:** `https://example.com/article`\n\nFor the absolute latest and most detailed information, I recommend checking the source directly or performing another, more specific search."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I need a city to give you the weather. Which city are you interested in?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "What city's weather would you like to know?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_missing_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "What city would you like the weather for?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_named_city-true-1",
+          "round": 0,
+          "call_id": "R4R6xZI2xjscqKWmLimfN8AddB2mbWfg",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "It is currently twenty-nine degrees Celsius. The high will be thirty-one, and the low will be twenty-five degrees Celsius. There is a sixty percent chance of precipitation."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_named_city-true-2",
+          "round": 0,
+          "call_id": "J47E1ltXV3aJfhH9ZxrobbnXyMNxUPRX",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The current temperature in Singapore is twenty-nine degrees Celsius. The high today will be thirty-one, and the low will be twenty-five. There is a sixty percent chance of precipitation."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_named_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Singapore\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_named_city-true-3",
+          "round": 0,
+          "call_id": "llbSYeD1eT5NxL15BV7kI5gDtUns2Wkf",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The weather in Singapore is 29 degrees Celsius right now. The high today is 31 degrees Celsius, and the low is 25 degrees Celsius. There is a 60 percent chance of precipitation."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "stock",
+      "seed": 1,
+      "passed": false,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I do not have real-time stock data. I can search the web for you."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "stock",
+      "seed": 2,
+      "passed": false,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I do not have real-time stock prices. You can check a financial news website for the most current information."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "stock",
+      "seed": 3,
+      "passed": false,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "I can check the stock price for you. Which stock exchange are you interested in?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "news",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news-true-1",
+          "round": 0,
+          "call_id": "MiZLjAAN3g4tFWbSb55nqquF6PkIMTQl",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Based on the latest information, researchers announced a solar energy milestone. There was also mention of a lunar launch program."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "news",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news-true-2",
+          "round": 0,
+          "call_id": "cR1dBG3Lkro1FiFJHu0ndJEPbGHdNV3S",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I see an article about a solar energy milestone and a lunar launch programme. It also mentions Apple stock at two hundred fifty point zero zero dollars."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "news",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest news about renewable energy\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news-true-3",
+          "round": 0,
+          "call_id": "uTOtwc3K4pfxyULjy3MPnS7TV0Ib2P8m",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I found some recent news. Researchers announced a solar energy milestone and a lunar launch programme [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "page",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-page-true-1",
+          "round": 0,
+          "call_id": "lEmcxikGMptzmjSLuKAKKomGekQMQC2E",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "Based on the search, researchers announced a solar energy milestone and a lunar launch program. This news is from an example source."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "page",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-page-true-2",
+          "round": 0,
+          "call_id": "Bt0R2008UPh17tjQUtpK8ML9flZElZOv",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I see news about a solar energy milestone and a lunar launch programme. Would you like more details about either of those?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "page",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest science news\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-page-true-3",
+          "round": 0,
+          "call_id": "0tpbXw6eTS6OUGFHIo4GH3i1fFVDYfYt",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I found some recent science news. Researchers announced a solar energy milestone and a lunar launch program. That information was from a recorded news and market bulletin."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello to you too. How may I assist you today?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello to you too. How may I assist you today?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_greeting",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Hello there. How may I help you today?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered collection of key-value pairs."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered collection of data values, used to store data in key-value pairs."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_explain",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "A Python dictionary is an unordered collection of data values used to store data in a key-value pair format."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "One hundred seven is the answer."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "One hundred thirty-one is the answer."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_arithmetic",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "One hundred seven one."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 1,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Please send the report today."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 2,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Could you please send the report today?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "no_tool_rewrite",
+      "seed": 3,
+      "passed": true,
+      "calls": [],
+      "tool_results": [],
+      "final_text": "Could you please send the report today?"
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "python",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"print(sum(i*i for i in range(1, 10001)))\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-e4b-python-true-1",
+          "round": 0,
+          "call_id": "3BOWo3QoF7UbMFCfl3siqhuGLUFTLIjM",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The sum of the squares of integers from 1 to 10000 is three hundred thirty three million three hundred thirty three thousand five hundred."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "python",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"sum_of_squares = sum(i*i for i in range(1, 10001))\\nprint(sum_of_squares)\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-e4b-python-true-2",
+          "round": 0,
+          "call_id": "nHTX8BHA12rXzDgpj9KvbYaokSGO5Ns9",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The sum of the squares of integers from one to ten thousand is three hundred thirty-three million three hundred thirty-three thousand three hundred fifty."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "python",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "run_python",
+          "{\"code\":\"print(sum(i*i for i in range(1, 10001)))\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Isolated Python evaluation",
+          "sources": [],
+          "output": "333383335000\n",
+          "request_id": "real-gemma-4-e4b-python-true-3",
+          "round": 0,
+          "call_id": "HuWbTJyb7yJvAHqregBC5snaabxn8lWL",
+          "name": "run_python"
+        }
+      ],
+      "final_text": "The sum of the squares of integers from one to ten thousand is three hundred thirty three point three million eight hundred thirty three thousand three hundred fifty."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_other_city-true-1",
+          "round": 0,
+          "call_id": "0JC8R20YUxAMqQglKXeQBxt9fXsSLjcb",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "Today in Paris, the high is 19 degrees Celsius and the low is 12 degrees Celsius."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_other_city-true-2",
+          "round": 0,
+          "call_id": "Az2aqh8HCB4PcdJz82hUQXCGwoj94txd",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The high temperature in Paris is 19 degrees Celsius. The low temperature is 12 degrees Celsius."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "weather_other_city",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "get_weather",
+          "{\"city\":\"Paris\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-weather_other_city-true-3",
+          "round": 0,
+          "call_id": "8krNjlbjV5F00AUD7XNSkzvnNpsnLrBZ",
+          "name": "get_weather"
+        }
+      ],
+      "final_text": "The high in Paris is nineteen degrees Celsius. The low is twelve degrees Celsius."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 1,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news_followup-true-1",
+          "round": 0,
+          "call_id": "686IhgjH9Zl1opZQG6iwFzz65hcti0DY",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I found a recent announcement from October nineteenth, two thousand twenty-six. It mentions a lunar launch programme from researchers. Note that stock prices may be delayed."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 2,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news_followup-true-2",
+          "round": 0,
+          "call_id": "XjSw53kNJ87BPy8piriitiBaelrbpKmz",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I found some recent news. Researchers announced a solar energy milestone and a lunar launch programme on October 19, 2026 [1]."
+    },
+    {
+      "model": "gemma-4-e4b",
+      "voice": true,
+      "case": "news_followup",
+      "seed": 3,
+      "passed": true,
+      "calls": [
+        [
+          "web_search",
+          "{\"query\":\"latest public announcements lunar exploration\"}"
+        ]
+      ],
+      "tool_results": [
+        {
+          "status": "ok",
+          "summary": "Recorded network fixture",
+          "sources": [
+            {
+              "n": 1,
+              "title": "Recorded fixture",
+              "url": "https://example.com/article"
+            }
+          ],
+          "request_id": "real-gemma-4-e4b-news_followup-true-3",
+          "round": 0,
+          "call_id": "GqEOQL1ROkZ5dc51xFX8A8OcdvyAg4g2",
+          "name": "web_search"
+        }
+      ],
+      "final_text": "I found a recent announcement about a lunar launch program. It mentions a solar energy milestone also."
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Assistant turn detection (`assistant_turn.rs`)
 
-Status on 2026-10-19: implemented, tested on macOS and wired into automatic sending in the committed Assistant (`5e62732`). Windows remains untested. See [conversation.md](conversation.md) for the frontend integration and experimental auto-send controls.
+Status on 2026-10-19: implemented, tested on macOS and wired into automatic sending in the committed Assistant (`5e62732`). I have since tested it on Windows too (2026-10-20). See [conversation.md](conversation.md) for the frontend integration and experimental auto-send controls.
 
 ## What it does
 

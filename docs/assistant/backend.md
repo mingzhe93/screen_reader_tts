@@ -290,7 +290,7 @@ By hand on macOS, I also checked two run-record cases with a real `llama-server`
 
 ## Manual checks on Windows (not run; no Windows machine was available)
 
-The Windows-only code has not been compiled. That covers the Job Object, process probes, `tar.exe` and `CREATE_NO_WINDOW`. Run `cargo build --features build-base` first, and fix any compile error in the `#[cfg(target_os = "windows")]` blocks of `assistant_backend.rs`.
+The Windows-only code (the Job Object, process probes, `tar.exe` and `CREATE_NO_WINDOW`) compiles and works on Windows (2026-10-20). If a later change breaks it, run `cargo build --features build-base` and fix any compile error in the `#[cfg(target_os = "windows")]` blocks of `assistant_backend.rs`.
 
 1. **Unit tests:** `cargo test --features build-base assistant_` and `model_download::`. Expected: all pass, including `assistant_system_probe_sees_this_process` and `assistant_status_reports_in_use_elsewhere_from_the_record`, which use real Windows process APIs, `assistant_unload_removes_only_the_record_of_the_server_it_stopped`, which spawns `PING.EXE` as a stand-in server, and `assistant_admission_is_exclusive_across_instances`, which checks that `LockFileEx` conflicts between two handles in one process. The symlink tests are unix-only.
 2. **Vulkan zip installs and runs:** run the install test and then the end-to-end test above.

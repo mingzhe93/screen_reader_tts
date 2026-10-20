@@ -139,9 +139,34 @@ impl Call {
     }
 }
 
+/// What a model writes when it "calls" a tool in its own text format and the server does not
+/// turn that into a structured call. MiMo's XML format comes back this way when a request
+/// carries no `tools`. The text is never executed, and it must not reach the page or the
+/// speech queue as an answer either.
+const CALL_MARKERS: [&str; 3] = ["<tool_call", "<function=", "<|tool_call"];
+/// What the user gets when a model's final reply is nothing but call text, twice.
+const NO_ANSWER: &str = "Sorry, I couldn't finish that. Please try again.";
+
+/// Where unparsed call text starts in `text`.
+fn call_text_start(text: &str) -> Option<usize> {
+    CALL_MARKERS.iter().filter_map(|marker| text.find(marker)).min()
+}
+/// How many trailing bytes of `text` could still grow into a marker, so they are held back
+/// until more text arrives. The held bytes start with `<`, so cutting before them is safe.
+fn held_tail(text: &str) -> usize {
+    CALL_MARKERS
+        .iter()
+        .filter_map(|marker| (1..marker.len()).rev().find(|n| text.ends_with(&marker[..*n])))
+        .max()
+        .unwrap_or(0)
+}
+
 #[derive(Default)]
 struct Completion {
     content: String,
+    /// Bytes of `content` already shown. Call text and a possible start of it are not.
+    sent: usize,
+    call_text: bool,
     reasoning: String,
     calls: BTreeMap<usize, Call>,
     finish: Option<String>,
@@ -149,6 +174,40 @@ struct Completion {
     completion_tokens: Option<u64>,
 }
 impl Completion {
+    /// New content that is safe to show: nothing from the first call-text marker on.
+    fn releasable(&mut self) -> Option<String> {
+        if self.call_text {
+            return None;
+        }
+        let end = match call_text_start(&self.content) {
+            Some(start) => {
+                self.call_text = true;
+                start
+            }
+            None => self.content.len() - held_tail(&self.content),
+        };
+        (end > self.sent).then(|| {
+            let shown = self.content[self.sent..end].to_string();
+            self.sent = end;
+            shown
+        })
+    }
+    /// The held-back end of the content once the stream is over: it was not a marker after all.
+    fn flush_held(&mut self) -> Option<String> {
+        if self.call_text || self.sent >= self.content.len() {
+            return None;
+        }
+        let rest = self.content[self.sent..].to_string();
+        self.sent = self.content.len();
+        Some(rest)
+    }
+    /// The content as an answer: nothing from the first unparsed tool call on.
+    fn answer(&self) -> &str {
+        match call_text_start(&self.content) {
+            Some(start) => self.content[..start].trim_end(),
+            None => &self.content,
+        }
+    }
     fn assistant_message(&self, round: u32) -> Value {
         let mut message = json!({"role":"assistant","content":self.content});
         if !self.reasoning.is_empty() {
@@ -160,6 +219,15 @@ impl Completion {
         }
         message
     }
+}
+
+/// Replaces an unusable final reply with a plain apology, shown and spoken like an answer.
+fn apologise(slot: &Slot, round: u32, state: &mut Completion) {
+    state.content = NO_ANSWER.into();
+    state.sent = state.content.len();
+    state.call_text = false;
+    slot.event("assistant:delta-round", json!({"request_id":slot.request_id,"round":round}));
+    slot.delta(Some(NO_ANSWER), None);
 }
 
 /// Returns JSON with stable key ordering for repeat detection, including nested objects.
@@ -309,14 +377,15 @@ fn accumulate(
     if completion.content.len() + completion.reasoning.len() > MAX_ROUND_TEXT_BYTES {
         return Err("The assistant response was too large.".into());
     }
-    if content.is_some() || reasoning.is_some() {
+    let shown = if content.is_some() { completion.releasable() } else { None };
+    if shown.is_some() || reasoning.is_some() {
         // Main sinks track the phase's round; this private event supports consumers needing
         // an explicit boundary before forwarding the unchanged legacy delta callback.
         slot.event(
             "assistant:delta-round",
             json!({"request_id":slot.request_id,"round":round}),
         );
-        slot.delta(content, reasoning);
+        slot.delta(shown.as_deref(), reasoning);
     }
     if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
         for fragment in calls {
@@ -415,13 +484,32 @@ struct Context {
     older: Vec<Vec<Value>>,
     current: Vec<Value>,
     dropped: u32,
+    recoveries: Vec<String>,
 }
 impl Context {
     fn force_final(&mut self, reason: &str) {
+        // The same reason is stated once however many requests follow it.
+        if self.recoveries.iter().any(|seen| seen == reason) {
+            return;
+        }
+        self.recoveries.push(reason.to_string());
         // A trailing assistant message is a llama.cpp prefill, so put recovery policy
         // in the system message and leave the real user/tool history intact.
         let system = self.system["content"].as_str().unwrap_or("");
-        self.system["content"] = json!(format!("{system}\nApp recovery: {reason} Answer using only the information already available; do not call tools."));
+        self.system["content"] = json!(format!("{system}\nApp recovery: {reason} Answer using only the information already available; do not call tools. If a tool failed or did not give what is needed, say so briefly instead of guessing."));
+        // A line in the system prompt is far from where the model writes its reply, and some
+        // models (MiMo) still write another call. The same notice goes after the last tool
+        // result, which is the last thing the model reads before it answers.
+        if let Some(last) = self.current.last_mut().filter(|message| message["role"] == "tool") {
+            if let Some(content) = last["content"].as_str() {
+                last["content"] = json!(format!("{content}\n[App notice: {reason} Write your answer now in plain sentences from the information above. Do not write a tool call. If a tool failed, say so briefly instead of guessing.]"));
+            }
+        }
+    }
+    /// Whether this turn has already run a tool, so a request without tools is a final answer
+    /// that must be told to be one.
+    fn used_tools(&self) -> bool {
+        self.current.iter().any(|message| message["role"] == "tool")
     }
     fn new(system: &str, messages: &[ChatMessage]) -> Self {
         let mut older: Vec<Vec<Value>> = vec![];
@@ -437,6 +525,7 @@ impl Context {
             older,
             current: vec![chat::wire_message(&messages[last])],
             dropped: 0,
+            recoveries: vec![],
         }
     }
     fn messages(&self) -> Vec<Value> {
@@ -606,7 +695,7 @@ fn max_tokens(request: &ChatRequest, budget: Option<u32>, room: u32) -> u32 {
     cap.min(room).max(1)
 }
 fn metadata(options: &Runtime, state: &Completion, round: u32, budget: Option<u32>) -> Value {
-    json!({"final_text":if state.calls.is_empty(){state.content.as_str()}else{""},"final_round":if state.calls.is_empty(){round}else{round+1},"history_note":options.services.history_note(),"sources":options.services.sources(),"timings":state.timings,"thinking_budget_tokens":budget,"completion_tokens":state.completion_tokens})
+    json!({"final_text":if state.calls.is_empty(){state.answer()}else{""},"final_round":if state.calls.is_empty(){round}else{round+1},"history_note":options.services.history_note(),"sources":options.services.sources(),"timings":state.timings,"thinking_budget_tokens":budget,"completion_tokens":state.completion_tokens})
 }
 
 pub(crate) async fn start(
@@ -615,6 +704,11 @@ pub(crate) async fn start(
     sink: Arc<dyn ChatSink>,
     options: TurnOptions,
 ) -> Result<ChatStart, String> {
+    let mut request = request;
+    // A model that only uses tools reliably while it thinks always thinks when tools are on.
+    if !options.enabled_tools.is_empty() && crate::assistant_catalogue::tools_need_thinking(&options.model_id) {
+        request.think = true;
+    }
     let mut messages = chat::validate_request(&request)?;
     if let Some(sampling) = request.sampling {
         sampling.validate()?;
@@ -638,7 +732,7 @@ pub(crate) async fn start(
         return Err("The system prompt is too long.".into());
     }
     options.services.allow_user_urls(&messages);
-    add_turn_context(&mut system, &mut messages, &options.enabled_tools, options.voice, &chrono::Local::now());
+    add_turn_context(&mut system, &mut messages, &options.enabled_tools, options.voice, crate::assistant_catalogue::tools_guidance_for(&options.model_id), &chrono::Local::now());
     let mut tools_on = !options.enabled_tools.is_empty();
     let definitions = tools::definitions_for(&options.enabled_tools);
     let runtime = Runtime {
@@ -761,6 +855,7 @@ fn add_turn_context<Tz: chrono::TimeZone>(
     messages: &mut [ChatMessage],
     enabled: &ToolSelection,
     voice: bool,
+    guidance: &str,
     now: &chrono::DateTime<Tz>,
 ) where
     Tz::Offset: std::fmt::Display,
@@ -770,6 +865,7 @@ fn add_turn_context<Tz: chrono::TimeZone>(
         return;
     }
     system.push_str(&tools::prompt_at(voice, &tools::policy_now(now)));
+    system.push_str(guidance);
     system.push_str(&enabled.policy());
     if let Some(last) = messages.last_mut() {
         last.text.push_str(&tools::time_note(now));
@@ -807,6 +903,11 @@ async fn run(
     let mut round = 0u32;
     let mut repeats = HashSet::new();
     let mut malformed = 0u32;
+    // One more request is made when the final reply is call text or an empty answer.
+    let mut recovery_tried = false;
+    // A search that failed in this turn is not retried: each retry goes back to a provider that
+    // has just refused, and uses up a round.
+    let mut search_down = false;
     let mut state = Completion::default();
     let mut error: Option<String> = None;
     let mut last_budget = budget;
@@ -846,6 +947,12 @@ async fn run(
                 }
             }
         }
+        // Tools can go away for several reasons after one has run: the round limit, repeated
+        // bad calls, or a context that no longer fits. Taking `tools` out of the request alone
+        // does not tell the model to answer: it may write another call as plain text instead.
+        if !tools_on && context.used_tools() {
+            context.force_final("No more tool calls are possible in this turn.");
+        }
         let room = target.ctx_size.saturating_sub(prompt_tokens);
         let effective_budget = budget.map(|tokens| tokens.min(room.saturating_sub(1024)).max(1));
         last_budget = effective_budget;
@@ -875,6 +982,12 @@ async fn run(
             break;
         }
         note_speed(&options.model_id, &state.timings);
+        // The end of the text was held back in case it grew into call text; it did not.
+        // This goes out before the round-ended event, which closes the speech phrase buffer.
+        if let Some(rest) = state.flush_held() {
+            slot.event("assistant:delta-round", json!({"request_id":slot.request_id,"round":round}));
+            slot.delta(Some(&rest), None);
+        }
         // Each call/result pair needs an unambiguous id even if the model duplicated one.
         let mut ids = HashSet::new();
         for call in state.calls.values_mut() {
@@ -920,6 +1033,29 @@ async fn run(
                 round += 1;
                 continue;
             }
+            #[cfg(test)]
+            if call_text_start(&state.content).is_some() && std::env::var("VR_TOOLS_DEBUG").is_ok() {
+                eprintln!(
+                    "[debug] unparsed call text (tools on: {tools_on}, finish {:?}, round {round}): {:?}",
+                    state.finish, state.content
+                );
+            }
+            // A reply that is only call text is not an answer, and the text is never shown.
+            if call_text_start(&state.content).is_some() && state.answer().trim().is_empty() {
+                if !recovery_tried {
+                    recovery_tried = true;
+                    context.force_final("Your last reply was a tool call written as text. It cannot run, and no tool can be used now.");
+                    tools_on = false;
+                    state = Completion {
+                        timings: state.timings.clone(),
+                        completion_tokens: state.completion_tokens,
+                        ..Completion::default()
+                    };
+                    round += 1;
+                    continue;
+                }
+                apologise(&slot, round, &mut state);
+            }
             break;
         }
         if !tools_on {
@@ -931,6 +1067,24 @@ async fn run(
                     call,
                     &error_outcome("skipped", "Tools are disabled for this final answer."),
                 );
+            }
+            // The model asked for a tool it cannot have. Unless it also wrote an answer, ask
+            // once more, then apologise: an empty answer tells the user nothing.
+            let answered = !state.answer().trim().is_empty();
+            state.calls.clear();
+            if !answered {
+                if !recovery_tried {
+                    recovery_tried = true;
+                    context.force_final("Your last reply asked for a tool, and no tool can be used now.");
+                    state = Completion {
+                        timings: state.timings.clone(),
+                        completion_tokens: state.completion_tokens,
+                        ..Completion::default()
+                    };
+                    round += 1;
+                    continue;
+                }
+                apologise(&slot, round, &mut state);
             }
             break;
         }
@@ -959,6 +1113,11 @@ async fn run(
                                 "skipped",
                                 "Already done in this turn; use the earlier result.",
                             )
+                        } else if call.name == "web_search" && search_down {
+                            error_outcome(
+                                "skipped",
+                                "Web search failed earlier in this turn and is not working right now. Do not search again. Answer from what you already have, or tell the user briefly that the search did not work.",
+                            )
                         } else if malformed > 1 {
                             error_outcome(
                                 "skipped",
@@ -971,13 +1130,17 @@ async fn run(
                             let future =
                                 options.services.execute(&call.name, &args, cancel.clone());
                             tokio::pin!(future);
-                            loop {
+                            let outcome = loop {
                                 cancelled(&options, &cancel);
                                 tokio::select! {
                                     outcome = &mut future => break outcome,
                                     _ = tokio::time::sleep(Duration::from_millis(20)) => {}
                                 }
+                            };
+                            if call.name == "web_search" && matches!(outcome.status.as_str(), "error" | "timeout") {
+                                search_down = true;
                             }
+                            outcome
                         }
                     }
                 }
@@ -1054,6 +1217,8 @@ mod tests {
     #[derive(Default)]
     struct Fixtures {
         calls: Mutex<Vec<String>>,
+        /// `web_search` fails, as it does when the provider refuses requests.
+        fail_search: bool,
         wait: bool,
         started: AtomicBool,
         ended: AtomicBool,
@@ -1088,6 +1253,9 @@ mod tests {
                     "Recorded fixture result.",
                 );
                 outcome.content=json!({"untrusted_tool_data":{"temperature":29,"city":"Singapore","result":391}}).to_string();
+                if name == "web_search" && self.fail_search {
+                    outcome = error_outcome("error", "Search is unavailable right now.");
+                }
                 outcome
             })
         }
@@ -1301,6 +1469,134 @@ mod tests {
         ));
         assert_eq!(events[events.len() - 2].0, "assistant:turn-metadata");
     }
+    fn text_chunk(text: &str, finish: Option<&str>) -> Value {
+        json!({"choices":[{"delta":{"content":text},"finish_reason":finish}]})
+    }
+    /// The answer text as the page and the speech queue received it.
+    fn shown(events: &[(String, Value)]) -> String {
+        events.iter().filter(|(n, _)| n == "delta").filter_map(|(_, p)| p["content"].as_str()).collect()
+    }
+    fn final_text(events: &[(String, Value)]) -> String {
+        events[events.len() - 2].1["final_text"].as_str().unwrap_or("<missing>").to_string()
+    }
+    fn chat_bodies(mock: &Mock) -> Vec<Value> {
+        mock.requests.lock().unwrap().iter().filter(|(p, _)| p == "/v1/chat/completions").map(|(_, b)| b.clone()).collect()
+    }
+    fn system_of(body: &Value) -> String {
+        body["messages"][0]["content"].as_str().unwrap().to_string()
+    }
+    const CALL_TEXT: &str = "<tool_call>\n<function=fetch_page>\n<parameter=url>\nhttps://example.com/a\n</parameter>\n</function>\n</tool_call>";
+
+    #[test]
+    fn call_text_markers_are_found_and_partial_ones_held() {
+        assert_eq!(call_text_start("Hi <tool_call>x"), Some(3));
+        assert_eq!(call_text_start("a <function=b>"), Some(2));
+        assert_eq!(call_text_start("1 < 2 and <b>bold</b>"), None);
+        assert_eq!(held_tail("go <tool_"), 6);
+        assert_eq!(held_tail("go <"), 1);
+        assert_eq!(held_tail("go <b"), 0);
+        assert_eq!(held_tail("plain"), 0);
+    }
+    #[tokio::test]
+    async fn tools_going_away_after_use_tells_the_model_to_answer() {
+        let mock = mock(Arc::new(|n, body| if body.get("tools").is_some() {
+            vec![tool_chunk(0, "get_weather", &json!({"city":format!("City {n}")}).to_string())]
+        } else { vec![answer_chunk()] }), false).await;
+        let (sink, _) = drive("recovery-note", 2, &mock, Arc::new(Fixtures::default())).await;
+        let events = sink.terminal().await;
+        assert_terminal_order(&events);
+        let bodies = chat_bodies(&mock);
+        assert_eq!(bodies.len(), 3);
+        assert!(!system_of(&bodies[0]).contains("App recovery"));
+        assert!(!system_of(&bodies[1]).contains("App recovery"), "tools are still on");
+        let last = system_of(&bodies[2]);
+        assert!(last.contains("App recovery: No more tool calls are possible"), "{last}");
+        assert!(last.contains("say so briefly instead of guessing"));
+        assert_eq!(final_text(&events), "It is 29 degrees.");
+    }
+    #[tokio::test]
+    async fn a_turn_that_never_used_tools_gets_no_recovery_note() {
+        let mock = mock(Arc::new(|_, _| vec![answer_chunk()]), false).await;
+        let (sink, _) = drive_selected("no-tools-no-note", 5, &mock, Arc::new(Fixtures::default()), ToolSelection::default()).await;
+        assert_terminal_order(&sink.terminal().await);
+        assert_eq!(system_of(&chat_bodies(&mock)[0]), "System");
+    }
+    #[tokio::test]
+    async fn call_text_is_never_shown_and_the_model_is_asked_again() {
+        // The call text arrives split across deltas, as a stream would deliver it.
+        let mock = mock(Arc::new(|n, body| if body.get("tools").is_some() {
+            vec![tool_chunk(0, "get_weather", r#"{"city":"Singapore"}"#)]
+        } else if n == 1 {
+            vec![text_chunk("<tool", None), text_chunk(&CALL_TEXT["<tool".len()..], Some("stop"))]
+        } else { vec![answer_chunk()] }), false).await;
+        let fixtures = Arc::new(Fixtures::default());
+        let (sink, _) = drive("call-text-recovered", 1, &mock, fixtures.clone()).await;
+        let events = sink.terminal().await;
+        assert_terminal_order(&events);
+        assert_eq!(mock.count.load(Ordering::SeqCst), 3);
+        assert_eq!(fixtures.calls.lock().unwrap().len(), 1, "call text is never executed");
+        assert_eq!(shown(&events), "It is 29 degrees.");
+        assert_eq!(final_text(&events), "It is 29 degrees.");
+        assert!(system_of(&chat_bodies(&mock)[2]).contains("tool call written as text"));
+    }
+    #[tokio::test]
+    async fn a_final_reply_of_only_call_text_twice_becomes_a_plain_apology() {
+        let mock = mock(Arc::new(|_, body| if body.get("tools").is_some() {
+            vec![tool_chunk(0, "get_weather", r#"{"city":"Singapore"}"#)]
+        } else { vec![text_chunk(CALL_TEXT, Some("stop"))] }), false).await;
+        let (sink, _) = drive("call-text-twice", 1, &mock, Arc::new(Fixtures::default())).await;
+        let events = sink.terminal().await;
+        assert_terminal_order(&events);
+        assert_eq!(mock.count.load(Ordering::SeqCst), 3, "one request, then one recovery");
+        assert_eq!(shown(&events), NO_ANSWER);
+        assert_eq!(final_text(&events), NO_ANSWER);
+        assert!(!shown(&events).contains('<'));
+    }
+    #[tokio::test]
+    async fn text_before_call_text_is_kept_and_the_call_text_cut() {
+        let mock = mock(Arc::new(|_, body| if body.get("tools").is_some() {
+            vec![tool_chunk(0, "get_weather", r#"{"city":"Singapore"}"#)]
+        } else {
+            vec![text_chunk("Verified.\n\n<tool_", None), text_chunk("call><function=fetch_page></function></tool_call>", Some("stop"))]
+        }), false).await;
+        let (sink, _) = drive("call-text-after-answer", 1, &mock, Arc::new(Fixtures::default())).await;
+        let events = sink.terminal().await;
+        assert_terminal_order(&events);
+        assert_eq!(mock.count.load(Ordering::SeqCst), 2, "a usable answer needs no recovery");
+        assert_eq!(shown(&events).trim(), "Verified.");
+        assert_eq!(final_text(&events), "Verified.");
+    }
+    #[tokio::test]
+    async fn a_lone_less_than_sign_is_not_lost() {
+        for (id, parts, expected) in [
+            ("less-than-middle", vec![text_chunk("if a <", None), text_chunk(" b then c", Some("stop"))], "if a < b then c"),
+            ("less-than-end", vec![text_chunk("x <", Some("stop"))], "x <"),
+        ] {
+            let mock = mock(Arc::new(move |_, _| parts.clone()), false).await;
+            let (sink, _) = drive_selected(id, 5, &mock, Arc::new(Fixtures::default()), ToolSelection::default()).await;
+            let events = sink.terminal().await;
+            assert_terminal_order(&events);
+            assert_eq!(shown(&events), expected);
+            assert_eq!(final_text(&events), expected);
+        }
+    }
+    #[tokio::test]
+    async fn a_failed_search_is_not_repeated_in_the_same_turn() {
+        let mock = mock(Arc::new(|n, body| if body.get("tools").is_some() {
+            vec![tool_chunk(0, "web_search", &json!({"query":format!("opening hours {n}")}).to_string())]
+        } else { vec![answer_chunk()] }), false).await;
+        let fixtures = Arc::new(Fixtures { fail_search: true, ..Fixtures::default() });
+        let (sink, _) = drive("search-down", 5, &mock, fixtures.clone()).await;
+        let events = sink.terminal().await;
+        assert_terminal_order(&events);
+        assert_eq!(fixtures.calls.lock().unwrap().len(), 1, "only the first search reaches the provider");
+        let statuses: Vec<_> = events.iter().filter(|(n, _)| n == "assistant:tool-result").map(|(_, p)| p["status"].as_str().unwrap().to_string()).collect();
+        assert_eq!(statuses, ["error", "skipped", "skipped", "skipped", "skipped"]);
+        let last = chat_bodies(&mock).pop().unwrap();
+        let tool_messages: Vec<_> = last["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").collect();
+        assert!(tool_messages[1]["content"].as_str().unwrap().contains("Do not search again"));
+        assert_eq!(final_text(&events), "It is 29 degrees.");
+    }
     #[tokio::test]
     async fn selected_schemas_and_loop_authorization_exclude_disabled_calls() {
         let mock = mock(Arc::new(|n, _| if n == 0 {
@@ -1332,7 +1628,9 @@ mod tests {
         let events = sink.terminal().await;
         assert_terminal_order(&events);
         assert!(fixtures.calls.lock().unwrap().is_empty());
-        assert_eq!(mock.count.load(Ordering::SeqCst),1);
+        // The invented call gets one recovery request, then the user a plain apology.
+        assert_eq!(mock.count.load(Ordering::SeqCst),2);
+        assert_eq!(final_text(&events), NO_ANSWER);
         assert!(mock.requests.lock().unwrap().iter().all(|(_,body)|body.get("tools").is_none()));
         assert!(events.iter().any(|(n,p)|n=="assistant:tool-result" && p["status"]=="skipped"));
     }
@@ -1648,7 +1946,7 @@ mod tests {
             let mut system = "You help.".to_string();
             let mut messages = vec![message("user", "Hi"), message("assistant", "Hello"), message("user", "Weather?")];
             let selection = ToolSelection::resolve(Some(true), Some(vec!["get_weather".into()])).unwrap();
-            add_turn_context(&mut system, &mut messages, &selection, false, &tz.with_ymd_and_hms(2026, 10, 20, hour, minute, 0).unwrap());
+            add_turn_context(&mut system, &mut messages, &selection, false, "", &tz.with_ymd_and_hms(2026, 10, 20, hour, minute, 0).unwrap());
             (system, messages)
         };
         let (morning, messages) = prepare(8, 5);
@@ -1660,7 +1958,7 @@ mod tests {
         assert_eq!(messages[2].text, "Weather?\n\n(Local time when sent: 08:05)");
         let mut system = "You help.".to_string();
         let mut plain = vec![message("user", "Hi")];
-        add_turn_context(&mut system, &mut plain, &ToolSelection::resolve(Some(false), None).unwrap(), true, &tz.with_ymd_and_hms(2026, 10, 20, 8, 5, 0).unwrap());
+        add_turn_context(&mut system, &mut plain, &ToolSelection::resolve(Some(false), None).unwrap(), true, "", &tz.with_ymd_and_hms(2026, 10, 20, 8, 5, 0).unwrap());
         assert_eq!(system, "You help.\n\nToday's date: Tuesday, 20 October 2026.", "without tools only the date is added");
         assert_eq!(plain[0].text, "Hi", "and the user message is unchanged");
     }
@@ -1980,14 +2278,50 @@ mod tests {
             env("VR_TOOLS_TEMPLATE_SHA256").to_lowercase(),
             "template pin differs"
         );
+        // Experiment switches. Any of them makes the run an experiment: it prints its results
+        // and is never reported as qualified, so only an unmodified run can be evidence.
+        let only_cases: Option<Vec<String>> = std::env::var("VR_TOOLS_CASES")
+            .ok()
+            .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+        let modes: Vec<bool> = match std::env::var("VR_TOOLS_MODES").ok().as_deref() {
+            Some("chat") => vec![false],
+            Some("voice") => vec![true],
+            _ => vec![false, true],
+        };
+        let seeds: Vec<u32> = std::env::var("VR_TOOLS_SEEDS")
+            .ok()
+            .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect::<Vec<u32>>())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| vec![1, 2, 3]);
+        // Thinking. `VR_TOOLS_THINKING=app-defaults` is a protocol choice, not an experiment: it
+        // runs each mode with the app's default (Chat thinks, Voice does not), and the report
+        // records it. `VR_TOOLS_THINK=1` forces thinking in both modes and is an experiment.
+        let think_defaults = std::env::var("VR_TOOLS_THINKING").is_ok_and(|v| v == "app-defaults");
+        let think_all = std::env::var("VR_TOOLS_THINK").is_ok_and(|v| v == "1");
+        let forced = model.tools_need_thinking;
+        let think_for = move |voice: bool| forced || think_all || (think_defaults && !voice);
+        let think = think_all;
+        let temperature = std::env::var("VR_TOOLS_TEMPERATURE").ok().and_then(|v| v.parse::<f32>().ok());
+        let policy_time = std::env::var("VR_TOOLS_POLICY_TIME")
+            .unwrap_or_else(|_| fixture["policy_time"].as_str().unwrap().to_string());
+        let extra_system = std::env::var("VR_TOOLS_EXTRA_SYSTEM").unwrap_or_default();
+        let experiment = only_cases.is_some()
+            || modes.len() != 2
+            || seeds != [1, 2, 3]
+            || think
+            || temperature.is_some()
+            || policy_time != fixture["policy_time"].as_str().unwrap()
+            || !extra_system.is_empty();
         let mut records = vec![];
         let mut all_pass = true;
-        for voice in [false, true] {
+        for voice in modes.iter().copied() {
             let mut passes = 0;
             let mut hard_pass = true;
-            for case in fixture["cases"].as_array().unwrap() {
+            for case in fixture["cases"].as_array().unwrap().iter().filter(|case| {
+                only_cases.as_ref().is_none_or(|only| only.iter().any(|id| case["id"] == id.as_str()))
+            }) {
                 let mut seeds_pass = 0;
-                for seed in [1, 2, 3] {
+                for seed in seeds.iter().copied() {
                     let id = format!(
                         "real-{}-{}-{voice}-{seed}",
                         model.id,
@@ -2008,6 +2342,7 @@ mod tests {
                         seed: Some(seed),
                     };
                     let mut request = request(&id);
+                    request.think = think_for(voice);
                     request.messages[0].text = if voice {
                         case.get("voice_prompt").unwrap_or(&case["prompt"])
                     } else {
@@ -2017,21 +2352,22 @@ mod tests {
                     .unwrap()
                     .into();
                     request.sampling = Some(chat::Sampling {
-                        temperature: model.sampling.temperature,
+                        temperature: temperature.unwrap_or(model.sampling.temperature),
                         top_p: model.sampling.top_p,
                         top_k: model.sampling.top_k,
                         min_p: model.sampling.min_p,
                         repeat_penalty: model.sampling.repeat_penalty,
-                        max_tokens: Some(4096),
+                        max_tokens: Some(if think_for(voice) { 8192 } else { 4096 }),
                     });
                     let system = format!(
-                        "{}{}",
+                        "{}{}{}{extra_system}",
                         if voice {
                             chat::DEFAULT_VOICE_PROMPT
                         } else {
                             chat::DEFAULT_CHAT_PROMPT
                         },
-                        tools::prompt_at(voice, fixture["policy_time"].as_str().unwrap())
+                        tools::prompt_at(voice, &policy_time),
+                        model.tools_guidance
                     );
                     let mut context = Context::new(&system, &request.messages);
                     let target = target(base_url.clone());
@@ -2048,7 +2384,7 @@ mod tests {
                         &mut context,
                         &definitions,
                         &mut tools_on,
-                        false,
+                        think_for(voice),
                         2048,
                     )
                     .await
@@ -2076,7 +2412,9 @@ mod tests {
                             context,
                             definitions,
                             tools_on,
-                            None,
+                            // Voice thinking is capped as the app caps it before it has measured the
+                            // model's speed (about 15 s at 16 tokens/s); Chat thinking is unlimited.
+                            if voice && think_for(true) { Some(240) } else { None },
                             2048,
                             prompt_tokens,
                         ),
@@ -2125,9 +2463,14 @@ mod tests {
                                     name == "assistant:tool-result"
                                         && p["name"] == "run_python"
                                         && p["status"] == "ok"
-                                        && p["output"].as_str().unwrap_or("").lines().any(|line| {
-                                            line.trim().replace(',', "") == "333383335000"
-                                        })
+                                        // The correct sum anywhere in the output, so a labelled
+                                        // line ("sum = 333383335000") counts like a bare number.
+                                        && p["output"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .replace(',', "")
+                                            .split(|c: char| !c.is_ascii_digit())
+                                            .any(|token| token == "333383335000")
                                 }));
                     // Hard structural invariants hold on every seed, independently of score.
                     let executed = events
@@ -2147,6 +2490,14 @@ mod tests {
                     if passed {
                         seeds_pass += 1;
                     }
+                    eprintln!(
+                        "  {} {} seed {seed}: {} calls={:?} answer={:?}",
+                        case["id"].as_str().unwrap(),
+                        if voice { "voice" } else { "chat" },
+                        if passed { "pass" } else { "FAIL" },
+                        calls.iter().map(|(name, args)| format!("{name}{args}")).collect::<Vec<_>>(),
+                        answer.chars().take(160).collect::<String>()
+                    );
                     records.push(json!({"model":model.id,"voice":voice,"case":case["id"],"seed":seed,"passed":passed,"calls":calls,"tool_results":events.iter().filter(|(name,_)|name=="assistant:tool-result").map(|(_,payload)|payload).collect::<Vec<_>>(),"final_text":answer}));
                 }
                 let passed = seeds_pass >= 2;
@@ -2164,12 +2515,16 @@ mod tests {
                 if voice { "voice" } else { "chat" }
             );
         }
-        let policy_time = fixture["policy_time"].as_str().unwrap();
-        let report = json!({"protocol":fixture["protocol"],"model":model.id,"model_sha256":model.weights.sha256,"model_revision":model.revision,"server_build":"b11718","server_sha256":server_hash,"template_sha256":template_hash,"fixture_sha256":format!("{:x}",Sha256::digest(include_bytes!("../tests-data/tools/model-cases.json"))),"tools_sha256":format!("{:x}",Sha256::digest(tools::definitions().to_string().as_bytes())),"chat_prompt_sha256":format!("{:x}",Sha256::digest(format!("{}{}",chat::DEFAULT_CHAT_PROMPT,tools::prompt_at(false,policy_time)).as_bytes())),"voice_prompt_sha256":format!("{:x}",Sha256::digest(format!("{}{}",chat::DEFAULT_VOICE_PROMPT,tools::prompt_at(true,policy_time)).as_bytes())),"sampling":model.sampling,"thinking":false,"qualified":all_pass,"records":records});
+        let policy_time = policy_time.as_str();
+        let report = json!({"experiment":experiment,"protocol":fixture["protocol"],"model":model.id,"model_sha256":model.weights.sha256,"model_revision":model.revision,"server_build":"b11718","server_sha256":server_hash,"template_sha256":template_hash,"fixture_sha256":format!("{:x}",Sha256::digest(include_bytes!("../tests-data/tools/model-cases.json"))),"tools_sha256":format!("{:x}",Sha256::digest(tools::definitions().to_string().as_bytes())),"chat_prompt_sha256":format!("{:x}",Sha256::digest(format!("{}{}{}",chat::DEFAULT_CHAT_PROMPT,tools::prompt_at(false,policy_time),model.tools_guidance).as_bytes())),"voice_prompt_sha256":format!("{:x}",Sha256::digest(format!("{}{}{}",chat::DEFAULT_VOICE_PROMPT,tools::prompt_at(true,policy_time),model.tools_guidance).as_bytes())),"sampling":model.sampling,"thinking":{"chat":think_for(false),"voice":think_for(true)},"qualified":all_pass && !experiment,"records":records});
         if let Ok(path) = std::env::var("VR_TOOLS_REPORT_PATH") {
             std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         } else {
             eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
+        }
+        if experiment {
+            eprintln!("Experiment run: results are printed above and no qualification is claimed.");
+            return;
         }
         assert!(
             all_pass,

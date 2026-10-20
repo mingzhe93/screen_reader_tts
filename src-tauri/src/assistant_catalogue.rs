@@ -8,7 +8,7 @@ pub(crate) const BACKEND_VERSION: &str = "b11718";
 
 /// Populated only after the pinned 12-case/three-seed tool evaluation passes.
 /// A model remains usable with tools after the explicit reliability warning.
-pub(crate) const TOOLS_VERIFIED_MODELS: &[&str] = &["gemma-4-e4b", "gemma-4-12b"];
+pub(crate) const TOOLS_VERIFIED_MODELS: &[&str] = &["gemma-4-e4b", "gemma-4-12b", "mimo-v2.6-9b"];
 
 const BACKEND_RELEASE_URL: &str = "https://github.com/ggml-org/llama.cpp/releases/download";
 
@@ -91,6 +91,13 @@ pub(crate) struct CatalogueModel {
     pub memory: MemoryEstimate,
     /// The sampling settings the model's publisher recommends; the panel's defaults.
     pub sampling: SamplingDefaults,
+    /// Extra lines for the app's tools policy, for a model that needs them to use tools
+    /// reliably. Empty for models that qualify without. Appended right after the policy, and
+    /// part of the text the qualification report pins, so changing it needs a new report.
+    pub tools_guidance: &'static str,
+    /// The model only uses tools reliably while it thinks, so thinking is on for any turn with
+    /// tools, whatever the Think toggle says. Qualification runs the same way.
+    pub tools_need_thinking: bool,
 }
 
 /// Sampling settings sent with each request. llama.cpp's own defaults (temperature 0.8,
@@ -107,6 +114,19 @@ pub(crate) struct SamplingDefaults {
 /// From the Gemma 4 model cards: "temperature=1.0, top_p=0.95, top_k=64" for all uses.
 const GEMMA4_SAMPLING: SamplingDefaults =
     SamplingDefaults { temperature: 1.0, top_p: 0.95, top_k: 64, min_p: 0.0, repeat_penalty: 1.0 };
+
+/// MiniCPM calls tools for greetings, rewrites and plain arithmetic, answers prices from
+/// memory and guesses a city for the weather. Measured on the recorded cases: without these
+/// lines and without thinking it passes 7 of 12 in Chat; with both it passes 11 of 12 in each
+/// mode with every hard case. See `docs/assistant/tools.md`.
+const MINICPM_TOOLS_GUIDANCE: &str = " Only call a tool when the user asks for something current (a price, news, the weather), gives you a web page, or asks for Python or a long exact calculation. Never call a tool for a greeting, an explanation, rewriting text or simple arithmetic: answer those yourself. web_search finds current information of any kind, including stock prices and news. If the user does not name a place for the weather, ask which place; never choose one. For any weather question call get_weather.";
+
+/// MiMo answers from memory instead of calling a tool, in Voice (where it does not think) and
+/// most of all for current prices, news and exact sums. It also guesses a city for the weather
+/// instead of asking. Measured on the recorded cases: without these lines Voice passes 10 of
+/// 12 and fails the Python case that must pass; with them it passes 12 of 12. See
+/// `docs/assistant/tools.md`.
+const MIMO_TOOLS_GUIDANCE: &str = " Never state a current price, weather, news item, date or exact calculation from memory: call the matching tool first and answer only from its result. web_search finds current information of any kind, including stock prices and news. If the user does not name a place for the weather, ask which place; never choose one. For any weather question call get_weather. For an exact calculation, or whenever the user asks for Python, call run_python and print the result.";
 
 /// Memory the server needs for a model, linear in context length. Split into two pools,
 /// because on a discrete GPU part of a model stays in system RAM (plan §5.3).
@@ -187,6 +207,8 @@ pub(crate) const MODELS: [CatalogueModel; 4] = [
         },
         // From the MiniCPM-V 4.7 model card's "recommended instruct-mode sampling parameters".
         sampling: SamplingDefaults { temperature: 0.7, top_p: 0.95, top_k: 100, min_p: 0.0, repeat_penalty: 1.03 },
+        tools_guidance: MINICPM_TOOLS_GUIDANCE,
+        tools_need_thinking: true,
     },
     CatalogueModel {
         id: "gemma-4-e4b",
@@ -217,6 +239,8 @@ pub(crate) const MODELS: [CatalogueModel; 4] = [
             measured: true,
         },
         sampling: GEMMA4_SAMPLING,
+        tools_guidance: "",
+        tools_need_thinking: false,
     },
     CatalogueModel {
         id: "mimo-v2.6-9b",
@@ -254,6 +278,8 @@ pub(crate) const MODELS: [CatalogueModel; 4] = [
         },
         // From the model's generation_config.json (also in the GGUF's general.sampling.*).
         sampling: SamplingDefaults { temperature: 0.6, top_p: 0.95, top_k: 20, min_p: 0.0, repeat_penalty: 1.0 },
+        tools_guidance: MIMO_TOOLS_GUIDANCE,
+        tools_need_thinking: false,
     },
     CatalogueModel {
         id: "gemma-4-12b",
@@ -284,6 +310,8 @@ pub(crate) const MODELS: [CatalogueModel; 4] = [
             measured: true,
         },
         sampling: GEMMA4_SAMPLING,
+        tools_guidance: "",
+        tools_need_thinking: false,
     },
 ];
 
@@ -317,6 +345,16 @@ pub(crate) fn models() -> &'static [CatalogueModel] {
     &MODELS
 }
 
+/// Whether the model uses tools reliably only while it thinks.
+pub(crate) fn tools_need_thinking(model_id: &str) -> bool {
+    model_by_id(model_id).is_some_and(|model| model.tools_need_thinking)
+}
+
+/// The model's extra tools-policy lines; empty for an unknown model.
+pub(crate) fn tools_guidance_for(model_id: &str) -> &'static str {
+    model_by_id(model_id).map_or("", |model| model.tools_guidance)
+}
+
 pub(crate) fn model_by_id(id: &str) -> Option<&'static CatalogueModel> {
     MODELS.iter().find(|model| model.id == id)
 }
@@ -329,14 +367,22 @@ mod tests {
     fn verified_tools_require_current_pins_and_passing_recorded_qualification() {
         use sha2::{Digest, Sha256};
         let reports = [
-            ("gemma-4-e4b", include_str!("../../docs/benchmarks/assistant-tools/2026-10-19-gemma-4-e4b-decimal-voice.json")),
-            ("gemma-4-12b", include_str!("../../docs/benchmarks/assistant-tools/2026-10-19-gemma-4-12b-decimal-voice.json")),
+            ("gemma-4-e4b", include_str!("../../docs/benchmarks/assistant-tools/2026-10-20-gemma-4-e4b-recheck.json")),
+            ("gemma-4-12b", include_str!("../../docs/benchmarks/assistant-tools/2026-10-20-gemma-4-12b-recheck.json")),
+            // Qualified with the model's own tools guidance, Chat thinking on and Voice off.
+            ("mimo-v2.6-9b", include_str!("../../docs/benchmarks/assistant-tools/2026-10-20-mimo-v2.6-9b-guided.json")),
         ];
         assert_eq!(TOOLS_VERIFIED_MODELS, &reports.map(|(id,_)|id));
         for (id, text) in reports {
         let report: serde_json::Value = serde_json::from_str(text).unwrap();
         let model = model_by_id(id).unwrap();
         assert_eq!(report["qualified"], true);
+        // Voice thinks only when the model needs it (that is the app's default and its rule); a
+        // model that needs thinking must have been qualified with Chat thinking as well.
+        assert_eq!(report["thinking"]["voice"], model.tools_need_thinking, "{id}");
+        if model.tools_need_thinking {
+            assert_eq!(report["thinking"]["chat"], true, "{id}");
+        }
         assert_eq!(report["model_sha256"], model.weights.sha256);
         assert_eq!(report["model_revision"], model.revision);
         assert_eq!(report["server_build"], BACKEND_VERSION);
@@ -345,7 +391,7 @@ mod tests {
         assert_eq!(report["fixture_sha256"], format!("{:x}",Sha256::digest(include_bytes!("../tests-data/tools/model-cases.json"))));
         let time = fixture["policy_time"].as_str().unwrap();
         for (voice, prompt, field) in [(false, crate::assistant_chat::DEFAULT_CHAT_PROMPT, "chat_prompt_sha256"), (true, crate::assistant_chat::DEFAULT_VOICE_PROMPT, "voice_prompt_sha256")] {
-            assert_eq!(report[field], format!("{:x}",Sha256::digest(format!("{prompt}{}",crate::assistant_tools::prompt_at(voice,time)).as_bytes())));
+            assert_eq!(report[field], format!("{:x}",Sha256::digest(format!("{prompt}{}{}",crate::assistant_tools::prompt_at(voice,time),model.tools_guidance).as_bytes())));
             let mut passes = 0;
             for case in fixture["cases"].as_array().unwrap() {
                 let records: Vec<_> = report["records"].as_array().unwrap().iter().filter(|r|r["voice"]==voice && r["case"]==case["id"]).collect();

@@ -4,6 +4,7 @@
 // tree of plain data (no DOM), and `renderMarkdown` builds elements from that tree with
 // createElement + textContent only. Raw HTML, images and unsupported syntax stay literal text.
 // Links render as inert buttons and open in the system browser only for http(s) URLs.
+// Pipe tables (the GitHub style) are supported; their cells are inline text like any paragraph.
 
 import { open as openExternal } from "@tauri-apps/api/shell";
 
@@ -28,12 +29,19 @@ export type MdBlock =
   | { type: "code"; lang: string; text: string; closed: boolean }
   | { type: "list"; ordered: boolean; start: number; items: MdListItem[] }
   | { type: "quote"; blocks: MdBlock[] }
+  /** `align`, `header` and every row have one entry per column. */
+  | { type: "table"; align: MdTableAlign[]; header: MdInline[][]; rows: MdInline[][][] }
   | { type: "hr" };
+
+export type MdTableAlign = "left" | "center" | "right" | null;
 
 type ListBlock = Extract<MdBlock, { type: "list" }>;
 
 const MAX_INLINE_DEPTH = 4;
 const MAX_BLOCK_DEPTH = 3;
+/** Wider tables, and rows beyond the limit, stay ordinary text: a table is for reading, not storing. */
+const MAX_TABLE_COLUMNS = 24;
+const MAX_TABLE_ROWS = 500;
 /** How far ahead a closing emphasis marker is searched for. Keeps unmatched markers cheap. */
 const EMPHASIS_WINDOW = 1000;
 /** Longest link target that is parsed; longer ones stay literal text. */
@@ -353,14 +361,99 @@ function parseBlocks(lines: string[], depth: number): MdBlock[] {
       continue;
     }
 
+    const table = parseTable(lines, i);
+    if (table) {
+      blocks.push(table.block);
+      i = table.next;
+      continue;
+    }
+
     const paragraph: string[] = [];
-    while (i < lines.length && lines[i].trim() && (paragraph.length === 0 || !startsBlock(lines[i]))) {
+    while (i < lines.length && lines[i].trim() && (paragraph.length === 0 || !(startsBlock(lines[i]) || startsTable(lines, i)))) {
       paragraph.push(lines[i].replace(/^[ \t]+/, ""));
       i += 1;
     }
     blocks.push({ type: "paragraph", inline: parseInline(paragraph.join("\n")) });
   }
   return blocks;
+}
+
+const TABLE_DELIMITER_CELL = /^:?-+:?$/;
+
+/**
+ * Splits one table row into its cell texts. Cells end at a pipe that is not escaped; one pipe at
+ * each end of the row is decoration. `\|` is a literal pipe inside a cell.
+ */
+function splitTableRow(line: string): string[] {
+  let src = line.trim();
+  if (src.startsWith("|")) src = src.slice(1);
+  const trailingPipe = src.endsWith("|") && !src.endsWith("\\|");
+  const cells: string[] = [];
+  let cell = "";
+  for (let i = 0; i < src.length; i += 1) {
+    const char = src[i];
+    if (char === "\\" && src[i + 1] === "|") {
+      cell += "|";
+      i += 1;
+    } else if (char === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  if (!trailingPipe) cells.push(cell.trim());
+  return cells;
+}
+
+/** The column alignments of a delimiter row (`| --- | :-: |`), or null when `line` is not one. */
+function parseTableDelimiter(line: string): MdTableAlign[] | null {
+  if (!line.includes("|") || !/^[\s|:-]+$/.test(line) || !line.includes("-")) return null;
+  const cells = splitTableRow(line);
+  if (cells.length === 0 || cells.length > MAX_TABLE_COLUMNS) return null;
+  const align: MdTableAlign[] = [];
+  for (const cell of cells) {
+    if (!TABLE_DELIMITER_CELL.test(cell)) return null;
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    align.push(left && right ? "center" : right ? "right" : left ? "left" : null);
+  }
+  return align;
+}
+
+/** A header row followed by a delimiter row with the same number of columns. */
+function tableHead(lines: string[], from: number): { header: string[]; align: MdTableAlign[] } | null {
+  const head = lines[from];
+  if (from + 1 >= lines.length || !head.includes("|")) return null;
+  const align = parseTableDelimiter(lines[from + 1]);
+  if (!align) return null;
+  const header = splitTableRow(head);
+  return header.length === align.length ? { header, align } : null;
+}
+
+function startsTable(lines: string[], from: number): boolean {
+  return tableHead(lines, from) !== null;
+}
+
+function parseTable(lines: string[], from: number): { block: MdBlock; next: number } | null {
+  const head = tableHead(lines, from);
+  if (!head) return null;
+  const columns = head.align.length;
+  const rows: MdInline[][][] = [];
+  let i = from + 2;
+  // Rows continue until a blank line, a line without a pipe, or another block. A row still being
+  // streamed may have fewer cells than the header: it is padded, and extra cells are dropped.
+  while (i < lines.length && rows.length < MAX_TABLE_ROWS && lines[i].trim() && lines[i].includes("|") && !startsBlock(lines[i])) {
+    const cells = splitTableRow(lines[i]);
+    const row: MdInline[][] = [];
+    for (let column = 0; column < columns; column += 1) row.push(parseInline(cells[column] ?? ""));
+    rows.push(row);
+    i += 1;
+  }
+  return {
+    block: { type: "table", align: head.align, header: head.header.map((cell) => parseInline(cell)), rows },
+    next: i,
+  };
 }
 
 function newList(marker: string): ListBlock {
@@ -481,6 +574,9 @@ function blocksToPlain(blocks: MdBlock[]): string {
       case "quote":
         parts.push(blocksToPlain(block.blocks));
         break;
+      case "table":
+        parts.push([block.header, ...block.rows].map((row) => row.map(inlineToPlain).join(" | ")).join("\n"));
+        break;
       case "hr":
         break;
     }
@@ -566,6 +662,30 @@ function renderList(list: ListBlock): HTMLElement {
   return el;
 }
 
+function renderTable(block: Extract<MdBlock, { type: "table" }>): HTMLElement {
+  // A wide table scrolls sideways inside its own box instead of stretching the conversation.
+  const wrap = document.createElement("div");
+  wrap.className = "md-table-wrap";
+  const table = document.createElement("table");
+  table.className = "md-table";
+  const fill = (row: HTMLTableRowElement, cells: MdInline[][], tag: "th" | "td") => {
+    cells.forEach((inline, column) => {
+      const cell = document.createElement(tag);
+      if (tag === "th") cell.scope = "col";
+      const align = block.align[column];
+      if (align) cell.style.textAlign = align;
+      renderInline(inline, cell);
+      row.appendChild(cell);
+    });
+  };
+  const head = table.createTHead().insertRow();
+  fill(head, block.header, "th");
+  const body = table.createTBody();
+  for (const cells of block.rows) fill(body.insertRow(), cells, "td");
+  wrap.appendChild(table);
+  return wrap;
+}
+
 function renderBlock(block: MdBlock): HTMLElement {
   switch (block.type) {
     case "paragraph": {
@@ -596,6 +716,8 @@ function renderBlock(block: MdBlock): HTMLElement {
       for (const child of block.blocks) el.appendChild(renderBlock(child));
       return el;
     }
+    case "table":
+      return renderTable(block);
     case "hr":
       return document.createElement("hr");
   }

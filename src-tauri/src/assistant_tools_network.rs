@@ -21,7 +21,7 @@ const WEATHER_CAP: usize = 256_000;
 const PAGE_CAP: usize = 2_000_000;
 const PAGE_CHARS: usize = 24_000;
 const SEARCH_UNAVAILABLE: &str =
-    "Search is unavailable right now. You can add a Brave Search key in Settings.";
+    "Search is unavailable right now. You can add a Brave Search key in the Tools menu on the Assistant page (Web search, Settings).";
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SearchResult {
